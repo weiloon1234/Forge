@@ -1,0 +1,5 @@
+error: unsupported forge field attribute
+ --> tests/ui/derive/fail_unsupported_model_field_attr.rs:9:13
+  |
+9 |     #[forge(unique)]
+  |             ^^^^^^

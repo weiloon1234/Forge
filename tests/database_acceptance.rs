@@ -1,0 +1,2096 @@
+use std::fs;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
+use forge::config::DatabaseConfig;
+use forge::prelude::*;
+use futures_util::TryStreamExt;
+use tempfile::TempDir;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+const USERS_TABLE: &str = "forge_test_users";
+const MERCHANTS_TABLE: &str = "forge_test_merchants";
+const ORDERS_TABLE: &str = "forge_test_orders";
+const ORDER_ITEMS_TABLE: &str = "forge_test_order_items";
+const PRODUCTS_TABLE: &str = "forge_test_products";
+const TAGS_TABLE: &str = "forge_test_tags";
+const MERCHANT_TAGS_TABLE: &str = "forge_test_merchant_tags";
+const PAYMENTS_TABLE: &str = "forge_test_payments";
+
+fn database_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn postgres_url() -> Option<String> {
+    std::env::var("FORGE_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn test_database() -> Option<DatabaseManager> {
+    let url = postgres_url()?;
+    Some(
+        DatabaseManager::from_config(&DatabaseConfig {
+            url,
+            ..DatabaseConfig::default()
+        })
+        .await
+        .unwrap(),
+    )
+}
+
+struct TestAppRuntime {
+    _dir: TempDir,
+    app: AppContext,
+    database: std::sync::Arc<DatabaseManager>,
+}
+
+#[derive(Clone)]
+struct NoopProvider;
+
+#[async_trait]
+impl ServiceProvider for NoopProvider {}
+
+async fn test_app_runtime() -> Option<TestAppRuntime> {
+    test_app_runtime_with_provider(NoopProvider).await
+}
+
+async fn test_app_runtime_with_provider<P>(provider: P) -> Option<TestAppRuntime>
+where
+    P: ServiceProvider,
+{
+    let url = postgres_url()?;
+    let dir = tempfile::tempdir().ok()?;
+    fs::write(
+        dir.path().join("00-runtime.toml"),
+        format!(
+            r#"
+            [database]
+            url = "{url}"
+            "#
+        ),
+    )
+    .ok()?;
+
+    let kernel = App::builder()
+        .load_config_dir(dir.path())
+        .register_provider(provider)
+        .build_cli_kernel()
+        .await
+        .ok()?;
+    let app = kernel.app().clone();
+    let database = app.database().ok()?;
+
+    Some(TestAppRuntime {
+        _dir: dir,
+        app,
+        database,
+    })
+}
+
+async fn execute_batch(database: &DatabaseManager, statements: &[&str]) {
+    for statement in statements {
+        database.raw_execute(statement, &[]).await.unwrap();
+    }
+}
+
+async fn reset_schema(database: &DatabaseManager) {
+    execute_batch(
+        database,
+        &[
+            &format!("DROP TABLE IF EXISTS {ORDER_ITEMS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {MERCHANT_TAGS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {ORDERS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {TAGS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {PAYMENTS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {MERCHANTS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {PRODUCTS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {USERS_TABLE}"),
+            &format!(
+                "CREATE TABLE {USERS_TABLE} (id BIGINT PRIMARY KEY, email TEXT NOT NULL, active BOOLEAN NOT NULL, nickname TEXT NULL, metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb)"
+            ),
+            &format!(
+                "CREATE TABLE {MERCHANTS_TABLE} (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {ORDERS_TABLE} (id BIGINT PRIMARY KEY, merchant_id BIGINT NOT NULL, total BIGINT NOT NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {PRODUCTS_TABLE} (id BIGINT PRIMARY KEY, name TEXT NOT NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {TAGS_TABLE} (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, name TEXT NOT NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {MERCHANT_TAGS_TABLE} (merchant_id BIGINT NOT NULL, tag_id BIGINT NOT NULL, role TEXT NOT NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {PAYMENTS_TABLE} (id BIGINT PRIMARY KEY, merchant_id BIGINT NOT NULL, amount NUMERIC NOT NULL, metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb)"
+            ),
+            &format!(
+                "CREATE TABLE {ORDER_ITEMS_TABLE} (id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL, product_id BIGINT NOT NULL, quantity BIGINT NOT NULL)"
+            ),
+        ],
+    )
+    .await;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MerchantStatus {
+    Active,
+    Suspended,
+}
+
+impl ToDbValue for MerchantStatus {
+    fn to_db_value(self) -> DbValue {
+        match self {
+            Self::Active => "active".into(),
+            Self::Suspended => "suspended".into(),
+        }
+    }
+}
+
+impl FromDbValue for MerchantStatus {
+    fn from_db_value(value: &DbValue) -> Result<Self> {
+        match value {
+            DbValue::Text(value) if value == "active" => Ok(Self::Active),
+            DbValue::Text(value) if value == "suspended" => Ok(Self::Suspended),
+            DbValue::Text(_) => Err(Error::message("unknown merchant status")),
+            DbValue::Null(_) => Err(Error::message("expected merchant status, found null")),
+            _ => Err(Error::message("expected merchant status text value")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE)]
+struct User {
+    id: i64,
+    email: String,
+    active: bool,
+    nickname: Option<String>,
+    merchants: Loaded<Vec<Merchant>>,
+    merchant_count: Loaded<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = MERCHANTS_TABLE)]
+struct Merchant {
+    id: i64,
+    user_id: i64,
+    name: String,
+    #[forge(db_type = "text")]
+    status: MerchantStatus,
+    orders: Loaded<Vec<Order>>,
+    order_total: Loaded<Option<i64>>,
+    tags: Loaded<Vec<Tag>>,
+    tag_count: Loaded<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = ORDERS_TABLE)]
+struct Order {
+    id: i64,
+    merchant_id: i64,
+    total: i64,
+    items: Loaded<Vec<OrderItem>>,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = ORDER_ITEMS_TABLE)]
+struct OrderItem {
+    id: i64,
+    order_id: i64,
+    product_id: i64,
+    quantity: i64,
+    product: Loaded<Option<Product>>,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = PRODUCTS_TABLE)]
+struct Product {
+    id: i64,
+    name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = TAGS_TABLE)]
+struct Tag {
+    id: i64,
+    user_id: i64,
+    name: String,
+    link: Loaded<MerchantTagLink>,
+    creator: Loaded<Option<TagCreator>>,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE)]
+struct TagCreator {
+    id: i64,
+    email: String,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Projection)]
+struct MerchantTagLink {
+    #[forge(source = "role")]
+    role: String,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Projection)]
+struct UserPreferenceRow {
+    #[forge(source = "email")]
+    email: String,
+    #[forge(source = "status_label")]
+    status_label: String,
+    #[forge(source = "theme")]
+    theme: String,
+}
+
+#[derive(Clone, Debug, PartialEq, forge::Projection)]
+struct CombinedLabelRow {
+    label: String,
+    kind: String,
+}
+
+#[derive(Default)]
+struct LifecycleLog {
+    entries: Mutex<Vec<String>>,
+}
+
+impl LifecycleLog {
+    async fn push(&self, entry: impl Into<String>) {
+        self.entries.lock().await.push(entry.into());
+    }
+
+    async fn snapshot(&self) -> Vec<String> {
+        self.entries.lock().await.clone()
+    }
+
+    async fn clear(&self) {
+        self.entries.lock().await.clear();
+    }
+}
+
+#[derive(Clone, serde::Serialize)]
+struct LifecycleCustomEvent {
+    phase: String,
+}
+
+impl Event for LifecycleCustomEvent {
+    const ID: EventId = EventId::new("test.lifecycle.custom");
+}
+
+#[derive(Clone)]
+struct LifecycleTestProvider {
+    log: std::sync::Arc<LifecycleLog>,
+    fail_created: bool,
+}
+
+struct LifecycleEventListener<E> {
+    log: std::sync::Arc<LifecycleLog>,
+    label: &'static str,
+    marker: std::marker::PhantomData<E>,
+}
+
+impl<E> LifecycleEventListener<E> {
+    fn new(log: std::sync::Arc<LifecycleLog>, label: &'static str) -> Self {
+        Self {
+            log,
+            label,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+macro_rules! impl_lifecycle_event_listener {
+    ($event:ty) => {
+        #[async_trait]
+        impl EventListener<$event> for LifecycleEventListener<$event> {
+            async fn handle(&self, _context: &EventContext, event: &$event) -> Result<()> {
+                if event.snapshot.table == USERS_TABLE {
+                    self.log.push(format!("event:{}", self.label)).await;
+                }
+                Ok(())
+            }
+        }
+    };
+}
+
+impl_lifecycle_event_listener!(ModelCreatingEvent);
+impl_lifecycle_event_listener!(ModelCreatedEvent);
+impl_lifecycle_event_listener!(ModelUpdatingEvent);
+impl_lifecycle_event_listener!(ModelUpdatedEvent);
+impl_lifecycle_event_listener!(ModelDeletingEvent);
+impl_lifecycle_event_listener!(ModelDeletedEvent);
+
+struct LifecycleCustomEventListener {
+    log: std::sync::Arc<LifecycleLog>,
+}
+
+#[async_trait]
+impl EventListener<LifecycleCustomEvent> for LifecycleCustomEventListener {
+    async fn handle(&self, _context: &EventContext, event: &LifecycleCustomEvent) -> Result<()> {
+        self.log.push(format!("custom:{}", event.phase)).await;
+        Ok(())
+    }
+}
+
+struct FailingCreatedEventListener;
+
+#[async_trait]
+impl EventListener<ModelCreatedEvent> for FailingCreatedEventListener {
+    async fn handle(&self, _context: &EventContext, event: &ModelCreatedEvent) -> Result<()> {
+        if event.snapshot.table == USERS_TABLE {
+            return Err(Error::message("created event failed"));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ServiceProvider for LifecycleTestProvider {
+    async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+        registrar.singleton_arc(self.log.clone())?;
+        registrar.listen_event::<ModelCreatingEvent, _>(LifecycleEventListener::new(
+            self.log.clone(),
+            "creating",
+        ))?;
+        registrar.listen_event::<ModelCreatedEvent, _>(LifecycleEventListener::new(
+            self.log.clone(),
+            "created",
+        ))?;
+        registrar.listen_event::<ModelUpdatingEvent, _>(LifecycleEventListener::new(
+            self.log.clone(),
+            "updating",
+        ))?;
+        registrar.listen_event::<ModelUpdatedEvent, _>(LifecycleEventListener::new(
+            self.log.clone(),
+            "updated",
+        ))?;
+        registrar.listen_event::<ModelDeletingEvent, _>(LifecycleEventListener::new(
+            self.log.clone(),
+            "deleting",
+        ))?;
+        registrar.listen_event::<ModelDeletedEvent, _>(LifecycleEventListener::new(
+            self.log.clone(),
+            "deleted",
+        ))?;
+        registrar.listen_event::<LifecycleCustomEvent, _>(LifecycleCustomEventListener {
+            log: self.log.clone(),
+        })?;
+        if self.fail_created {
+            registrar.listen_event::<ModelCreatedEvent, _>(FailingCreatedEventListener)?;
+        }
+        Ok(())
+    }
+}
+
+struct LifecycleUserHooks;
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE, lifecycle = LifecycleUserHooks)]
+struct LifecycleUser {
+    id: i64,
+    email: String,
+    active: bool,
+    nickname: Option<String>,
+}
+
+#[async_trait]
+impl ModelLifecycle<LifecycleUser> for LifecycleUserHooks {
+    async fn creating(
+        context: &ModelHookContext<'_>,
+        draft: &mut CreateDraft<LifecycleUser>,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<LifecycleLog>()?
+            .push("hook:creating")
+            .await;
+        draft.set(LifecycleUser::NICKNAME, "hook-created");
+        context
+            .dispatch(LifecycleCustomEvent {
+                phase: "creating".to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn created(
+        context: &ModelHookContext<'_>,
+        _created: &LifecycleUser,
+        _record: &DbRecord,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<LifecycleLog>()?
+            .push("hook:created")
+            .await;
+        Ok(())
+    }
+
+    async fn updating(
+        context: &ModelHookContext<'_>,
+        _current: &LifecycleUser,
+        draft: &mut UpdateDraft<LifecycleUser>,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<LifecycleLog>()?
+            .push("hook:updating")
+            .await;
+        if draft.pending_record().get("nickname").is_none() {
+            draft.set(LifecycleUser::NICKNAME, "hook-updated");
+        }
+        context
+            .dispatch(LifecycleCustomEvent {
+                phase: "updating".to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn updated(
+        context: &ModelHookContext<'_>,
+        _before: &LifecycleUser,
+        _after: &LifecycleUser,
+        _before_record: &DbRecord,
+        _after_record: &DbRecord,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<LifecycleLog>()?
+            .push("hook:updated")
+            .await;
+        Ok(())
+    }
+
+    async fn deleting(
+        context: &ModelHookContext<'_>,
+        _current: &LifecycleUser,
+        _record: &DbRecord,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<LifecycleLog>()?
+            .push("hook:deleting")
+            .await;
+        Ok(())
+    }
+
+    async fn deleted(
+        context: &ModelHookContext<'_>,
+        _deleted: &LifecycleUser,
+        _record: &DbRecord,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<LifecycleLog>()?
+            .push("hook:deleted")
+            .await;
+        Ok(())
+    }
+}
+
+struct RejectingLifecycleUserHooks;
+
+#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE, lifecycle = RejectingLifecycleUserHooks)]
+struct RejectingLifecycleUser {
+    id: i64,
+    email: String,
+    active: bool,
+    nickname: Option<String>,
+}
+
+#[async_trait]
+impl ModelLifecycle<RejectingLifecycleUser> for RejectingLifecycleUserHooks {
+    async fn creating(
+        _context: &ModelHookContext<'_>,
+        draft: &mut CreateDraft<RejectingLifecycleUser>,
+    ) -> Result<()> {
+        if draft.pending_record().decode::<String>("email")? == "reject@example.com" {
+            return Err(Error::message("creating hook rejected row"));
+        }
+        Ok(())
+    }
+}
+
+impl User {
+    fn merchants() -> RelationDef<Self, Merchant> {
+        has_many(
+            "merchants",
+            Self::ID,
+            Merchant::USER_ID,
+            |user| user.id,
+            |user, merchants| user.merchants = Loaded::new(merchants),
+        )
+    }
+
+    fn active_merchant_count() -> RelationAggregateDef<Self, i64> {
+        Self::merchants()
+            .where_(Merchant::STATUS.eq(MerchantStatus::Active))
+            .count(|user, count| user.merchant_count = Loaded::new(count))
+    }
+}
+
+impl Merchant {
+    fn orders() -> RelationDef<Self, Order> {
+        has_many(
+            "orders",
+            Self::ID,
+            Order::MERCHANT_ID,
+            |merchant| merchant.id,
+            |merchant, orders| merchant.orders = Loaded::new(orders),
+        )
+    }
+
+    fn orders_total() -> RelationAggregateDef<Self, Option<i64>> {
+        Self::orders().sum(Order::TOTAL, |merchant, total| {
+            merchant.order_total = Loaded::new(total)
+        })
+    }
+
+    fn tags() -> ManyToManyDef<Self, Tag, ()> {
+        many_to_many(
+            "tags",
+            Self::ID,
+            MERCHANT_TAGS_TABLE,
+            "merchant_id",
+            "tag_id",
+            Tag::ID,
+            |merchant| merchant.id,
+            |merchant, tags| merchant.tags = Loaded::new(tags),
+        )
+    }
+
+    fn tags_with_pivot() -> ManyToManyDef<Self, Tag, MerchantTagLink> {
+        Self::tags().with_pivot(MerchantTagLink::projection_meta(), |tag, link| {
+            tag.link = Loaded::new(link)
+        })
+    }
+
+    fn tags_count() -> RelationAggregateDef<Self, i64> {
+        Self::tags().count(|merchant, count| merchant.tag_count = Loaded::new(count))
+    }
+}
+
+impl Order {
+    fn items() -> RelationDef<Self, OrderItem> {
+        has_many(
+            "items",
+            Self::ID,
+            OrderItem::ORDER_ID,
+            |order| order.id,
+            |order, items| order.items = Loaded::new(items),
+        )
+    }
+}
+
+impl OrderItem {
+    fn product() -> RelationDef<Self, Product> {
+        belongs_to(
+            "product",
+            Self::PRODUCT_ID,
+            Product::ID,
+            |item| Some(item.product_id),
+            |item, product| item.product = Loaded::new(product),
+        )
+    }
+}
+
+impl Tag {
+    fn creator() -> RelationDef<Self, TagCreator> {
+        belongs_to(
+            "creator",
+            Self::USER_ID,
+            TagCreator::ID,
+            |tag| Some(tag.user_id),
+            |tag, creator| tag.creator = Loaded::new(creator),
+        )
+    }
+}
+
+#[tokio::test]
+async fn raw_queries_and_transactions_work_against_postgres() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    database
+        .raw_execute(
+            &format!("INSERT INTO {USERS_TABLE} (id, email, active) VALUES ($1, $2, $3)"),
+            &[1_i64.into(), "forge@example.com".into(), true.into()],
+        )
+        .await
+        .unwrap();
+
+    let transaction = database.begin().await.unwrap();
+    transaction
+        .raw_execute(
+            &format!("INSERT INTO {USERS_TABLE} (id, email, active) VALUES ($1, $2, $3)"),
+            &[2_i64.into(), "rollback@example.com".into(), true.into()],
+        )
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+
+    let records = database
+        .raw_query(&format!("SELECT COUNT(*) AS total FROM {USERS_TABLE}"), &[])
+        .await
+        .unwrap();
+
+    assert_eq!(records[0].decode::<i64>("total").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn generic_builder_and_model_first_queries_are_typed_and_short() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let generic_inserted = Query::insert_many_into(USERS_TABLE)
+        .row([
+            ("id", DbValue::from(1_i64)),
+            ("email", DbValue::from("generic@example.com")),
+            ("active", DbValue::from(true)),
+            ("nickname", DbValue::Null(DbType::Text)),
+        ])
+        .row([
+            ("email", DbValue::from("generic-two@example.com")),
+            ("nickname", DbValue::from("ghost")),
+            ("id", DbValue::from(4_i64)),
+            ("active", DbValue::from(false)),
+        ])
+        .returning(["id", "email"])
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(generic_inserted.len(), 2);
+
+    let created = User::create()
+        .set(User::ID, 2_i64)
+        .set(User::EMAIL, "model@example.com")
+        .set(User::ACTIVE, false)
+        .set(User::NICKNAME, "captain")
+        .save(app)
+        .await
+        .unwrap();
+
+    let bulk_created = User::create_many()
+        .row(|row| {
+            row.set(User::ID, 3_i64)
+                .set(User::EMAIL, "bulk-one@example.com")
+                .set(User::ACTIVE, false)
+                .set(User::NICKNAME, None::<String>)
+        })
+        .row(|row| {
+            row.set(User::ID, 5_i64)
+                .set(User::EMAIL, "bulk-two@example.com")
+                .set(User::ACTIVE, true)
+                .set(User::NICKNAME, "ally")
+        })
+        .get(app)
+        .await
+        .unwrap();
+
+    assert_eq!(created.email, "model@example.com");
+    assert!(!created.active);
+    assert_eq!(created.nickname.as_deref(), Some("captain"));
+    assert_eq!(bulk_created.len(), 2);
+    assert_eq!(bulk_created[0].nickname, None);
+    assert_eq!(bulk_created[1].nickname.as_deref(), Some("ally"));
+
+    let ignored = Query::insert_into(USERS_TABLE)
+        .value("id", 1_i64)
+        .value("email", "ignored@example.com")
+        .value("active", false)
+        .on_conflict_columns(["id"])
+        .do_nothing()
+        .execute(database)
+        .await
+        .unwrap();
+    assert_eq!(ignored, 0);
+
+    let upserted = User::create()
+        .set(User::ID, 3_i64)
+        .set(User::EMAIL, "bulk-updated@example.com")
+        .set(User::ACTIVE, true)
+        .set(User::NICKNAME, "upserted")
+        .on_conflict_columns([User::ID])
+        .do_update()
+        .set_excluded(User::EMAIL)
+        .set_excluded(User::ACTIVE)
+        .set_excluded(User::NICKNAME)
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(upserted.email, "bulk-updated@example.com");
+    assert!(upserted.active);
+    assert_eq!(upserted.nickname.as_deref(), Some("upserted"));
+
+    let generic = Query::table(USERS_TABLE)
+        .select(["id", "email"])
+        .where_eq("active", true)
+        .order_by(OrderBy::asc("id"))
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(generic.len(), 3);
+    assert_eq!(
+        generic[0].decode::<String>("email").unwrap(),
+        "generic@example.com"
+    );
+
+    let paginated = User::query()
+        .order_by(User::ID.asc())
+        .paginate(database, Pagination::new(1, 10))
+        .await
+        .unwrap();
+    assert_eq!(paginated.total, 5);
+    assert_eq!(paginated.data.len(), 5);
+
+    let total_users = User::query().count(database).await.unwrap();
+    assert_eq!(total_users, 5);
+
+    let active_id_sum = User::query()
+        .where_(User::ACTIVE.eq(true))
+        .sum(database, User::ID)
+        .await
+        .unwrap();
+    assert_eq!(active_id_sum, Some(9));
+
+    let active_projection = AggregateProjection::<i64>::count_all("active_total");
+    let aggregate_rows = Query::table(USERS_TABLE)
+        .select(["active"])
+        .select_aggregate(active_projection.clone())
+        .group_by("active")
+        .having(Condition::compare(
+            Expr::Aggregate(AggregateExpr::count_all()),
+            ComparisonOp::Gt,
+            Expr::value(0_i64),
+        ))
+        .order_by(OrderBy::asc("active"))
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(aggregate_rows.len(), 2);
+    assert_eq!(active_projection.decode(&aggregate_rows[0]).unwrap(), 2);
+    assert_eq!(active_projection.decode(&aggregate_rows[1]).unwrap(), 3);
+
+    let updated = User::update()
+        .set(User::ACTIVE, true)
+        .set(User::NICKNAME, "vip")
+        .where_(User::EMAIL.eq("bulk-two@example.com"))
+        .save(app)
+        .await
+        .unwrap();
+    assert!(updated.active);
+    assert_eq!(updated.nickname.as_deref(), Some("vip"));
+
+    let nulled = User::update()
+        .set_null(User::NICKNAME)
+        .where_(User::ID.eq(5_i64))
+        .save(app)
+        .await
+        .unwrap();
+    assert!(nulled.active);
+    assert_eq!(nulled.nickname, None);
+
+    let skipped = User::update()
+        .set(User::ACTIVE, false)
+        .where_(User::ID.eq(5_i64))
+        .save(app)
+        .await
+        .unwrap();
+    assert!(!skipped.active);
+    assert_eq!(skipped.nickname, None);
+
+    let fetched = User::query()
+        .where_(User::ID.eq(5_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    let updated_from_instance = fetched
+        .update()
+        .set(User::ACTIVE, true)
+        .set(User::NICKNAME, "instance-write")
+        .save(app)
+        .await
+        .unwrap();
+    assert!(updated_from_instance.active);
+    assert_eq!(
+        updated_from_instance.nickname.as_deref(),
+        Some("instance-write")
+    );
+
+    let deleted_rows = User::delete()
+        .where_(User::EMAIL.eq("generic@example.com"))
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(deleted_rows, 1);
+}
+
+#[tokio::test]
+async fn model_lifecycle_hooks_and_framework_events_run_automatically() {
+    let log = std::sync::Arc::new(LifecycleLog::default());
+    let Some(runtime) = test_app_runtime_with_provider(LifecycleTestProvider {
+        log: log.clone(),
+        fail_created: false,
+    })
+    .await
+    else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let created = LifecycleUser::create()
+        .set(LifecycleUser::ID, 90_i64)
+        .set(LifecycleUser::EMAIL, "lifecycle@example.com")
+        .set(LifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(created.nickname.as_deref(), Some("hook-created"));
+
+    let fetched = LifecycleUser::query()
+        .where_(LifecycleUser::ID.eq(90_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    let updated = fetched
+        .update()
+        .set(LifecycleUser::ACTIVE, false)
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(updated.nickname.as_deref(), Some("hook-updated"));
+
+    let deleted = LifecycleUser::delete()
+        .where_(LifecycleUser::ID.eq(90_i64))
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+
+    assert_eq!(
+        log.snapshot().await,
+        vec![
+            "hook:creating",
+            "custom:creating",
+            "event:creating",
+            "hook:created",
+            "event:created",
+            "hook:updating",
+            "custom:updating",
+            "event:updating",
+            "hook:updated",
+            "event:updated",
+            "hook:deleting",
+            "event:deleting",
+            "hook:deleted",
+            "event:deleted",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn bulk_model_writes_default_to_lifecycle_and_without_lifecycle_skips_it() {
+    let log = std::sync::Arc::new(LifecycleLog::default());
+    let Some(runtime) = test_app_runtime_with_provider(LifecycleTestProvider {
+        log: log.clone(),
+        fail_created: false,
+    })
+    .await
+    else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let created = LifecycleUser::create_many()
+        .row(|row| {
+            row.set(LifecycleUser::ID, 100_i64)
+                .set(LifecycleUser::EMAIL, "bulk-one@example.com")
+                .set(LifecycleUser::ACTIVE, true)
+        })
+        .row(|row| {
+            row.set(LifecycleUser::ID, 101_i64)
+                .set(LifecycleUser::EMAIL, "bulk-two@example.com")
+                .set(LifecycleUser::ACTIVE, true)
+        })
+        .get(app)
+        .await
+        .unwrap();
+    assert_eq!(created.len(), 2);
+    assert!(created
+        .iter()
+        .all(|user| user.nickname.as_deref() == Some("hook-created")));
+    assert_eq!(
+        log.snapshot().await,
+        vec![
+            "hook:creating",
+            "custom:creating",
+            "event:creating",
+            "hook:created",
+            "event:created",
+            "hook:creating",
+            "custom:creating",
+            "event:creating",
+            "hook:created",
+            "event:created",
+        ]
+    );
+
+    log.clear().await;
+    let updated = LifecycleUser::update()
+        .set(LifecycleUser::ACTIVE, false)
+        .allow_all()
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(updated, 2);
+    assert_eq!(
+        log.snapshot().await,
+        vec![
+            "hook:updating",
+            "custom:updating",
+            "event:updating",
+            "hook:updated",
+            "event:updated",
+            "hook:updating",
+            "custom:updating",
+            "event:updating",
+            "hook:updated",
+            "event:updated",
+        ]
+    );
+
+    log.clear().await;
+    let skipped = LifecycleUser::update()
+        .set(LifecycleUser::NICKNAME, "fast-path")
+        .allow_all()
+        .without_lifecycle()
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(skipped, 2);
+    assert!(log.snapshot().await.is_empty());
+
+    let rows = LifecycleUser::query()
+        .order_by(LifecycleUser::ID.asc())
+        .get(database)
+        .await
+        .unwrap();
+    assert!(rows
+        .iter()
+        .all(|row| row.nickname.as_deref() == Some("fast-path")));
+}
+
+#[tokio::test]
+async fn lifecycle_failures_roll_back_manager_owned_writes() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let hook_error = RejectingLifecycleUser::create()
+        .set(RejectingLifecycleUser::ID, 120_i64)
+        .set(RejectingLifecycleUser::EMAIL, "reject@example.com")
+        .set(RejectingLifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap_err();
+    assert!(hook_error
+        .to_string()
+        .contains("creating hook rejected row"));
+
+    let count_after_hook_failure = Query::table(USERS_TABLE)
+        .select_expr(Expr::Aggregate(AggregateExpr::count_all()), "count")
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode::<i64>("count")
+        .unwrap();
+    assert_eq!(count_after_hook_failure, 0);
+
+    let log = std::sync::Arc::new(LifecycleLog::default());
+    let Some(failing_runtime) = test_app_runtime_with_provider(LifecycleTestProvider {
+        log,
+        fail_created: true,
+    })
+    .await
+    else {
+        return;
+    };
+    let database = failing_runtime.database.as_ref();
+    let app = &failing_runtime.app;
+    reset_schema(database).await;
+
+    let event_error = LifecycleUser::create()
+        .set(LifecycleUser::ID, 121_i64)
+        .set(LifecycleUser::EMAIL, "event-fail@example.com")
+        .set(LifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap_err();
+    assert!(event_error.to_string().contains("created event failed"));
+
+    let count_after_event_failure = Query::table(USERS_TABLE)
+        .select_expr(Expr::Aggregate(AggregateExpr::count_all()), "count")
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode::<i64>("count")
+        .unwrap();
+    assert_eq!(count_after_event_failure, 0);
+}
+
+#[tokio::test]
+async fn relation_tree_eager_loads_without_hardcoded_depth() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    execute_batch(
+        database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (1, 'owner@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (10, 1, 'Forge Store', 'active')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (11, 1, 'Archived Store', 'suspended')"
+            ),
+            &format!("INSERT INTO {ORDERS_TABLE} (id, merchant_id, total) VALUES (20, 10, 2500)"),
+            &format!("INSERT INTO {PRODUCTS_TABLE} (id, name) VALUES (30, 'Forge Mug')"),
+            &format!(
+                "INSERT INTO {ORDER_ITEMS_TABLE} (id, order_id, product_id, quantity) VALUES (40, 20, 30, 2)"
+            ),
+        ],
+    )
+    .await;
+
+    let users = User::query()
+        .with_aggregate(User::active_merchant_count())
+        .with(
+            User::merchants()
+                .with_aggregate(Merchant::orders_total())
+                .with(Merchant::orders().with(Order::items().with(OrderItem::product()))),
+        )
+        .where_has(User::merchants(), |query| {
+            query.where_(Merchant::STATUS.eq(MerchantStatus::Active))
+        })
+        .get(database)
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 1);
+    let user = &users[0];
+    assert_eq!(user.merchant_count.as_ref(), Some(&1));
+    let merchants = user.merchants.as_ref().unwrap();
+    assert_eq!(merchants.len(), 1);
+    assert_eq!(merchants[0].name, "Forge Store");
+    assert_eq!(merchants[0].status, MerchantStatus::Active);
+    assert_eq!(merchants[0].order_total.as_ref(), Some(&Some(2500)));
+
+    let orders = merchants[0].orders.as_ref().unwrap();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0].total, 2500);
+
+    let items = orders[0].items.as_ref().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].quantity, 2);
+
+    let product = items[0].product.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(product.name, "Forge Mug");
+
+    let relation_loaded_user = users[0].clone();
+    let updated_user = relation_loaded_user
+        .update()
+        .set(User::ACTIVE, false)
+        .save(app)
+        .await
+        .unwrap();
+    assert!(!updated_user.active);
+    assert!(!updated_user.merchants.is_loaded());
+    assert!(!updated_user.merchant_count.is_loaded());
+}
+
+#[tokio::test]
+async fn model_stream_supports_relation_trees_where_has_and_aggregates() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (1, 'stream-owner@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (2, 'stream-second@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (10, 1, 'Forge Store', 'active')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (11, 1, 'Archived Store', 'suspended')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (12, 2, 'Second Store', 'active')"
+            ),
+            &format!("INSERT INTO {ORDERS_TABLE} (id, merchant_id, total) VALUES (20, 10, 2500)"),
+            &format!("INSERT INTO {ORDERS_TABLE} (id, merchant_id, total) VALUES (21, 12, 1500)"),
+            &format!("INSERT INTO {PRODUCTS_TABLE} (id, name) VALUES (30, 'Forge Mug')"),
+            &format!("INSERT INTO {PRODUCTS_TABLE} (id, name) VALUES (31, 'Forge Pen')"),
+            &format!(
+                "INSERT INTO {ORDER_ITEMS_TABLE} (id, order_id, product_id, quantity) VALUES (40, 20, 30, 2)"
+            ),
+            &format!(
+                "INSERT INTO {ORDER_ITEMS_TABLE} (id, order_id, product_id, quantity) VALUES (41, 21, 31, 1)"
+            ),
+        ],
+    )
+    .await;
+
+    let users = User::query()
+        .with_aggregate(User::active_merchant_count())
+        .with(
+            User::merchants()
+                .with_aggregate(Merchant::orders_total())
+                .with(Merchant::orders().with(Order::items().with(OrderItem::product()))),
+        )
+        .where_has(User::merchants(), |query| {
+            query.where_(Merchant::STATUS.eq(MerchantStatus::Active))
+        })
+        .order_by(User::ID.asc())
+        .with_label("relation tree stream")
+        .with_stream_batch_size(1)
+        .stream(&database)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        users.iter().map(|user| user.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(users[0].merchant_count.as_ref(), Some(&1));
+    assert_eq!(users[1].merchant_count.as_ref(), Some(&1));
+
+    let first_merchant = &users[0].merchants.as_ref().unwrap()[0];
+    assert_eq!(first_merchant.name, "Forge Store");
+    assert_eq!(first_merchant.order_total.as_ref(), Some(&Some(2500)));
+    let first_product = users[0].merchants.as_ref().unwrap()[0]
+        .orders
+        .as_ref()
+        .unwrap()[0]
+        .items
+        .as_ref()
+        .unwrap()[0]
+        .product
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert_eq!(first_product.name, "Forge Mug");
+
+    let second_merchant = &users[1].merchants.as_ref().unwrap()[0];
+    assert_eq!(second_merchant.name, "Second Store");
+    assert_eq!(second_merchant.order_total.as_ref(), Some(&Some(1500)));
+}
+
+#[tokio::test]
+async fn advanced_projection_queries_support_cte_case_json_union_and_numeric_aggregates() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active, metadata) VALUES (1, 'owner@example.com', true, '{{\"theme\":\"amber\"}}'::jsonb)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active, metadata) VALUES (2, 'guest@example.com', false, '{{\"theme\":\"slate\"}}'::jsonb)"
+            ),
+            &format!(
+                "INSERT INTO {TAGS_TABLE} (id, user_id, name) VALUES (100, 1, 'featured')"
+            ),
+        ],
+    )
+    .await;
+
+    Query::insert_into(PAYMENTS_TABLE)
+        .value("id", 1_i64)
+        .value("merchant_id", 10_i64)
+        .value("amount", Numeric::new("10.50").unwrap())
+        .value("metadata", serde_json::json!({"vip": true}))
+        .execute(&database)
+        .await
+        .unwrap();
+    Query::insert_into(PAYMENTS_TABLE)
+        .value("id", 2_i64)
+        .value("merchant_id", 10_i64)
+        .value("amount", Numeric::new("20.25").unwrap())
+        .value("metadata", serde_json::json!({"vip": false}))
+        .execute(&database)
+        .await
+        .unwrap();
+    Query::insert_into(PAYMENTS_TABLE)
+        .value("id", 3_i64)
+        .value("merchant_id", 11_i64)
+        .value("amount", Numeric::new("30.00").unwrap())
+        .value("metadata", serde_json::json!({"vip": true}))
+        .execute(&database)
+        .await
+        .unwrap();
+
+    let active_users = Query::table(USERS_TABLE)
+        .select_expr(
+            ColumnRef::new(USERS_TABLE, "email"),
+            UserPreferenceRow::EMAIL.alias(),
+        )
+        .select_expr(
+            Case::when(
+                Condition::compare(
+                    Expr::column(ColumnRef::new(USERS_TABLE, "active")),
+                    ComparisonOp::Eq,
+                    Expr::value(true),
+                ),
+                Expr::value("active"),
+            )
+            .else_(Expr::value("inactive")),
+            UserPreferenceRow::STATUS_LABEL.alias(),
+        )
+        .select_expr(
+            Expr::column(ColumnRef::new(USERS_TABLE, "metadata").typed(DbType::Json))
+                .json()
+                .key("theme")
+                .as_text(),
+            UserPreferenceRow::THEME.alias(),
+        );
+
+    let preference_rows = ProjectionQuery::<UserPreferenceRow>::table("active_users")
+        .with_cte(Cte::new("active_users", active_users))
+        .select_source(UserPreferenceRow::EMAIL, "active_users")
+        .select_source(UserPreferenceRow::STATUS_LABEL, "active_users")
+        .select_source(UserPreferenceRow::THEME, "active_users")
+        .order_by(OrderBy::asc(UserPreferenceRow::EMAIL.alias()))
+        .get(&database)
+        .await
+        .unwrap();
+
+    assert_eq!(preference_rows.len(), 2);
+    assert_eq!(preference_rows[0].theme, "slate");
+    assert_eq!(preference_rows[1].status_label, "active");
+
+    let combined_labels = ProjectionQuery::<CombinedLabelRow>::table(USERS_TABLE)
+        .select_field(
+            CombinedLabelRow::LABEL,
+            ColumnRef::new(USERS_TABLE, "email"),
+        )
+        .select_field(CombinedLabelRow::KIND, Expr::value("user"))
+        .union_all(
+            ProjectionQuery::<CombinedLabelRow>::table(TAGS_TABLE)
+                .select_field(CombinedLabelRow::LABEL, ColumnRef::new(TAGS_TABLE, "name"))
+                .select_field(CombinedLabelRow::KIND, Expr::value("tag")),
+        )
+        .order_by(OrderBy::asc(CombinedLabelRow::LABEL.alias()))
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(combined_labels.len(), 3);
+    assert_eq!(combined_labels[0].kind, "tag");
+
+    let user_tag_rows = Query::table(USERS_TABLE)
+        .left_join(
+            TAGS_TABLE,
+            Condition::compare(
+                Expr::column(ColumnRef::new(TAGS_TABLE, "user_id")),
+                ComparisonOp::Eq,
+                Expr::column(ColumnRef::new(USERS_TABLE, "id")),
+            ),
+        )
+        .select_expr(ColumnRef::new(USERS_TABLE, "email"), "email")
+        .select_expr(ColumnRef::new(TAGS_TABLE, "name"), "tag_name")
+        .order_by(OrderBy::asc(ColumnRef::new(USERS_TABLE, "id")))
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(user_tag_rows.len(), 2);
+    assert_eq!(
+        user_tag_rows[0].decode::<String>("email").unwrap(),
+        "owner@example.com"
+    );
+    assert_eq!(
+        user_tag_rows[0]
+            .decode::<Option<String>>("tag_name")
+            .unwrap(),
+        Some("featured".to_string())
+    );
+    assert_eq!(
+        user_tag_rows[1]
+            .decode::<Option<String>>("tag_name")
+            .unwrap(),
+        None
+    );
+
+    let cross_join_total = Query::table(USERS_TABLE)
+        .cross_join(TAGS_TABLE)
+        .count(&database)
+        .await
+        .unwrap();
+    assert_eq!(cross_join_total, 2);
+
+    let payment_query = Query::table(PAYMENTS_TABLE).where_(
+        Expr::column(ColumnRef::new(PAYMENTS_TABLE, "metadata").typed(DbType::Json))
+            .json()
+            .has_key("vip"),
+    );
+    let distinct_merchants = payment_query
+        .count_distinct(&database, ColumnRef::new(PAYMENTS_TABLE, "merchant_id"))
+        .await
+        .unwrap();
+    let total_amount = payment_query
+        .sum::<_, Numeric>(
+            &database,
+            ColumnRef::new(PAYMENTS_TABLE, "amount").typed(DbType::Numeric),
+        )
+        .await
+        .unwrap();
+    let average_amount = payment_query
+        .avg::<_, Numeric>(
+            &database,
+            ColumnRef::new(PAYMENTS_TABLE, "amount").typed(DbType::Numeric),
+        )
+        .await
+        .unwrap();
+    let min_amount = payment_query
+        .min::<_, Numeric>(
+            &database,
+            ColumnRef::new(PAYMENTS_TABLE, "amount").typed(DbType::Numeric),
+        )
+        .await
+        .unwrap();
+    let max_amount = payment_query
+        .max::<_, Numeric>(
+            &database,
+            ColumnRef::new(PAYMENTS_TABLE, "amount").typed(DbType::Numeric),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(distinct_merchants, 2);
+    assert_eq!(total_amount.unwrap().as_str(), "60.75");
+    assert!(average_amount.unwrap().as_str().starts_with("20.25"));
+    assert!(min_amount.unwrap().as_str().starts_with("10.5"));
+    assert!(max_amount.unwrap().as_str().starts_with("30"));
+}
+
+#[tokio::test]
+async fn many_to_many_relations_load_pivot_data_and_aggregates() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (1, 'owner@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (2, 'creator@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (10, 1, 'Forge Store', 'active')"
+            ),
+            &format!(
+                "INSERT INTO {TAGS_TABLE} (id, user_id, name) VALUES (100, 2, 'featured')"
+            ),
+            &format!(
+                "INSERT INTO {TAGS_TABLE} (id, user_id, name) VALUES (101, 2, 'seasonal')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANT_TAGS_TABLE} (merchant_id, tag_id, role) VALUES (10, 100, 'primary')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANT_TAGS_TABLE} (merchant_id, tag_id, role) VALUES (10, 101, 'secondary')"
+            ),
+        ],
+    )
+    .await;
+
+    let merchants = Merchant::query()
+        .with_aggregate(Merchant::tags_count())
+        .with_many_to_many(Merchant::tags_with_pivot().with(Tag::creator()))
+        .where_(Merchant::STATUS.eq(MerchantStatus::Active))
+        .get(&database)
+        .await
+        .unwrap();
+
+    assert_eq!(merchants.len(), 1);
+    let merchant = &merchants[0];
+    assert_eq!(merchant.tag_count.as_ref(), Some(&2));
+    let tags = merchant.tags.as_ref().unwrap();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].link.as_ref().unwrap().role, "primary");
+    assert_eq!(
+        tags[0].creator.as_ref().unwrap().as_ref().unwrap().email,
+        "creator@example.com"
+    );
+}
+
+#[tokio::test]
+async fn model_stream_supports_many_to_many_pivot_hydration_inside_transactions() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (1, 'owner@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (2, 'creator@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (10, 1, 'Forge Store', 'active')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (11, 1, 'Forge Supplies', 'active')"
+            ),
+            &format!(
+                "INSERT INTO {TAGS_TABLE} (id, user_id, name) VALUES (100, 2, 'featured')"
+            ),
+            &format!(
+                "INSERT INTO {TAGS_TABLE} (id, user_id, name) VALUES (101, 2, 'seasonal')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANT_TAGS_TABLE} (merchant_id, tag_id, role) VALUES (10, 100, 'primary')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANT_TAGS_TABLE} (merchant_id, tag_id, role) VALUES (10, 101, 'secondary')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANT_TAGS_TABLE} (merchant_id, tag_id, role) VALUES (11, 100, 'primary')"
+            ),
+        ],
+    )
+    .await;
+
+    let transaction = database.begin().await.unwrap();
+    let merchants = Merchant::query()
+        .with_aggregate(Merchant::tags_count())
+        .with_many_to_many(Merchant::tags_with_pivot().with(Tag::creator()))
+        .order_by(Merchant::ID.asc())
+        .with_label("many-to-many transaction stream")
+        .with_stream_batch_size(0)
+        .stream(&transaction)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        merchants
+            .iter()
+            .map(|merchant| merchant.id)
+            .collect::<Vec<_>>(),
+        vec![10, 11]
+    );
+    assert_eq!(merchants[0].tag_count.as_ref(), Some(&2));
+    assert_eq!(merchants[1].tag_count.as_ref(), Some(&1));
+    assert_eq!(
+        merchants[0].tags.as_ref().unwrap()[0]
+            .link
+            .as_ref()
+            .unwrap()
+            .role,
+        "primary"
+    );
+    assert_eq!(
+        merchants[0].tags.as_ref().unwrap()[0]
+            .creator
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .email,
+        "creator@example.com"
+    );
+}
+
+#[tokio::test]
+async fn typed_runtime_supports_production_postgres_values_and_custom_adapters() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+
+    execute_batch(
+        &database,
+        &[
+            "DROP DOMAIN IF EXISTS forge_test_email",
+            "DROP TYPE IF EXISTS forge_test_mood",
+            "CREATE TYPE forge_test_mood AS ENUM ('happy', 'sad')",
+            "CREATE DOMAIN forge_test_email AS TEXT",
+        ],
+    )
+    .await;
+
+    let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let timestamp_tz = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().unwrap();
+    let date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+    let timestamp = date.and_hms_opt(3, 4, 5).unwrap();
+    let time = NaiveTime::from_hms_opt(6, 7, 8).unwrap();
+    let numeric = Numeric::new("42.75").unwrap();
+
+    let scalar_record = database
+        .raw_query(
+            "SELECT $1::smallint AS int16_value, $2::integer AS int32_value, $3::bigint AS int64_value, $4::real AS float32_value, $5::double precision AS float64_value, $6::numeric AS numeric_value, $7::text AS text_value, $8::jsonb AS json_value, $9::uuid AS uuid_value, $10::timestamptz AS timestamptz_value, $11::timestamp AS timestamp_value, $12::date AS date_value, $13::time AS time_value, $14::bytea AS bytea_value",
+            &[
+                7_i16.into(),
+                8_i32.into(),
+                9_i64.into(),
+                1.5_f32.into(),
+                2.5_f64.into(),
+                numeric.clone().into(),
+                "forge".into(),
+                serde_json::json!({"theme":"amber"}).into(),
+                uuid.into(),
+                timestamp_tz.into(),
+                timestamp.into(),
+                date.into(),
+                time.into(),
+                vec![1_u8, 2, 3].into(),
+            ],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    assert_eq!(scalar_record.decode::<i16>("int16_value").unwrap(), 7);
+    assert_eq!(scalar_record.decode::<i32>("int32_value").unwrap(), 8);
+    assert_eq!(scalar_record.decode::<i64>("int64_value").unwrap(), 9);
+    assert!((scalar_record.decode::<f32>("float32_value").unwrap() - 1.5).abs() < f32::EPSILON);
+    assert!((scalar_record.decode::<f64>("float64_value").unwrap() - 2.5).abs() < f64::EPSILON);
+    assert_eq!(
+        scalar_record
+            .decode::<Numeric>("numeric_value")
+            .unwrap()
+            .as_str(),
+        "42.75"
+    );
+    assert_eq!(
+        scalar_record.decode::<String>("text_value").unwrap(),
+        "forge".to_string()
+    );
+    assert_eq!(
+        scalar_record
+            .decode::<serde_json::Value>("json_value")
+            .unwrap()["theme"],
+        "amber"
+    );
+    assert_eq!(scalar_record.decode::<Uuid>("uuid_value").unwrap(), uuid);
+    assert_eq!(
+        scalar_record
+            .decode::<chrono::DateTime<Utc>>("timestamptz_value")
+            .unwrap(),
+        timestamp_tz
+    );
+    assert_eq!(
+        scalar_record
+            .decode::<chrono::NaiveDateTime>("timestamp_value")
+            .unwrap(),
+        timestamp
+    );
+    assert_eq!(
+        scalar_record.decode::<NaiveDate>("date_value").unwrap(),
+        date
+    );
+    assert_eq!(
+        scalar_record.decode::<NaiveTime>("time_value").unwrap(),
+        time
+    );
+    assert_eq!(
+        scalar_record.decode::<Vec<u8>>("bytea_value").unwrap(),
+        vec![1, 2, 3]
+    );
+
+    let array_record = database
+        .raw_query(
+            "SELECT $1::smallint[] AS int16_values, $2::integer[] AS int32_values, $3::bigint[] AS int64_values, $4::boolean[] AS bool_values, $5::real[] AS float32_values, $6::double precision[] AS float64_values, $7::numeric[] AS numeric_values, $8::text[] AS text_values, $9::jsonb[] AS json_values, $10::uuid[] AS uuid_values, $11::timestamptz[] AS timestamptz_values, $12::timestamp[] AS timestamp_values, $13::date[] AS date_values, $14::time[] AS time_values, $15::bytea[] AS bytea_values",
+            &[
+                vec![1_i16, 2_i16].into(),
+                vec![3_i32, 4_i32].into(),
+                vec![5_i64, 6_i64].into(),
+                vec![true, false].into(),
+                vec![1.25_f32, 2.5_f32].into(),
+                vec![3.5_f64, 4.75_f64].into(),
+                vec![Numeric::new("1.10").unwrap(), Numeric::new("2.20").unwrap()].into(),
+                vec!["alpha".to_string(), "beta".to_string()].into(),
+                vec![serde_json::json!({"rank":1}), serde_json::json!({"rank":2})].into(),
+                vec![uuid].into(),
+                vec![timestamp_tz].into(),
+                vec![timestamp].into(),
+                vec![date].into(),
+                vec![time].into(),
+                vec![vec![9_u8, 8, 7]].into(),
+            ],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    assert_eq!(
+        array_record.decode::<Vec<i16>>("int16_values").unwrap(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<i32>>("int32_values").unwrap(),
+        vec![3, 4]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<i64>>("int64_values").unwrap(),
+        vec![5, 6]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<bool>>("bool_values").unwrap(),
+        vec![true, false]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<f32>>("float32_values").unwrap(),
+        vec![1.25, 2.5]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<f64>>("float64_values").unwrap(),
+        vec![3.5, 4.75]
+    );
+    assert_eq!(
+        array_record
+            .decode::<Vec<Numeric>>("numeric_values")
+            .unwrap()
+            .iter()
+            .map(Numeric::as_str)
+            .collect::<Vec<_>>(),
+        vec!["1.10", "2.20"]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<String>>("text_values").unwrap(),
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<Uuid>>("uuid_values").unwrap(),
+        vec![uuid]
+    );
+    assert_eq!(
+        array_record
+            .decode::<Vec<chrono::DateTime<Utc>>>("timestamptz_values")
+            .unwrap(),
+        vec![timestamp_tz]
+    );
+    assert_eq!(
+        array_record
+            .decode::<Vec<chrono::NaiveDateTime>>("timestamp_values")
+            .unwrap(),
+        vec![timestamp]
+    );
+    assert_eq!(
+        array_record
+            .decode::<Vec<NaiveDate>>("date_values")
+            .unwrap(),
+        vec![date]
+    );
+    assert_eq!(
+        array_record
+            .decode::<Vec<NaiveTime>>("time_values")
+            .unwrap(),
+        vec![time]
+    );
+    assert_eq!(
+        array_record.decode::<Vec<Vec<u8>>>("bytea_values").unwrap(),
+        vec![vec![9, 8, 7]]
+    );
+
+    let unsupported = database
+        .raw_query("SELECT 'happy'::forge_test_mood AS mood", &[])
+        .await
+        .unwrap_err();
+    let unsupported_message = format!("{unsupported:?}");
+    assert!(unsupported_message.contains("unsupported postgres type `forge_test_mood`"));
+    assert!(unsupported_message.contains("column `mood`"));
+
+    database
+        .register_type_adapter("forge_test_mood", DbType::Text)
+        .unwrap();
+    database
+        .register_type_adapter("forge_test_email", DbType::Text)
+        .unwrap();
+
+    let custom_record = database
+        .raw_query(
+            "SELECT 'happy'::forge_test_mood AS mood, 'owner@example.com'::forge_test_email AS email",
+            &[],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        custom_record.decode::<String>("mood").unwrap(),
+        "happy".to_string()
+    );
+    assert_eq!(
+        custom_record.decode::<String>("email").unwrap(),
+        "owner@example.com".to_string()
+    );
+
+    execute_batch(
+        &database,
+        &[
+            "DROP DOMAIN IF EXISTS forge_test_email",
+            "DROP TYPE IF EXISTS forge_test_mood",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn locking_streaming_timeout_and_debug_surfaces_work() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (1, 'stream-one@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (2, 'stream-two@example.com', false)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (3, 'stream-three@example.com', true)"
+            ),
+        ],
+    )
+    .await;
+
+    let generic_ids = Query::table(USERS_TABLE)
+        .select(["id"])
+        .order_by(OrderBy::asc("id"))
+        .with_label("generic stream")
+        .stream(&database)
+        .unwrap()
+        .map_ok(|record| record.decode::<i64>("id").unwrap())
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(generic_ids, vec![1, 2, 3]);
+
+    let user_ids = User::query()
+        .order_by(User::ID.asc())
+        .with_label("model stream")
+        .stream(&database)
+        .unwrap()
+        .map_ok(|user| user.id)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(user_ids, vec![1, 2, 3]);
+
+    let label_rows = ProjectionQuery::<CombinedLabelRow>::table(USERS_TABLE)
+        .select_field(
+            CombinedLabelRow::LABEL,
+            ColumnRef::new(USERS_TABLE, "email"),
+        )
+        .select_field(CombinedLabelRow::KIND, Expr::value("user"))
+        .order_by(OrderBy::asc(CombinedLabelRow::LABEL.alias()))
+        .with_label("projection stream")
+        .stream(&database)
+        .unwrap()
+        .map_ok(|row| row.label)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        label_rows,
+        vec![
+            "stream-one@example.com".to_string(),
+            "stream-three@example.com".to_string(),
+            "stream-two@example.com".to_string(),
+        ]
+    );
+
+    let mut raw_stream = database.raw_stream(
+        "SELECT slow_values.value FROM generate_series(1, 3) AS slow_values(value), LATERAL (SELECT pg_sleep(0.02)) AS pause",
+        &[],
+        QueryExecutionOptions::default().with_label("slow raw stream"),
+    );
+    let first_raw_row = tokio::time::timeout(Duration::from_millis(40), raw_stream.try_next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_raw_row.decode::<i64>("value").unwrap(), 1);
+
+    let explain_lines = User::query()
+        .where_(User::ID.eq(1_i64))
+        .with_label("user explain")
+        .explain(&database)
+        .await
+        .unwrap();
+    assert!(!explain_lines.is_empty());
+
+    let transaction = database.begin().await.unwrap();
+    transaction
+        .raw_query(
+            &format!("SELECT id FROM {USERS_TABLE} WHERE id = $1 FOR UPDATE"),
+            &[1_i64.into()],
+        )
+        .await
+        .unwrap();
+
+    let skip_locked = Query::table(USERS_TABLE)
+        .select(["id"])
+        .where_eq("id", 1_i64)
+        .for_update()
+        .skip_locked()
+        .first(&database)
+        .await
+        .unwrap();
+    assert!(skip_locked.is_none());
+
+    let lock_error = Query::table(USERS_TABLE)
+        .select(["id"])
+        .where_eq("id", 1_i64)
+        .for_update()
+        .nowait()
+        .first(&database)
+        .await
+        .unwrap_err();
+    assert!(format!("{lock_error:?}")
+        .to_ascii_lowercase()
+        .contains("lock"));
+
+    transaction.rollback().await.unwrap();
+
+    let timeout_error = database
+        .raw_query_with(
+            "SELECT pg_sleep(0.05)",
+            &[],
+            QueryExecutionOptions::default()
+                .with_timeout(Duration::from_millis(5))
+                .with_label("sleep probe"),
+        )
+        .await
+        .unwrap_err();
+    let timeout_message = format!("{timeout_error:?}");
+    assert!(timeout_message.contains("timed out"));
+    assert!(timeout_message.contains("sleep probe"));
+
+    let timeout_tx = database.begin().await.unwrap();
+    let tx_timeout_error = timeout_tx
+        .raw_query_with(
+            "SELECT pg_sleep(0.05)",
+            &[],
+            QueryExecutionOptions::default()
+                .with_timeout(Duration::from_millis(5))
+                .with_label("tx sleep probe"),
+        )
+        .await
+        .unwrap_err();
+    let tx_timeout_message = format!("{tx_timeout_error:?}");
+    assert!(tx_timeout_message.contains("timed out"));
+    assert!(tx_timeout_message.contains("tx sleep probe"));
+    timeout_tx.rollback().await.unwrap();
+
+    execute_batch(&database, &["DROP TYPE IF EXISTS forge_stream_mood"]).await;
+    database
+        .raw_execute("CREATE TYPE forge_stream_mood AS ENUM ('happy')", &[])
+        .await
+        .unwrap();
+    let mut unsupported_stream = database.raw_stream(
+        "SELECT 'happy'::forge_stream_mood AS mood",
+        &[],
+        QueryExecutionOptions::default().with_label("unsupported stream"),
+    );
+    let unsupported_stream_error = unsupported_stream.try_next().await.unwrap_err();
+    let unsupported_stream_message = format!("{unsupported_stream_error:?}");
+    assert!(unsupported_stream_message.contains("unsupported postgres type `forge_stream_mood`"));
+    assert!(unsupported_stream_message.contains("unsupported stream"));
+    execute_batch(&database, &["DROP TYPE IF EXISTS forge_stream_mood"]).await;
+}
+
+#[tokio::test]
+async fn advanced_mutation_queries_execute_against_postgres() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    execute_batch(
+        database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (1, 'owner@example.com', true)"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) VALUES (2, 'inactive@example.com', false)"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (10, 1, 'Forge Store', 'active')"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) VALUES (11, 2, 'Dormant Store', 'active')"
+            ),
+            "DROP TABLE IF EXISTS forge_test_user_archive",
+            "CREATE TEMP TABLE forge_test_user_archive (id BIGINT PRIMARY KEY, email TEXT NOT NULL)",
+        ],
+    )
+    .await;
+
+    let archived = Query::insert_select_into(
+        "forge_test_user_archive",
+        Query::table(USERS_TABLE)
+            .select(["id", "email"])
+            .where_eq("active", false),
+    )
+    .execute(database)
+    .await
+    .unwrap();
+    assert_eq!(archived, 1);
+
+    let archive_rows = Query::table("forge_test_user_archive")
+        .select(["id", "email"])
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(archive_rows.len(), 1);
+    assert_eq!(
+        archive_rows[0].decode::<String>("email").unwrap(),
+        "inactive@example.com".to_string()
+    );
+
+    let suspended = Merchant::update()
+        .set(Merchant::STATUS, MerchantStatus::Suspended)
+        .from(USERS_TABLE)
+        .where_(Condition::and([
+            Condition::compare(
+                Expr::column(ColumnRef::new(MERCHANTS_TABLE, "user_id")),
+                ComparisonOp::Eq,
+                Expr::column(ColumnRef::new(USERS_TABLE, "id")),
+            ),
+            Condition::compare(
+                Expr::column(ColumnRef::new(USERS_TABLE, "active")),
+                ComparisonOp::Eq,
+                Expr::value(false),
+            ),
+        ]))
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(suspended.id, 11);
+    assert_eq!(suspended.status, MerchantStatus::Suspended);
+
+    let renamed = Query::update_table(MERCHANTS_TABLE)
+        .set_expr("name", ColumnRef::new(USERS_TABLE, "email"))
+        .from(USERS_TABLE)
+        .where_(Condition::and([
+            Condition::compare(
+                Expr::column(ColumnRef::new(MERCHANTS_TABLE, "user_id")),
+                ComparisonOp::Eq,
+                Expr::column(ColumnRef::new(USERS_TABLE, "id")),
+            ),
+            Condition::compare(
+                Expr::column(ColumnRef::new(USERS_TABLE, "id")),
+                ComparisonOp::Eq,
+                Expr::value(1_i64),
+            ),
+        ]))
+        .returning(["name"])
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(
+        renamed[0].decode::<String>("name").unwrap(),
+        "owner@example.com".to_string()
+    );
+
+    let deleted = Merchant::delete()
+        .using(USERS_TABLE)
+        .where_(Condition::and([
+            Condition::compare(
+                Expr::column(ColumnRef::new(MERCHANTS_TABLE, "user_id")),
+                ComparisonOp::Eq,
+                Expr::column(ColumnRef::new(USERS_TABLE, "id")),
+            ),
+            Condition::compare(
+                Expr::column(ColumnRef::new(USERS_TABLE, "active")),
+                ComparisonOp::Eq,
+                Expr::value(false),
+            ),
+        ]))
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+
+    let remaining_merchants = Merchant::query()
+        .order_by(Merchant::ID.asc())
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(remaining_merchants.len(), 1);
+    assert_eq!(remaining_merchants[0].name, "owner@example.com");
+}

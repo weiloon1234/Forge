@@ -1,0 +1,56 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A typed modular Rust backend framework with HTTP, CLI, scheduler, websocket, jobs, auth, observability, and compile-time plugins."
+readme = "README.md"
+repository = "https://github.com/weiloon1234/Forge"
+documentation = "https://docs.rs/forge"
+keywords = ["rust", "backend", "framework", "axum", "plugin"]
+categories = ["asynchronous", "web-programming", "network-programming", "development-tools"]
+rust-version = "1.94"
+
+[workspace]
+members = ["forge-build", "forge-macros"]
+exclude = [
+    "tests/fixtures/blueprint_app",
+    "tests/fixtures/plugin_base",
+    "tests/fixtures/plugin_consumer_app",
+    "tests/fixtures/plugin_dep",
+]
+resolver = "2"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8.8", features = ["macros", "json", "ws"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["string"] }
+cron = "0.12"
+dotenvy = "0.15"
+forge-build = { path = "forge-build" }
+forge-macros = { path = "forge-macros" }
+futures-util = "0.3"
+redis = { version = "1", features = ["tokio-comp"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["any", "sqlite", "postgres", "mysql", "runtime-tokio-rustls", "chrono", "uuid"] }
+thiserror = "2"
+tokio = { version = "1.37", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+toml = "0.9"
+tower = "0.5.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+validator = { version = "0.20", features = ["derive"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
+tokio-tungstenite = "0.28"
+trybuild = "1"
+
+[build-dependencies]
+forge-build = { path = "forge-build" }

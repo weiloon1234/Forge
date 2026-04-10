@@ -1,0 +1,5 @@
+error: unsupported field type; add #[forge(db_type = "...")]
+  --> tests/ui/derive/fail_unsupported_field_type.rs:12:13
+   |
+12 |     custom: CustomType,
+   |             ^^^^^^^^^^

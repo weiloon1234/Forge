@@ -1,0 +1,5 @@
+error: duplicate projection alias `email`
+ --> tests/ui/derive/fail_duplicate_projection_aliases.rs:8:21
+  |
+8 |     #[forge(alias = "email")]
+  |                     ^^^^^^^

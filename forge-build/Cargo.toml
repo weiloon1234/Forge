@@ -1,0 +1,10 @@
+[package]
+name = "forge-build"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Build-time helpers for Forge database migration and seeder discovery."
+
+[lib]
+name = "forge_build"
+path = "src/lib.rs"

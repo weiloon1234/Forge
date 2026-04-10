@@ -1,0 +1,461 @@
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+
+use async_trait::async_trait;
+use forge::config::DatabaseConfig;
+use forge::prelude::*;
+use tempfile::TempDir;
+use tokio::sync::{Mutex, MutexGuard};
+
+const CREATE_USERS_MIGRATION_ID: &str = "202604101530_create_users";
+const CREATE_PROFILES_MIGRATION_ID: &str = "202604101531_create_profiles";
+const USERS_SEED_ID: &str = "users_seed";
+const USERS_TABLE: &str = "users";
+const PROFILES_TABLE: &str = "profiles";
+
+fn postgres_url() -> Option<String> {
+    std::env::var("FORGE_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn lifecycle_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
+
+fn next_name(prefix: &str) -> String {
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{id}")
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn migration_provider() -> GeneratedDatabaseProvider {
+    GeneratedDatabaseProvider
+}
+
+#[derive(Clone)]
+struct GeneratedDatabaseProvider;
+
+#[async_trait]
+impl ServiceProvider for GeneratedDatabaseProvider {
+    async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+        forge::register_generated_database!(registrar)?;
+        Ok(())
+    }
+}
+
+struct TestRuntime {
+    _dir: TempDir,
+    database: DatabaseManager,
+    schema: String,
+    migration_table: String,
+}
+
+impl TestRuntime {
+    async fn new() -> Option<Self> {
+        let url = postgres_url()?;
+        let schema = next_name("forge_lifecycle_schema");
+        let migration_table = next_name("forge_migrations");
+        let dir = tempfile::tempdir().ok()?;
+
+        write_runtime_config(dir.path(), &url, &schema, &migration_table);
+        let database = DatabaseManager::from_config(&DatabaseConfig {
+            url,
+            schema: schema.clone(),
+            migration_table: migration_table.clone(),
+            ..DatabaseConfig::default()
+        })
+        .await
+        .ok()?;
+
+        let runtime = Self {
+            _dir: dir,
+            database,
+            schema,
+            migration_table,
+        };
+        runtime.cleanup().await;
+        Some(runtime)
+    }
+
+    fn config_dir(&self) -> &Path {
+        self._dir.path()
+    }
+
+    async fn cleanup(&self) {
+        let _ = self
+            .database
+            .raw_execute(
+                &format!("DROP TABLE IF EXISTS {}", quote_identifier(PROFILES_TABLE)),
+                &[],
+            )
+            .await;
+        let _ = self
+            .database
+            .raw_execute(
+                &format!("DROP TABLE IF EXISTS {}", quote_identifier(USERS_TABLE)),
+                &[],
+            )
+            .await;
+        let _ = self
+            .database
+            .raw_execute(
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&self.schema)
+                ),
+                &[],
+            )
+            .await;
+    }
+
+    async fn table_exists(&self, table: &str) -> bool {
+        let records = self
+            .database
+            .raw_query(
+                "SELECT COUNT(*) AS count FROM pg_tables WHERE schemaname = 'public' AND tablename = $1",
+                &[table.into()],
+            )
+            .await
+            .unwrap();
+        records[0].decode::<i64>("count").unwrap() > 0
+    }
+
+    async fn row_count(&self, table: &str) -> i64 {
+        let records = self
+            .database
+            .raw_query(
+                &format!("SELECT COUNT(*) AS count FROM {}", quote_identifier(table)),
+                &[],
+            )
+            .await
+            .unwrap();
+        records[0].decode("count").unwrap()
+    }
+
+    async fn applied_migrations(&self) -> Vec<(String, i64)> {
+        let records = self
+            .database
+            .raw_query(
+                &format!(
+                    "SELECT id, batch FROM {}.{} ORDER BY id",
+                    quote_identifier(&self.schema),
+                    quote_identifier(&self.migration_table)
+                ),
+                &[],
+            )
+            .await
+            .unwrap_or_default();
+
+        records
+            .into_iter()
+            .map(|record| {
+                (
+                    record.decode::<String>("id").unwrap(),
+                    record.decode::<i64>("batch").unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    async fn seed_first_batch_manually(&self) {
+        self.database
+            .raw_execute(
+                &format!(
+                    "CREATE SCHEMA IF NOT EXISTS {}",
+                    quote_identifier(&self.schema)
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        self.database
+            .raw_execute(
+                &format!(
+                    "CREATE TABLE IF NOT EXISTS {}.{} (id TEXT PRIMARY KEY, batch BIGINT NOT NULL, applied_at TIMESTAMPTZ NOT NULL)",
+                    quote_identifier(&self.schema),
+                    quote_identifier(&self.migration_table)
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        self.database
+            .raw_execute(
+                &format!(
+                    "CREATE TABLE IF NOT EXISTS {} (id BIGINT PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+                    quote_identifier(USERS_TABLE)
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        self.database
+            .raw_execute(
+                &format!(
+                    "INSERT INTO {}.{} (id, batch, applied_at) VALUES ($1, 1, NOW())",
+                    quote_identifier(&self.schema),
+                    quote_identifier(&self.migration_table)
+                ),
+                &[CREATE_USERS_MIGRATION_ID.into()],
+            )
+            .await
+            .unwrap();
+    }
+}
+
+fn write_runtime_config(dir: &Path, url: &str, schema: &str, migration_table: &str) {
+    fs::write(
+        dir.join("00-runtime.toml"),
+        format!(
+            r#"
+            [database]
+            url = "{url}"
+            schema = "{schema}"
+            migration_table = "{migration_table}"
+        "#
+        ),
+    )
+    .unwrap();
+}
+
+fn write_generator_config(dir: &Path, migrations_path: &Path, seeders_path: &Path) {
+    fs::write(
+        dir.join("00-runtime.toml"),
+        format!(
+            r#"
+            [database]
+            url = ""
+            schema = "public"
+            migration_table = "forge_migrations"
+            migrations_path = "{}"
+            seeders_path = "{}"
+        "#,
+            migrations_path.display(),
+            seeders_path.display()
+        ),
+    )
+    .unwrap();
+}
+
+async fn run_cli(builder: AppBuilder, args: Vec<String>) -> Result<()> {
+    builder.build_cli_kernel().await?.run_with_args(args).await
+}
+
+#[tokio::test]
+async fn db_migrate_applies_discovered_rust_migrations_and_records_the_ledger() {
+    let _guard = lifecycle_lock().await;
+    let Some(runtime) = TestRuntime::new().await else {
+        return;
+    };
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:migrate".into()],
+    )
+    .await
+    .unwrap();
+
+    assert!(runtime.table_exists(USERS_TABLE).await);
+    assert!(runtime.table_exists(PROFILES_TABLE).await);
+    assert_eq!(
+        runtime.applied_migrations().await,
+        vec![
+            (CREATE_USERS_MIGRATION_ID.to_string(), 1),
+            (CREATE_PROFILES_MIGRATION_ID.to_string(), 1),
+        ]
+    );
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn db_rollback_reverts_only_the_latest_generated_batch() {
+    let _guard = lifecycle_lock().await;
+    let Some(runtime) = TestRuntime::new().await else {
+        return;
+    };
+
+    runtime.seed_first_batch_manually().await;
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:migrate".into()],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        runtime.applied_migrations().await,
+        vec![
+            (CREATE_USERS_MIGRATION_ID.to_string(), 1),
+            (CREATE_PROFILES_MIGRATION_ID.to_string(), 2),
+        ]
+    );
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:rollback".into()],
+    )
+    .await
+    .unwrap();
+
+    assert!(runtime.table_exists(USERS_TABLE).await);
+    assert!(!runtime.table_exists(PROFILES_TABLE).await);
+    assert_eq!(
+        runtime.applied_migrations().await,
+        vec![(CREATE_USERS_MIGRATION_ID.to_string(), 1)]
+    );
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn db_seed_runs_discovered_seeders_and_honors_id_filtering() {
+    let _guard = lifecycle_lock().await;
+    let Some(runtime) = TestRuntime::new().await else {
+        return;
+    };
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:migrate".into()],
+    )
+    .await
+    .unwrap();
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec![
+            "forge".into(),
+            "db:seed".into(),
+            "--id".into(),
+            USERS_SEED_ID.into(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.row_count(USERS_TABLE).await, 1);
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:seed".into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.row_count(USERS_TABLE).await, 2);
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn make_migration_generates_a_rust_file_and_refuses_overwrite_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations_dir = dir.path().join("migrations");
+    let seeders_dir = dir.path().join("seeders");
+    write_generator_config(dir.path(), &migrations_dir, &seeders_dir);
+
+    run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "make:migration".into(),
+            "--name".into(),
+            "create_widgets".into(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let generated = fs::read_dir(&migrations_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(generated.len(), 1);
+    assert!(generated[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .ends_with("_create_widgets.rs"));
+    assert!(fs::read_to_string(&generated[0])
+        .unwrap()
+        .contains("impl MigrationFile for Entry"));
+
+    let error = run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "make:migration".into(),
+            "--name".into(),
+            "create_widgets".into(),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("refusing to overwrite"));
+}
+
+#[tokio::test]
+async fn make_seeder_generates_a_rust_file_and_refuses_overwrite_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations_dir = dir.path().join("migrations");
+    let seeders_dir = dir.path().join("seeders");
+    write_generator_config(dir.path(), &migrations_dir, &seeders_dir);
+
+    run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "make:seeder".into(),
+            "--name".into(),
+            "UsersSeed".into(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let generated = fs::read_dir(&seeders_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(
+        generated[0].file_name().unwrap().to_string_lossy(),
+        "users_seed.rs"
+    );
+    assert!(fs::read_to_string(&generated[0])
+        .unwrap()
+        .contains("impl SeederFile for Entry"));
+
+    let error = run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "make:seeder".into(),
+            "--name".into(),
+            "UsersSeed".into(),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("refusing to overwrite"));
+}

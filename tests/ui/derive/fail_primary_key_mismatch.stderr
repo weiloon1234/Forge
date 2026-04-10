@@ -1,0 +1,5 @@
+error: primary_key `user_id` does not match any persisted field
+ --> tests/ui/derive/fail_primary_key_mismatch.rs:6:40
+  |
+6 | #[forge(model = "users", primary_key = "user_id")]
+  |                                        ^^^^^^^^^

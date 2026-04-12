@@ -114,6 +114,10 @@ pub struct WebSocketConfig {
     pub host: String,
     pub port: u16,
     pub path: String,
+    pub heartbeat_interval_seconds: u64,
+    pub heartbeat_timeout_seconds: u64,
+    pub max_messages_per_second: u32,
+    pub max_connections_per_user: u32,
 }
 
 impl Default for WebSocketConfig {
@@ -122,6 +126,10 @@ impl Default for WebSocketConfig {
             host: "127.0.0.1".to_string(),
             port: 3010,
             path: "/ws".to_string(),
+            heartbeat_interval_seconds: 30,
+            heartbeat_timeout_seconds: 10,
+            max_messages_per_second: 50,
+            max_connections_per_user: 5,
         }
     }
 }
@@ -134,6 +142,9 @@ pub struct JobsConfig {
     pub poll_interval_ms: u64,
     pub lease_ttl_ms: u64,
     pub requeue_batch_size: usize,
+    pub workers: usize,
+    pub timeout_seconds: u64,
+    pub track_history: bool,
 }
 
 impl Default for JobsConfig {
@@ -144,6 +155,9 @@ impl Default for JobsConfig {
             poll_interval_ms: 100,
             lease_ttl_ms: 30_000,
             requeue_batch_size: 64,
+            workers: 4,
+            timeout_seconds: 300,
+            track_history: true,
         }
     }
 }
@@ -282,12 +296,18 @@ impl Default for I18nConfig {
 #[serde(default)]
 pub struct ObservabilityConfig {
     pub base_path: String,
+    pub tracing_enabled: bool,
+    pub otlp_endpoint: String,
+    pub service_name: String,
 }
 
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             base_path: "/_forge".to_string(),
+            tracing_enabled: false,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: "forge".to_string(),
         }
     }
 }
@@ -329,6 +349,33 @@ impl Default for HashingConfig {
 #[serde(default)]
 pub struct CryptConfig {
     pub key: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    pub driver: CacheDriver,
+    pub prefix: String,
+    pub ttl_seconds: u64,
+    pub max_entries: usize,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            driver: CacheDriver::Redis,
+            prefix: "cache:".to_string(),
+            ttl_seconds: 3600,
+            max_entries: 10000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheDriver {
+    Redis,
+    Memory,
 }
 
 impl Default for ConfigRepository {
@@ -483,6 +530,10 @@ impl ConfigRepository {
 
     pub fn hashing(&self) -> Result<HashingConfig> {
         self.section("hashing")
+    }
+
+    pub fn cache(&self) -> Result<CacheConfig> {
+        self.section("cache")
     }
 
     pub fn crypt(&self) -> Result<CryptConfig> {

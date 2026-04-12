@@ -56,6 +56,7 @@ macro_rules! register_generated_database {
 
 pub mod app_enum;
 pub mod auth;
+pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod datatable;
@@ -68,16 +69,19 @@ pub mod i18n;
 pub mod jobs;
 pub mod kernel;
 pub mod logging;
+pub mod openapi;
 pub mod plugin;
 pub mod prelude;
 pub mod redis;
 pub mod scheduler;
+pub mod notifications;
 pub mod storage;
 pub mod support;
+pub mod testing;
 pub mod validation;
 pub mod websocket;
 
-pub use forge_macros::{AppEnum, Model, Projection, Validate};
+pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, Validate};
 
 pub use auth::{
     session::SessionManager,
@@ -86,6 +90,13 @@ pub use auth::{
     AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor, GuardedAccess,
     OptionalActor, Policy, StaticBearerAuthenticator,
 };
+pub use cache::{CacheManager, CacheStore};
+pub use notifications::{
+    BroadcastNotificationChannel, DatabaseNotificationChannel, EmailNotificationChannel,
+    Notifiable, Notification, NotificationChannel, NotificationChannelRegistry,
+    NOTIFY_BROADCAST, NOTIFY_DATABASE, NOTIFY_EMAIL,
+};
+pub use testing::{Factory, FactoryBuilder, TestApp, TestClient, TestResponse};
 pub use database::{
     belongs_to, has_many, has_one, many_to_many, AggregateExpr, AggregateFn, AggregateNode,
     AggregateProjection, AnyRelation, BinaryExpr, BinaryOperator, Case, Column, ColumnInfo,
@@ -117,12 +128,15 @@ pub use foundation::{
 };
 pub use http::cookie::{Cookie, CookieJar, SessionCookie};
 pub use http::middleware::{
-    Cors, MaxBodySize, MiddlewareConfig, RateLimit, RateLimitWindow, RealIp, RequestTimeout,
-    SecurityHeaders, TrustedProxy,
+    Compression, Cors, Csrf, CsrfToken, MaxBodySize, MiddlewareConfig, RateLimit, RateLimitBy,
+    RateLimitWindow,
+    RealIp, RequestTimeout, SecurityHeaders, TrustedProxy,
 };
 pub use i18n::{I18n, I18nManager, Locale};
-pub use jobs::spawn_worker;
+pub use jobs::{spawn_worker, JobMiddleware};
 pub use kernel::worker::WorkerKernel;
+pub use openapi::{ApiSchema, RouteDoc, SchemaRef};
+pub use openapi::spec::{generate_openapi_spec, DocumentedRoute};
 pub use logging::{
     AuthOutcome, HttpOutcomeClass, JobOutcome, LivenessReport, LogFormat, LogLevel,
     ObservabilityOptions, ProbeResult, ProbeState, ReadinessCheck, ReadinessReport, RequestId,
@@ -140,9 +154,10 @@ pub use storage::{
     StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadedFile,
 };
 pub use support::{
-    sha256_hex, sha256_hex_str, ChannelEventId, ChannelId, Clock, Collection, CommandId,
+    sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock, Collection, CommandId,
     CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId, LocalDateTime, MigrationId,
-    ModelId, PermissionId, PluginAssetId, PluginId, PluginScaffoldId, PolicyId, ProbeId, QueueId,
+    ModelId, NotificationChannelId, PermissionId, PluginAssetId, PluginId, PluginScaffoldId,
+    PolicyId, ProbeId, QueueId,
     RoleId, ScheduleId, SeederId, Time, Timezone, Token, ValidationRuleId,
 };
 pub use websocket::{ERROR_EVENT, SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT};

@@ -11,11 +11,12 @@ use crate::database::{MigrationFile, MigrationRegistryHandle, SeederFile, Seeder
 use crate::email::{EmailDriverFactory, EmailDriverRegistryHandle};
 use crate::events::{Event, EventListener, EventRegistryHandle};
 use crate::foundation::{Container, Result};
-use crate::jobs::{Job, JobRegistryHandle};
+use crate::jobs::{Job, JobMiddleware, JobMiddlewareRegistryHandle, JobRegistryHandle};
 use crate::logging::{ReadinessCheck, ReadinessRegistryHandle};
 use crate::storage::{StorageDriverFactory, StorageDriverRegistryHandle};
 use crate::support::{GuardId, MigrationId, PolicyId, ProbeId, SeederId};
 use crate::datatable::registry::{DatatableRegistryHandle, DatatableRegistryBuilder};
+use crate::notifications::{NotificationChannel, NotificationChannelRegistryHandle, NotificationChannelRegistryBuilder};
 
 #[derive(Clone)]
 pub struct ServiceRegistrar {
@@ -23,6 +24,7 @@ pub struct ServiceRegistrar {
     config: ConfigRepository,
     event_registry: EventRegistryHandle,
     job_registry: JobRegistryHandle,
+    job_middleware_registry: JobMiddlewareRegistryHandle,
     migration_registry: MigrationRegistryHandle,
     seeder_registry: SeederRegistryHandle,
     guard_registry: GuardRegistryHandle,
@@ -31,6 +33,7 @@ pub struct ServiceRegistrar {
     readiness_registry: ReadinessRegistryHandle,
     storage_driver_registry: StorageDriverRegistryHandle,
     email_driver_registry: EmailDriverRegistryHandle,
+    notification_channel_registry: NotificationChannelRegistryHandle,
     datatable_registry: DatatableRegistryHandle,
 }
 
@@ -41,6 +44,7 @@ impl ServiceRegistrar {
         config: ConfigRepository,
         event_registry: EventRegistryHandle,
         job_registry: JobRegistryHandle,
+        job_middleware_registry: JobMiddlewareRegistryHandle,
         migration_registry: MigrationRegistryHandle,
         seeder_registry: SeederRegistryHandle,
         guard_registry: GuardRegistryHandle,
@@ -55,6 +59,7 @@ impl ServiceRegistrar {
             config,
             event_registry,
             job_registry,
+            job_middleware_registry,
             migration_registry,
             seeder_registry,
             guard_registry,
@@ -63,6 +68,7 @@ impl ServiceRegistrar {
             readiness_registry,
             storage_driver_registry,
             email_driver_registry,
+            notification_channel_registry: NotificationChannelRegistryBuilder::shared(),
             datatable_registry: DatatableRegistryBuilder::shared(),
         }
     }
@@ -126,6 +132,14 @@ impl ServiceRegistrar {
             .register::<J>()
     }
 
+    pub fn register_job_middleware<M: JobMiddleware>(&self, middleware: M) -> Result<()> {
+        self.job_middleware_registry
+            .lock()
+            .expect("job middleware registry lock poisoned")
+            .register(Arc::new(middleware));
+        Ok(())
+    }
+
     pub(crate) fn register_generated_migration_file<M>(
         &self,
         id: impl Into<MigrationId>,
@@ -181,9 +195,6 @@ impl ServiceRegistrar {
             .register::<M>()
     }
 
-    pub(crate) fn authenticatable_registry(&self) -> AuthenticatableRegistryHandle {
-        self.authenticatable_registry.clone()
-    }
 
     pub fn register_readiness_check<I, C>(&self, id: I, check: C) -> Result<()>
     where
@@ -208,6 +219,29 @@ impl ServiceRegistrar {
             .lock()
             .expect("email driver registry lock poisoned")
             .register(name.to_string(), factory)
+    }
+
+    pub fn register_notification_channel<I, N>(
+        &self,
+        id: I,
+        channel: N,
+    ) -> Result<()>
+    where
+        I: Into<crate::support::NotificationChannelId>,
+        N: NotificationChannel,
+    {
+        self.notification_channel_registry
+            .lock()
+            .expect("notification channel registry lock poisoned")
+            .register(id, Arc::new(channel))
+    }
+
+    pub(crate) fn notification_channel_registry(&self) -> NotificationChannelRegistryHandle {
+        self.notification_channel_registry.clone()
+    }
+
+    pub(crate) fn job_middleware_registry(&self) -> JobMiddlewareRegistryHandle {
+        self.job_middleware_registry.clone()
     }
 
     pub fn register_datatable<D>(&self) -> Result<()>

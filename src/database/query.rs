@@ -1533,6 +1533,38 @@ where
         self
     }
 
+    /// Filter results using PostgreSQL full-text search.
+    ///
+    /// Generates a `WHERE to_tsvector('english', col1 || ' ' || col2) @@ plainto_tsquery('english', ?)`
+    /// condition across the given columns.
+    ///
+    /// **Important:** For performance, create a GIN index matching the expression:
+    /// ```sql
+    /// CREATE INDEX idx_users_search ON users
+    ///     USING GIN (to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(email, '')));
+    /// ```
+    /// Without a matching index, PostgreSQL performs a full sequential scan.
+    /// The index expression must match the columns passed to `search()` exactly.
+    pub fn search<T>(self, columns: &[Column<M, T>], query: &str) -> Self {
+        let tsvector_parts: Vec<String> = columns
+            .iter()
+            .map(|c| {
+                let col_ref = c.column_ref();
+                let qualified = match &col_ref.table {
+                    Some(table) => format!("\"{}\".\"{}\"", table, col_ref.name),
+                    None => format!("\"{}\"", col_ref.name),
+                };
+                format!("COALESCE({}, '')", qualified)
+            })
+            .collect();
+        let tsvector = tsvector_parts.join(" || ' ' || ");
+        let sql = format!(
+            "to_tsvector('english', {}) @@ plainto_tsquery('english', ?)",
+            tsvector
+        );
+        self.where_(Condition::raw(sql, vec![DbValue::Text(query.to_string())]))
+    }
+
     pub fn with_trashed(mut self) -> Self {
         self.soft_delete_scope = SoftDeleteScope::WithTrashed;
         self
@@ -2332,10 +2364,10 @@ where
         E: ModelWriteExecutor,
     {
         let create_many = self.clone();
-        with_model_write_transaction(executor, |app, transaction| {
+        with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
                 let prepared =
-                    prepare_create_many_for_execution(&create_many, app, transaction).await?;
+                    prepare_create_many_for_execution(&create_many, app, transaction, actor).await?;
                 transaction
                     .execute_compiled_with(
                         &prepared.compiled_sql(false)?,
@@ -2352,10 +2384,10 @@ where
         E: ModelWriteExecutor,
     {
         let create_many = self.clone();
-        with_model_write_transaction(executor, |app, transaction| {
+        with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
                 let prepared =
-                    prepare_create_many_for_execution(&create_many, app, transaction).await?;
+                    prepare_create_many_for_execution(&create_many, app, transaction, actor).await?;
                 let records = transaction
                     .query_records_with(&prepared.compiled_sql(true)?, create_many.options.clone())
                     .await?;
@@ -2582,9 +2614,9 @@ where
         E: ModelWriteExecutor,
     {
         let update = self.clone();
-        with_model_write_transaction(executor, |app, transaction| {
+        with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
-                let prepared = prepare_update_for_execution(&update, app, transaction).await?;
+                let prepared = prepare_update_for_execution(&update, app, transaction, actor).await?;
                 transaction
                     .execute_compiled_with(&prepared.compiled_sql(false)?, update.options.clone())
                     .await
@@ -2598,9 +2630,9 @@ where
         E: ModelWriteExecutor,
     {
         let update = self.clone();
-        with_model_write_transaction(executor, |app, transaction| {
+        with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
-                let prepared = prepare_update_for_execution(&update, app, transaction).await?;
+                let prepared = prepare_update_for_execution(&update, app, transaction, actor).await?;
                 let records = transaction
                     .query_records_with(&prepared.compiled_sql(true)?, update.options.clone())
                     .await?;
@@ -2851,17 +2883,18 @@ async fn with_model_write_transaction<E, T>(
     operation: impl for<'a> FnOnce(
         &'a AppContext,
         &'a super::runtime::DatabaseTransaction,
+        Option<&'a crate::auth::Actor>,
     ) -> ModelWriteFuture<'a, T>,
 ) -> Result<T>
 where
     E: ModelWriteExecutor,
 {
     if let Some(transaction) = executor.active_transaction() {
-        return operation(executor.app_context(), transaction).await;
+        return operation(executor.app_context(), transaction, executor.actor()).await;
     }
 
     let transaction = executor.app_context().begin_transaction().await?;
-    let result = operation(transaction.app(), transaction.transaction()).await;
+    let result = operation(transaction.app(), transaction.transaction(), None).await;
     match result {
         Ok(value) => {
             transaction.commit().await?;
@@ -2959,13 +2992,13 @@ where
 {
     create.validate_rows()?;
     let create = create.clone();
-    with_model_write_transaction(executor, |app, transaction| {
+    with_model_write_transaction(executor, |app, transaction, actor| {
         Box::pin(async move {
             let database = app.database()?;
             let mut values = create.rows[0].clone();
             apply_create_model_conventions(create.table, app, &mut values)?;
             let mut draft = CreateDraft::<M>::new(values);
-            let context = ModelHookContext::new(app, database, transaction);
+            let context = ModelHookContext::new(app, database, transaction, actor);
             M::Lifecycle::creating(&context, &mut draft).await?;
             let mut on_conflict = create.on_conflict.clone();
             let mut values = draft.into_values();
@@ -3025,7 +3058,7 @@ where
 {
     create_many.validate_rows()?;
     let create_many = create_many.clone();
-    with_model_write_transaction(executor, |app, transaction| {
+    with_model_write_transaction(executor, |app, transaction, actor| {
         Box::pin(async move {
             let mut created = Vec::new();
             for row in &create_many.rows {
@@ -3036,7 +3069,7 @@ where
                     options: create_many.options.clone(),
                 };
                 created
-                    .extend(create_model_records_in_transaction(&create, app, transaction).await?);
+                    .extend(create_model_records_in_transaction(&create, app, transaction, actor).await?);
             }
             Ok(created)
         })
@@ -3048,6 +3081,7 @@ async fn create_model_records_in_transaction<M>(
     create: &CreateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<&crate::auth::Actor>,
 ) -> Result<Vec<M>>
 where
     M: Model,
@@ -3056,7 +3090,7 @@ where
     let mut values = create.rows[0].clone();
     apply_create_model_conventions(create.table, app, &mut values)?;
     let mut draft = CreateDraft::<M>::new(values);
-    let context = ModelHookContext::new(app, database, transaction);
+    let context = ModelHookContext::new(app, database, transaction, actor);
     M::Lifecycle::creating(&context, &mut draft).await?;
     let mut on_conflict = create.on_conflict.clone();
     let mut values = draft.into_values();
@@ -3106,9 +3140,9 @@ where
 {
     update.validate()?;
     let update = update.clone();
-    with_model_write_transaction(executor, |app, transaction| {
+    with_model_write_transaction(executor, |app, transaction, actor| {
         Box::pin(
-            async move { update_model_records_in_transaction(&update, app, transaction).await },
+            async move { update_model_records_in_transaction(&update, app, transaction, actor).await },
         )
     })
     .await
@@ -3118,13 +3152,14 @@ async fn update_model_records_in_transaction<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<&crate::auth::Actor>,
 ) -> Result<Vec<M>>
 where
     M: Model,
 {
     let current_records = select_update_target_records(update, transaction).await?;
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction);
+    let context = ModelHookContext::new(app, database, transaction, actor);
     let mut updated_models = Vec::with_capacity(current_records.len());
 
     for current_record in current_records {
@@ -3198,8 +3233,8 @@ where
 {
     delete.validate()?;
     let delete = delete.clone();
-    with_model_write_transaction(executor, |app, transaction| {
-        Box::pin(async move { delete_model_rows_in_transaction(&delete, app, transaction).await })
+    with_model_write_transaction(executor, |app, transaction, actor| {
+        Box::pin(async move { delete_model_rows_in_transaction(&delete, app, transaction, actor).await })
     })
     .await
 }
@@ -3208,13 +3243,14 @@ async fn delete_model_rows_in_transaction<M>(
     delete: &DeleteModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<&crate::auth::Actor>,
 ) -> Result<u64>
 where
     M: Model,
 {
     let current_records = select_delete_target_records(delete, transaction).await?;
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction);
+    let context = ModelHookContext::new(app, database, transaction, actor);
 
     for current_record in &current_records {
         let current_model = delete.table.hydrate_record(current_record)?;
@@ -3370,13 +3406,14 @@ async fn prepare_create_many_for_execution<M>(
     create_many: &CreateManyModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<&crate::auth::Actor>,
 ) -> Result<CreateManyModel<M>>
 where
     M: Model,
 {
     let mut prepared = create_many.clone();
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction);
+    let context = ModelHookContext::new(app, database, transaction, actor);
     for row in &mut prepared.rows {
         apply_create_model_conventions(prepared.table, app, row)?;
         apply_assignment_write_mutators(prepared.table, &context, row).await?;
@@ -3396,6 +3433,7 @@ async fn prepare_update_for_execution<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<&crate::auth::Actor>,
 ) -> Result<UpdateModel<M>>
 where
     M: Model,
@@ -3408,7 +3446,7 @@ where
         prepared.system_action,
     )?;
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction);
+    let context = ModelHookContext::new(app, database, transaction, actor);
     apply_update_write_mutators(prepared.table, &context, &mut prepared.values).await?;
     prepared.system_action = SystemUpdateAction::None;
     Ok(prepared)

@@ -3,6 +3,7 @@ use proc_macro::TokenStream;
 mod app_enum;
 mod common;
 mod model;
+mod openapi;
 mod projection;
 mod validate;
 
@@ -24,6 +25,11 @@ pub fn derive_app_enum(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Validate, attributes(validate))]
 pub fn derive_validate(input: TokenStream) -> TokenStream {
     expand(input, validate::expand)
+}
+
+#[proc_macro_derive(ApiSchema)]
+pub fn derive_api_schema(input: TokenStream) -> TokenStream {
+    expand(input, openapi::expand)
 }
 
 fn expand(

@@ -23,6 +23,7 @@ resolver = "2"
 
 [dependencies]
 aes-gcm = "0.10"
+ammonia = "4"
 anyhow = "1"
 argon2 = "0.5"
 async-trait = "0.1"
@@ -56,12 +57,20 @@ thiserror = "2"
 tokio = { version = "1.37", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 toml = "0.9"
 tower = "0.5.3"
-tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "fs", "limit", "timeout"] }
 tracing = "0.1"
 url = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 validator = { version = "0.20", features = ["derive"] }
+
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry-otlp = { version = "0.27", optional = true, features = ["tonic"] }
+opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio"] }
+tracing-opentelemetry = { version = "0.28", optional = true }
+
+[features]
+otel = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk", "tracing-opentelemetry"]
 
 [dev-dependencies]
 tempfile = "3"

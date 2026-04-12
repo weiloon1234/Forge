@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,6 @@ impl SessionManager {
         let session_key = self.redis.key(format!("session:{session_id}"));
         conn.set_ex(&session_key, &json, ttl_secs).await?;
 
-        // Track session in index set for "logout everywhere"
         let index_key = self
             .redis
             .key(format!("session_index:{guard}:{actor_id}"));
@@ -90,7 +89,6 @@ impl SessionManager {
         let mut conn = self.redis.connection().await?;
         let session_key = self.redis.key(format!("session:{session_id}"));
 
-        // Read session data to clean up index
         let json: String = match conn.get(&session_key).await {
             Ok(value) => value,
             Err(_) => return Ok(()),
@@ -120,28 +118,19 @@ impl SessionManager {
 
         let session_ids: Vec<String> = conn.smembers(&index_key).await.unwrap_or_default();
 
-        for sid in &session_ids {
-            let session_key = self.redis.key(format!("session:{sid}"));
-            conn.del(&session_key).await?;
-        }
+        let session_keys: Vec<_> = session_ids
+            .iter()
+            .map(|sid| self.redis.key(format!("session:{sid}")))
+            .collect();
 
-        conn.del(&index_key).await?;
+        let all_keys: Vec<&_> = session_keys.iter().chain(std::iter::once(&index_key)).collect();
+        conn.del_many(&all_keys).await?;
         Ok(())
     }
 
     /// Extract session ID from request headers by parsing the Cookie header.
     pub(crate) fn extract_session_id(&self, headers: &HeaderMap) -> Option<String> {
-        let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-        for part in cookie_header.split(';') {
-            let part = part.trim();
-            if let Some(value) = part.strip_prefix(&format!("{}=", self.config.cookie_name)) {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
+        crate::http::cookie::extract_cookie_value(headers, &self.config.cookie_name)
     }
 
     /// Build a response that sets the session cookie alongside the given body.
@@ -149,30 +138,32 @@ impl SessionManager {
         &self,
         session_id: String,
         body: impl IntoResponse,
-    ) -> Response {
+    ) -> Result<Response> {
         let cookie = SessionCookie::build(
             &self.config.cookie_name,
             &session_id,
             self.config.cookie_secure,
         );
-        let mut response = body.into_response();
-        if let Ok(header_value) = cookie.to_string().parse() {
-            response
-                .headers_mut()
-                .append(axum::http::header::SET_COOKIE, header_value);
-        }
-        response
+        self.with_cookie_header(cookie, body)
     }
 
     /// Build a response that clears the session cookie.
-    pub fn logout_response(&self, body: impl IntoResponse) -> Response {
+    pub fn logout_response(&self, body: impl IntoResponse) -> Result<Response> {
         let cookie = SessionCookie::clear(&self.config.cookie_name);
+        self.with_cookie_header(cookie, body)
+    }
+
+    fn with_cookie_header(
+        &self,
+        cookie: crate::http::cookie::Cookie<'_>,
+        body: impl IntoResponse,
+    ) -> Result<Response> {
+        let header_value = HeaderValue::from_str(&cookie.to_string())
+            .map_err(|e| Error::message(format!("invalid session cookie value: {e}")))?;
         let mut response = body.into_response();
-        if let Ok(header_value) = cookie.to_string().parse() {
-            response
-                .headers_mut()
-                .append(axum::http::header::SET_COOKIE, header_value);
-        }
         response
+            .headers_mut()
+            .append(header::SET_COOKIE, header_value);
+        Ok(response)
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use ::redis::aio::MultiplexedConnection;
 use ::redis::{FromRedisValue, ToRedisArgs};
+use tokio::sync::OnceCell;
 
 use crate::config::ConfigRepository;
 use crate::foundation::{Error, Result};
@@ -87,6 +88,7 @@ impl fmt::Display for RedisChannel {
 pub struct RedisManager {
     client: Option<::redis::Client>,
     namespace: Arc<str>,
+    cached_connection: Arc<OnceCell<MultiplexedConnection>>,
 }
 
 impl RedisManager {
@@ -101,6 +103,7 @@ impl RedisManager {
         Ok(Self {
             client,
             namespace: Arc::<str>::from(redis.namespace),
+            cached_connection: Arc::new(OnceCell::new()),
         })
     }
 
@@ -137,11 +140,20 @@ impl RedisManager {
             .client
             .as_ref()
             .ok_or_else(|| Error::message("redis is not configured"))?;
-        let connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(Error::other)?;
-        Ok(RedisConnection { connection })
+
+        let conn = self
+            .cached_connection
+            .get_or_try_init(|| async {
+                client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)
+            })
+            .await?;
+
+        Ok(RedisConnection {
+            connection: conn.clone(),
+        })
     }
 }
 
@@ -193,6 +205,19 @@ impl RedisConnection {
         ::redis::cmd("DEL")
             .arg(key.as_str())
             .query_async(&mut self.connection)
+            .await
+            .map_err(Error::other)
+    }
+
+    pub async fn del_many(&mut self, keys: &[&RedisKey]) -> Result<usize> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut cmd = ::redis::cmd("DEL");
+        for key in keys {
+            cmd.arg(key.as_str());
+        }
+        cmd.query_async(&mut self.connection)
             .await
             .map_err(Error::other)
     }

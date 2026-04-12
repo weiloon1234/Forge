@@ -879,6 +879,17 @@ impl CompilerState {
                 Ok(format!("{} IS NOT NULL", self.compile_column(column)))
             }
             Condition::Exists(query) => Ok(format!("EXISTS ({})", self.compile_query(query)?)),
+            Condition::Raw { sql, bindings } => {
+                let mut compiled = String::new();
+                let mut binding_iter = bindings.iter();
+                for segment in sql.split('?') {
+                    compiled.push_str(segment);
+                    if let Some(value) = binding_iter.next() {
+                        compiled.push_str(&self.bind_value(value.clone()));
+                    }
+                }
+                Ok(compiled)
+            }
         }
     }
 

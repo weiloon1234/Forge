@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use ::redis::AsyncCommands;
@@ -115,9 +115,235 @@ impl RuntimeBackend {
                 }
                 Ok(count as u64)
             }
-            Self::Memory(_) => Err(Error::other(anyhow::anyhow!(
-                "memory backend does not support incr_with_ttl"
-            ))),
+            Self::Memory(runtime) => {
+                let now = std::time::Instant::now();
+                let ttl = std::time::Duration::from_secs(ttl_secs);
+                let mut counters = runtime.counters.lock().await;
+                let entry = counters.entry(key.to_string()).or_insert(MemoryCounter {
+                    count: 0,
+                    expires_at: now + ttl,
+                });
+                // Reset if expired
+                if now >= entry.expires_at {
+                    entry.count = 0;
+                    entry.expires_at = now + ttl;
+                }
+                entry.count += 1;
+                Ok(entry.count)
+            }
+        }
+    }
+
+    /// Add a member to a set.
+    pub async fn sadd(&self, key: &str, member: &str) -> Result<()> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let _: () = conn.sadd(full_key, member).await.map_err(Error::other)?;
+                Ok(())
+            }
+            Self::Memory(runtime) => {
+                let mut sets = runtime.sets.lock().await;
+                sets.entry(key.to_string())
+                    .or_default()
+                    .insert(member.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove a member from a set.
+    pub async fn srem(&self, key: &str, member: &str) -> Result<()> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let _: () = conn.srem(full_key, member).await.map_err(Error::other)?;
+                Ok(())
+            }
+            Self::Memory(runtime) => {
+                let mut sets = runtime.sets.lock().await;
+                if let Some(set) = sets.get_mut(key) {
+                    set.remove(member);
+                    if set.is_empty() {
+                        sets.remove(key);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Return all members of a set.
+    pub async fn smembers(&self, key: &str) -> Result<Vec<String>> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let members: Vec<String> =
+                    conn.smembers(full_key).await.map_err(Error::other)?;
+                Ok(members)
+            }
+            Self::Memory(runtime) => {
+                let sets = runtime.sets.lock().await;
+                Ok(sets
+                    .get(key)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default())
+            }
+        }
+    }
+
+    /// Return the number of members in a set.
+    pub async fn scard(&self, key: &str) -> Result<usize> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let count: usize = conn.scard(full_key).await.map_err(Error::other)?;
+                Ok(count)
+            }
+            Self::Memory(runtime) => {
+                let sets = runtime.sets.lock().await;
+                Ok(sets.get(key).map(|s| s.len()).unwrap_or(0))
+            }
+        }
+    }
+
+    /// Set a key only if it does not already exist, with a TTL.
+    ///
+    /// Returns `true` if the key was set (did not exist), `false` if
+    /// it already existed (duplicate).
+    pub async fn set_if_absent(&self, key: &str, ttl_secs: u64) -> Result<bool> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                // SET key 1 NX EX ttl — returns OK if set, nil if already exists
+                let result: Option<String> = ::redis::cmd("SET")
+                    .arg(&full_key)
+                    .arg(1)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(ttl_secs as i64)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(result.is_some())
+            }
+            Self::Memory(runtime) => {
+                let now = std::time::Instant::now();
+                let ttl = std::time::Duration::from_secs(ttl_secs);
+                let mut unique_keys = runtime.unique_keys.lock().await;
+                // Evict expired entry
+                if let Some(expires_at) = unique_keys.get(key) {
+                    if now >= *expires_at {
+                        unique_keys.remove(key);
+                    }
+                }
+                if unique_keys.contains_key(key) {
+                    Ok(false)
+                } else {
+                    unique_keys.insert(key.to_string(), now + ttl);
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    /// Push a value to the head of a list and trim to a maximum length (circular buffer).
+    ///
+    /// Equivalent to `LPUSH key value` followed by `LTRIM key 0 (max_len - 1)`.
+    pub async fn lpush_capped(&self, key: &str, value: &str, max_len: usize) -> Result<()> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let _: () = conn.lpush(&full_key, value).await.map_err(Error::other)?;
+                let _: () = conn
+                    .ltrim(&full_key, 0, max_len as isize - 1)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(())
+            }
+            Self::Memory(runtime) => {
+                let mut lists = runtime.lists.lock().await;
+                let list = lists.entry(key.to_string()).or_default();
+                list.push_front(value.to_string());
+                while list.len() > max_len {
+                    list.pop_back();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Return a range of elements from a list.
+    ///
+    /// Equivalent to `LRANGE key start stop`.
+    pub async fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<String>> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let values: Vec<String> = conn
+                    .lrange(&full_key, start as isize, stop as isize)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(values)
+            }
+            Self::Memory(runtime) => {
+                let lists = runtime.lists.lock().await;
+                let Some(list) = lists.get(key) else {
+                    return Ok(Vec::new());
+                };
+                let len = list.len() as i64;
+                // Normalize negative indices like Redis does.
+                let s = if start < 0 {
+                    (len + start).max(0) as usize
+                } else {
+                    start as usize
+                };
+                let e = if stop < 0 {
+                    (len + stop).max(0) as usize
+                } else {
+                    stop as usize
+                };
+                if s > e || s >= list.len() {
+                    return Ok(Vec::new());
+                }
+                let end = e.min(list.len() - 1);
+                Ok(list.iter().skip(s).take(end - s + 1).cloned().collect())
+            }
         }
     }
 }
@@ -200,6 +426,15 @@ impl RedisRuntime {
     }
 }
 
+/// Batch metadata stored in the memory backend.
+#[derive(Clone, Debug)]
+pub(crate) struct MemoryBatchMeta {
+    pub total: u64,
+    pub completed: u64,
+    pub on_complete_job: Option<String>,
+    pub on_complete_queue: Option<String>,
+}
+
 pub(crate) struct MemoryRuntime {
     pub(crate) ws_tx: broadcast::Sender<PubSubMessage>,
     pub(crate) ready_queues: Mutex<HashMap<QueueId, VecDeque<String>>>,
@@ -208,7 +443,18 @@ pub(crate) struct MemoryRuntime {
     pub(crate) payloads: Mutex<HashMap<String, String>>,
     pub(crate) dead_letters: Mutex<HashMap<QueueId, Vec<String>>>,
     pub(crate) scheduler_leader: Mutex<Option<LeadershipLease>>,
+    pub(crate) batches: Mutex<HashMap<String, MemoryBatchMeta>>,
+    pub(crate) counters: Mutex<HashMap<String, MemoryCounter>>,
+    pub(crate) unique_keys: Mutex<HashMap<String, std::time::Instant>>,
+    pub(crate) sets: Mutex<HashMap<String, HashSet<String>>>,
+    pub(crate) lists: Mutex<HashMap<String, VecDeque<String>>>,
     pub(crate) notify: Notify,
+}
+
+/// In-memory counter with TTL-based expiration.
+pub(crate) struct MemoryCounter {
+    pub count: u64,
+    pub expires_at: std::time::Instant,
 }
 
 #[derive(Clone)]
@@ -240,6 +486,11 @@ impl MemoryRuntime {
             payloads: Mutex::new(HashMap::new()),
             dead_letters: Mutex::new(HashMap::new()),
             scheduler_leader: Mutex::new(None),
+            batches: Mutex::new(HashMap::new()),
+            counters: Mutex::new(HashMap::new()),
+            unique_keys: Mutex::new(HashMap::new()),
+            sets: Mutex::new(HashMap::new()),
+            lists: Mutex::new(HashMap::new()),
             notify: Notify::new(),
         }
     }

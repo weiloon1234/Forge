@@ -1,10 +1,12 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::auth::{
-    AuthManager, AuthenticatableRegistry, AuthenticatableRegistryBuilder, Authorizer,
+    Actor, AuthManager, AuthenticatableRegistry, AuthenticatableRegistryBuilder, Authorizer,
     GuardRegistryBuilder, PolicyRegistryBuilder,
 };
 use crate::cli::CommandRegistrar;
@@ -18,7 +20,7 @@ use crate::events::{EventBus, EventRegistryBuilder};
 use crate::foundation::{Container, Error, Result, ServiceProvider, ServiceRegistrar};
 use crate::http::middleware::MiddlewareConfig;
 use crate::http::RouteRegistrar;
-use crate::jobs::{JobDispatcher, JobRegistryBuilder, JobRuntime};
+use crate::jobs::{JobDispatcher, JobMiddlewareRegistryBuilder, JobRegistryBuilder, JobRuntime};
 use crate::kernel::{
     cli::CliKernel, http::HttpKernel, scheduler::SchedulerKernel, websocket::WebSocketKernel,
     worker::WorkerKernel,
@@ -45,9 +47,14 @@ pub struct AppContext {
     rules: RuleRegistry,
 }
 
+type AfterCommitFn =
+    Box<dyn FnOnce(AppContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+
 pub struct AppTransaction {
     app: AppContext,
     transaction: DatabaseTransaction,
+    after_commit: Vec<AfterCommitFn>,
+    actor: Option<Actor>,
 }
 
 impl AppContext {
@@ -142,6 +149,8 @@ impl AppContext {
         Ok(AppTransaction {
             app: self.clone(),
             transaction,
+            after_commit: Vec::new(),
+            actor: None,
         })
     }
 
@@ -173,6 +182,27 @@ impl AppContext {
         self.resolve::<crate::auth::session::SessionManager>()
     }
 
+    pub fn cache(&self) -> Result<Arc<crate::cache::CacheManager>> {
+        self.resolve::<crate::cache::CacheManager>()
+    }
+
+    pub async fn notify(
+        &self,
+        notifiable: &dyn crate::notifications::Notifiable,
+        notification: &dyn crate::notifications::Notification,
+    ) -> Result<()> {
+        crate::notifications::notify(self, notifiable, notification).await
+    }
+
+    /// Dispatch a notification asynchronously via the job queue.
+    pub async fn notify_queued(
+        &self,
+        notifiable: &dyn crate::notifications::Notifiable,
+        notification: &dyn crate::notifications::Notification,
+    ) -> Result<()> {
+        crate::notifications::notify_queued(self, notifiable, notification).await
+    }
+
     pub(crate) fn job_runtime(&self) -> Result<Arc<JobRuntime>> {
         self.resolve::<JobRuntime>()
     }
@@ -187,11 +217,71 @@ impl AppTransaction {
         &self.transaction
     }
 
-    pub async fn commit(self) -> Result<()> {
-        self.transaction.commit().await
+    /// Set the actor for audit trail support in lifecycle hooks.
+    ///
+    /// When an actor is set, it will be available via `ModelHookContext::actor()`
+    /// in all lifecycle hooks (creating, created, updating, updated, deleting, deleted)
+    /// triggered through this transaction.
+    pub fn set_actor(&mut self, actor: Actor) {
+        self.actor = Some(actor);
     }
 
+    pub fn actor(&self) -> Option<&Actor> {
+        self.actor.as_ref()
+    }
+
+    /// Buffer a job dispatch that will only execute after a successful `commit()`.
+    ///
+    /// If the transaction is rolled back (or dropped), the job is never dispatched.
+    pub fn dispatch_after_commit<J: crate::jobs::Job>(&mut self, job: J) {
+        self.after_commit.push(Box::new(move |app| {
+            Box::pin(async move { app.jobs()?.dispatch(job).await })
+        }));
+    }
+
+    /// Buffer a queued notification that will only be dispatched after a successful `commit()`.
+    ///
+    /// Channel payloads are pre-rendered immediately (at call time) so
+    /// the notification/notifiable do not need to outlive the transaction.
+    pub fn notify_after_commit(
+        &mut self,
+        notifiable: &dyn crate::notifications::Notifiable,
+        notification: &dyn crate::notifications::Notification,
+    ) {
+        let job = crate::notifications::build_notification_job(notifiable, notification);
+        self.dispatch_after_commit(job);
+    }
+
+    /// Register an arbitrary async callback to run after a successful `commit()`.
+    pub fn after_commit<F, Fut>(&mut self, callback: F)
+    where
+        F: FnOnce(AppContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.after_commit
+            .push(Box::new(move |app| Box::pin(callback(app))));
+    }
+
+    /// Commit the database transaction, then flush all pending after-commit callbacks.
+    ///
+    /// If the commit itself fails, no callbacks are executed.
+    /// If an after-commit callback fails, the error is logged but remaining callbacks
+    /// continue to execute (the database commit is not rolled back).
+    pub async fn commit(self) -> Result<()> {
+        self.transaction.commit().await?;
+
+        for callback in self.after_commit {
+            if let Err(error) = callback(self.app.clone()).await {
+                tracing::error!(error = %error, "after-commit dispatch failed");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Roll back the database transaction. All pending after-commit callbacks are dropped.
     pub async fn rollback(self) -> Result<()> {
+        // `self.after_commit` is dropped — callbacks never execute.
         self.transaction.rollback().await
     }
 }
@@ -260,6 +350,10 @@ impl ModelWriteExecutor for AppTransaction {
     fn active_transaction(&self) -> Option<&DatabaseTransaction> {
         Some(&self.transaction)
     }
+
+    fn actor(&self) -> Option<&Actor> {
+        self.actor.as_ref()
+    }
 }
 
 pub struct App;
@@ -282,6 +376,7 @@ pub struct AppBuilder {
     validation_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
     middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
+    spa_dir: Option<PathBuf>,
 }
 
 impl Default for AppBuilder {
@@ -304,7 +399,22 @@ impl AppBuilder {
             validation_rules: Vec::new(),
             middlewares: Vec::new(),
             observability: None,
+            spa_dir: None,
         }
+    }
+
+    /// Serve a SPA frontend from the given directory. All requests not matched
+    /// by API routes will fall back to `{dir}/index.html` for client-side routing.
+    ///
+    /// ```ignore
+    /// App::builder()
+    ///     .register_routes(api::routes)
+    ///     .serve_spa("dist/")
+    ///     .run_http()?;
+    /// ```
+    pub fn serve_spa(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.spa_dir = Some(dir.into());
+        self
     }
 
     pub fn load_env(mut self) -> Self {
@@ -449,6 +559,7 @@ impl AppBuilder {
             boot.routes,
             boot.middlewares,
             boot.observability,
+            boot.spa_dir,
         ))
     }
 
@@ -489,6 +600,7 @@ impl AppBuilder {
             validation_rules,
             middlewares,
             observability,
+            spa_dir,
         } = self;
 
         if load_env {
@@ -519,6 +631,7 @@ impl AppBuilder {
 
         let event_registry = EventRegistryBuilder::shared();
         let job_registry = JobRegistryBuilder::shared();
+        let job_middleware_registry = JobMiddlewareRegistryBuilder::shared();
         let migration_registry = MigrationRegistryBuilder::shared();
         let seeder_registry = SeederRegistryBuilder::shared();
         let guard_registry = GuardRegistryBuilder::shared();
@@ -532,6 +645,7 @@ impl AppBuilder {
             config.clone(),
             event_registry.clone(),
             job_registry.clone(),
+            job_middleware_registry.clone(),
             migration_registry.clone(),
             seeder_registry.clone(),
             guard_registry.clone(),
@@ -551,6 +665,7 @@ impl AppBuilder {
         // Register framework-internal jobs
         registrar.register_job::<SendQueuedEmailJob>()?;
         registrar.register_job::<crate::datatable::export_job::DatatableExportJob>()?;
+        registrar.register_job::<crate::notifications::SendNotificationJob>()?;
 
         let app = AppContext::new(container, config, rules)?;
         let database = Arc::new(DatabaseManager::from_config(&app.config().database()?).await?);
@@ -627,6 +742,9 @@ impl AppBuilder {
             JobRegistryBuilder::freeze_shared(job_registry, &jobs_config),
         ));
         let job_dispatcher = Arc::new(JobDispatcher::new(job_runtime.clone(), diagnostics.clone()));
+        let job_middleware_registry = Arc::new(JobMiddlewareRegistryBuilder::freeze_shared(
+            registrar.job_middleware_registry(),
+        ));
         let migration_registry =
             Arc::new(MigrationRegistryBuilder::freeze_shared(migration_registry)?);
         let seeder_registry = Arc::new(SeederRegistryBuilder::freeze_shared(seeder_registry)?);
@@ -635,6 +753,37 @@ impl AppBuilder {
                 registrar.datatable_registry(),
             ),
         );
+
+        // Auto-register built-in notification channels (consumer-registered ones take precedence)
+        let ncr_handle = registrar.notification_channel_registry();
+        {
+            let mut ncr = ncr_handle.lock().expect("notification channel registry lock poisoned");
+            if !ncr.contains(&crate::notifications::NOTIFY_EMAIL) {
+                ncr.register(crate::notifications::NOTIFY_EMAIL, Arc::new(crate::notifications::EmailNotificationChannel))?;
+            }
+            if !ncr.contains(&crate::notifications::NOTIFY_DATABASE) {
+                ncr.register(crate::notifications::NOTIFY_DATABASE, Arc::new(crate::notifications::DatabaseNotificationChannel))?;
+            }
+            if !ncr.contains(&crate::notifications::NOTIFY_BROADCAST) {
+                ncr.register(crate::notifications::NOTIFY_BROADCAST, Arc::new(crate::notifications::BroadcastNotificationChannel))?;
+            }
+        }
+        let notification_channel_registry = Arc::new(
+            crate::notifications::NotificationChannelRegistryBuilder::freeze_shared(ncr_handle),
+        );
+
+        // Cache manager (needs redis before it's moved into container)
+        let cache_config = app.config().cache()?;
+        let cache_store: Arc<dyn crate::cache::CacheStore> = match cache_config.driver {
+            crate::config::CacheDriver::Memory => {
+                Arc::new(crate::cache::MemoryCacheStore::new(cache_config.max_entries))
+            }
+            crate::config::CacheDriver::Redis => Arc::new(crate::cache::RedisCacheStore::new(
+                redis.clone(),
+                cache_config.prefix.clone(),
+            )),
+        };
+        let cache_manager = Arc::new(crate::cache::CacheManager::new(cache_store));
 
         app.container()
             .singleton_arc(prepared_plugins.registry.clone())?;
@@ -645,14 +794,19 @@ impl AppBuilder {
         app.container().singleton_arc(authenticatable_registry)?;
         app.container().singleton_arc(token_manager)?;
         app.container().singleton_arc(session_manager)?;
+        app.container().singleton_arc(cache_manager)?;
+
         app.container().singleton_arc(diagnostics.clone())?;
         app.container().singleton_arc(websocket_publisher)?;
         app.container().singleton_arc(event_bus)?;
         app.container().singleton_arc(job_runtime)?;
         app.container().singleton_arc(job_dispatcher)?;
+        app.container().singleton_arc(job_middleware_registry)?;
         app.container().singleton_arc(migration_registry)?;
         app.container().singleton_arc(seeder_registry)?;
         app.container().singleton_arc(datatable_registry)?;
+        app.container()
+            .singleton_arc(notification_channel_registry)?;
 
         // Register i18n if configured
         if let Ok(i18n_config) = app.config().i18n() {
@@ -708,6 +862,7 @@ impl AppBuilder {
         let mut boot_commands = Vec::new();
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());
+            boot_commands.push(crate::auth::builtin_cli_registrar());
         }
         if !prepared_plugins.registry.is_empty() {
             boot_commands.push(crate::plugin::builtin_cli_registrar());
@@ -729,6 +884,7 @@ impl AppBuilder {
             websocket_routes: boot_websocket_routes,
             middlewares,
             observability,
+            spa_dir,
         })
     }
 
@@ -753,6 +909,7 @@ struct BootArtifacts {
     websocket_routes: Vec<WebSocketRouteRegistrar>,
     middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
+    spa_dir: Option<PathBuf>,
 }
 
 fn register_builtin_readiness_checks(

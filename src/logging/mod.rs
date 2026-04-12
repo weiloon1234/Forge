@@ -6,7 +6,7 @@ use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::ConfigRepository;
+use crate::config::{ConfigRepository, ObservabilityConfig};
 use crate::foundation::Result;
 use crate::support::{Clock, Timezone};
 
@@ -20,6 +20,7 @@ pub enum LogFormat {
 
 mod diagnostics;
 mod file_writer;
+mod metrics;
 mod middleware;
 mod observability;
 mod probes;
@@ -41,6 +42,7 @@ pub use types::{
 
 pub(crate) use middleware::request_context_middleware;
 pub(crate) use observability::register_observability_routes;
+pub(crate) use observability::{register_openapi_route, set_openapi_spec};
 
 /// Timer that formats timestamps using the framework's configured timezone.
 struct ForgeTimer {
@@ -69,13 +71,14 @@ pub fn init(config: &ConfigRepository) -> Result<()> {
     }
 
     let logging_config = config.logging()?;
+    let observability_config = config.observability()?;
     let timezone = config.app()?.timezone;
     let level = logging_config.level.as_filter_directive();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     match logging_config.format {
-        LogFormat::Json => init_json(filter, &logging_config.log_dir, &timezone)?,
-        LogFormat::Text => init_text(filter)?,
+        LogFormat::Json => init_json(filter, &logging_config.log_dir, &timezone, &observability_config)?,
+        LogFormat::Text => init_text(filter, &observability_config)?,
     }
 
     // Panic hook — capture panics as structured error events
@@ -102,7 +105,12 @@ pub fn init(config: &ConfigRepository) -> Result<()> {
     Ok(())
 }
 
-fn init_json(filter: EnvFilter, log_dir: &str, timezone: &Timezone) -> Result<()> {
+fn init_json(
+    filter: EnvFilter,
+    log_dir: &str,
+    timezone: &Timezone,
+    _otel_config: &ObservabilityConfig,
+) -> Result<()> {
     use crate::foundation::Error;
 
     let timer = ForgeTimer::new(timezone.clone());
@@ -110,13 +118,20 @@ fn init_json(filter: EnvFilter, log_dir: &str, timezone: &Timezone) -> Result<()
 
     if log_dir.is_empty() {
         // stdout only
-        let _ = tracing_subscriber::fmt()
+        let stdout_layer = tracing_subscriber::fmt::layer()
             .json()
             .flatten_event(true)
             .with_target(true)
-            .with_timer(timer)
-            .with_env_filter(filter)
-            .try_init();
+            .with_timer(timer);
+
+        let registry = tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout_layer);
+
+        #[cfg(feature = "otel")]
+        let registry = registry.with(build_otel_layer(_otel_config));
+
+        let _ = registry.try_init();
     } else {
         // stdout + date-rotating file
         let file_writer = file_writer::DateRotatingFileWriter::open(log_dir, &clock)
@@ -135,21 +150,67 @@ fn init_json(filter: EnvFilter, log_dir: &str, timezone: &Timezone) -> Result<()
             .with_timer(timer)
             .with_writer(file_writer);
 
-        let _ = tracing_subscriber::registry()
+        let registry = tracing_subscriber::registry()
             .with(filter)
             .with(stdout_layer)
-            .with(file_layer)
-            .try_init();
+            .with(file_layer);
+
+        #[cfg(feature = "otel")]
+        let registry = registry.with(build_otel_layer(_otel_config));
+
+        let _ = registry.try_init();
     }
     Ok(())
 }
 
-fn init_text(filter: EnvFilter) -> Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+fn init_text(filter: EnvFilter, _otel_config: &ObservabilityConfig) -> Result<()> {
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false);
+
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer);
+
+    #[cfg(feature = "otel")]
+    let registry = registry.with(build_otel_layer(_otel_config));
+
+    let _ = registry.try_init();
     Ok(())
+}
+
+/// Builds the OpenTelemetry tracing layer. Called only when the `otel` feature is enabled.
+/// Returns `None` when `tracing_enabled` is `false`, which makes the layer a transparent no-op.
+#[cfg(feature = "otel")]
+fn build_otel_layer<S>(
+    config: &ObservabilityConfig,
+) -> Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::Tracer>>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig as _;
+
+    if !config.tracing_enabled {
+        return None;
+    }
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&config.otlp_endpoint)
+        .build()
+        .ok()?;
+
+    let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .with_resource(opentelemetry_sdk::Resource::new(vec![
+            opentelemetry::KeyValue::new("service.name", config.service_name.clone()),
+        ]))
+        .build();
+
+    let tracer = tracer_provider.tracer(config.service_name.clone());
+    opentelemetry::global::set_tracer_provider(tracer_provider);
+
+    Some(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
 #[cfg(test)]

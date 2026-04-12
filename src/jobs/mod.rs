@@ -12,12 +12,99 @@ use chrono::Utc;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::config::JobsConfig;
+use crate::database::{DbType, DbValue};
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{JobOutcome as RecordedJobOutcome, RuntimeDiagnostics};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{JobId, QueueId};
 
 use self::backend::ClaimedJobLease;
+
+// ---------------------------------------------------------------------------
+// Job middleware
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+pub trait JobMiddleware: Send + Sync + 'static {
+    async fn before(&self, _job_id: &JobId, _context: &JobContext) -> Result<()> {
+        Ok(())
+    }
+    async fn after(&self, _job_id: &JobId, _context: &JobContext) -> Result<()> {
+        Ok(())
+    }
+    async fn failed(&self, _job_id: &JobId, _context: &JobContext, _error: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) type JobMiddlewareRegistryHandle = Arc<Mutex<JobMiddlewareRegistryBuilder>>;
+
+#[derive(Default)]
+pub(crate) struct JobMiddlewareRegistryBuilder {
+    middlewares: Vec<Arc<dyn JobMiddleware>>,
+}
+
+impl JobMiddlewareRegistryBuilder {
+    pub(crate) fn shared() -> JobMiddlewareRegistryHandle {
+        Arc::new(Mutex::new(Self::default()))
+    }
+
+    pub(crate) fn register(&mut self, middleware: Arc<dyn JobMiddleware>) {
+        self.middlewares.push(middleware);
+    }
+
+    pub(crate) fn freeze_shared(handle: JobMiddlewareRegistryHandle) -> JobMiddlewareRegistry {
+        let mut builder = handle.lock().expect("job middleware registry lock poisoned");
+        JobMiddlewareRegistry {
+            middlewares: std::mem::take(&mut builder.middlewares),
+        }
+    }
+}
+
+pub struct JobMiddlewareRegistry {
+    middlewares: Vec<Arc<dyn JobMiddleware>>,
+}
+
+impl JobMiddlewareRegistry {
+    async fn run_before(&self, job_id: &JobId, context: &JobContext) {
+        for mw in &self.middlewares {
+            if let Err(error) = mw.before(job_id, context).await {
+                tracing::warn!(
+                    target: "forge.worker",
+                    job = %job_id,
+                    error = %error,
+                    "job middleware before hook failed"
+                );
+            }
+        }
+    }
+
+    async fn run_after(&self, job_id: &JobId, context: &JobContext) {
+        for mw in &self.middlewares {
+            if let Err(error) = mw.after(job_id, context).await {
+                tracing::warn!(
+                    target: "forge.worker",
+                    job = %job_id,
+                    error = %error,
+                    "job middleware after hook failed"
+                );
+            }
+        }
+    }
+
+    async fn run_failed(&self, job_id: &JobId, context: &JobContext, err: &str) {
+        for mw in &self.middlewares {
+            if let Err(error) = mw.failed(job_id, context, err).await {
+                tracing::warn!(
+                    target: "forge.worker",
+                    job = %job_id,
+                    error = %error,
+                    "job middleware failed hook failed"
+                );
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct JobContext {
@@ -68,6 +155,35 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + Debug + 'static {
             _ => Duration::from_secs(600),
         }
     }
+
+    /// Maximum execution time for this job. Override for long-running jobs.
+    /// Default uses the global `timeout_seconds` config (300s / 5 minutes).
+    fn timeout(&self) -> Option<Duration> {
+        None // None = use global config default
+    }
+
+    /// Optional rate limit for this job type.
+    /// Returns `(max_per_window, window_duration)`. When the limit is
+    /// exceeded the job is requeued with a short delay instead of being
+    /// counted as a retry attempt.
+    fn rate_limit(&self) -> Option<(u32, Duration)> {
+        None
+    }
+
+    /// If set, prevents duplicate dispatch of this job type within the
+    /// returned duration. A second dispatch with the same unique key
+    /// inside the window is silently dropped.
+    fn unique_for(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Key used for the uniqueness check. Defaults to the job ID when
+    /// `None` is returned. Override to include payload-specific fields
+    /// (e.g. a user ID) so that *different* payloads are treated as
+    /// distinct jobs.
+    fn unique_key(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -102,6 +218,30 @@ impl JobDispatcher {
     where
         J: Job,
     {
+        // Unique job check: skip dispatch if a duplicate exists within the window
+        if let Some(unique_duration) = job.unique_for() {
+            let unique_suffix = job
+                .unique_key()
+                .unwrap_or_else(|| J::ID.to_string());
+            let unique_redis_key =
+                format!("jobs:unique:{}:{}", J::ID, unique_suffix);
+            let ttl_secs = unique_duration.as_secs().max(1);
+            let is_new = self
+                .runtime
+                .backend
+                .set_if_absent(&unique_redis_key, ttl_secs)
+                .await?;
+            if !is_new {
+                tracing::debug!(
+                    target: "forge.worker",
+                    job = %J::ID,
+                    unique_key = %unique_suffix,
+                    "Skipping duplicate job dispatch (unique constraint)"
+                );
+                return Ok(());
+            }
+        }
+
         let queue = J::QUEUE
             .clone()
             .unwrap_or_else(|| self.runtime.config.queue.clone());
@@ -111,6 +251,8 @@ impl JobDispatcher {
             attempts: 0,
             scheduled_at: run_at_millis,
             payload: serde_json::to_value(job).map_err(Error::other)?,
+            batch_id: None,
+            chain_remaining: None,
         };
         let payload = serde_json::to_string(&envelope).map_err(Error::other)?;
         let token = next_delivery_token();
@@ -128,6 +270,196 @@ impl JobDispatcher {
         }
 
         self.diagnostics
+            .record_job_outcome(RecordedJobOutcome::Enqueued);
+
+        Ok(())
+    }
+
+    /// Start building a batch of jobs that execute concurrently with an
+    /// optional completion callback.
+    pub fn batch(&self, name: &str) -> JobBatchBuilder {
+        JobBatchBuilder {
+            dispatcher: self.clone(),
+            name: name.to_string(),
+            jobs: Vec::new(),
+            on_complete: None,
+        }
+    }
+
+    /// Start building a chain of jobs that execute sequentially.
+    pub fn chain(&self) -> JobChainBuilder {
+        JobChainBuilder {
+            dispatcher: self.clone(),
+            jobs: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job batching
+// ---------------------------------------------------------------------------
+
+/// Builder for dispatching a group of jobs with an optional completion callback.
+pub struct JobBatchBuilder {
+    dispatcher: JobDispatcher,
+    name: String,
+    jobs: Vec<(JobId, QueueId, serde_json::Value)>,
+    on_complete: Option<(JobId, QueueId, serde_json::Value)>,
+}
+
+impl JobBatchBuilder {
+    /// Add a job to the batch.
+    pub fn add<J: Job>(mut self, job: J) -> Result<Self> {
+        let queue = J::QUEUE
+            .clone()
+            .unwrap_or_else(|| self.dispatcher.runtime.config.queue.clone());
+        let payload = serde_json::to_value(&job).map_err(Error::other)?;
+        self.jobs.push((J::ID, queue, payload));
+        Ok(self)
+    }
+
+    /// Set a callback job that fires when all batch jobs complete successfully.
+    pub fn on_complete<J: Job>(mut self, job: J) -> Result<Self> {
+        let queue = J::QUEUE
+            .clone()
+            .unwrap_or_else(|| self.dispatcher.runtime.config.queue.clone());
+        let payload = serde_json::to_value(&job).map_err(Error::other)?;
+        self.on_complete = Some((J::ID, queue, payload));
+        Ok(self)
+    }
+
+    /// Dispatch all batch jobs. Returns the batch ID.
+    pub async fn dispatch(self) -> Result<String> {
+        if self.jobs.is_empty() {
+            return Err(Error::message("cannot dispatch an empty batch"));
+        }
+
+        let batch_id = format!("batch-{}-{}", self.name, next_delivery_token());
+        let total = self.jobs.len() as u64;
+
+        // Build on_complete envelope string for storage
+        let on_complete_payload = match &self.on_complete {
+            Some((job_id, queue, payload)) => {
+                let envelope = JobEnvelope {
+                    job: job_id.clone(),
+                    queue: queue.clone(),
+                    attempts: 0,
+                    scheduled_at: 0,
+                    payload: payload.clone(),
+                    batch_id: None,
+                    chain_remaining: None,
+                };
+                Some(serde_json::to_string(&envelope).map_err(Error::other)?)
+            }
+            None => None,
+        };
+        let on_complete_queue = self.on_complete.as_ref().map(|(_, q, _)| q.to_string());
+
+        // Store batch metadata
+        self.dispatcher
+            .runtime
+            .backend
+            .create_batch(
+                &batch_id,
+                total,
+                on_complete_payload.as_deref(),
+                on_complete_queue.as_deref(),
+            )
+            .await?;
+
+        // Dispatch each job with the batch_id embedded
+        let now = Utc::now().timestamp_millis();
+        for (job_id, queue, payload) in self.jobs {
+            let envelope = JobEnvelope {
+                job: job_id,
+                queue: queue.clone(),
+                attempts: 0,
+                scheduled_at: now,
+                payload,
+                batch_id: Some(batch_id.clone()),
+                chain_remaining: None,
+            };
+            let serialized = serde_json::to_string(&envelope).map_err(Error::other)?;
+            let token = next_delivery_token();
+            self.dispatcher
+                .runtime
+                .backend
+                .enqueue_job(&queue, &token, &serialized)
+                .await?;
+            self.dispatcher
+                .diagnostics
+                .record_job_outcome(RecordedJobOutcome::Enqueued);
+        }
+
+        tracing::info!(
+            target: "forge.worker",
+            batch_id = %batch_id,
+            total = total,
+            "Batch dispatched"
+        );
+
+        Ok(batch_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job chaining
+// ---------------------------------------------------------------------------
+
+/// Builder for dispatching a sequence of jobs that run one after another.
+pub struct JobChainBuilder {
+    dispatcher: JobDispatcher,
+    jobs: Vec<ChainedJob>,
+}
+
+impl JobChainBuilder {
+    /// Add a job to the end of the chain.
+    pub fn add<J: Job>(mut self, job: J) -> Result<Self> {
+        let queue = J::QUEUE
+            .clone()
+            .unwrap_or_else(|| self.dispatcher.runtime.config.queue.clone());
+        let payload = serde_json::to_value(&job).map_err(Error::other)?;
+        self.jobs.push(ChainedJob {
+            job: J::ID,
+            queue,
+            payload,
+        });
+        Ok(self)
+    }
+
+    /// Dispatch the chain. Only the first job is enqueued immediately;
+    /// subsequent jobs are stored in the envelope and dispatched on success.
+    pub async fn dispatch(mut self) -> Result<()> {
+        if self.jobs.is_empty() {
+            return Err(Error::message("cannot dispatch an empty chain"));
+        }
+
+        let first = self.jobs.remove(0);
+        let remaining = if self.jobs.is_empty() {
+            None
+        } else {
+            Some(self.jobs)
+        };
+
+        let now = Utc::now().timestamp_millis();
+        let envelope = JobEnvelope {
+            job: first.job,
+            queue: first.queue.clone(),
+            attempts: 0,
+            scheduled_at: now,
+            payload: first.payload,
+            batch_id: None,
+            chain_remaining: remaining,
+        };
+        let serialized = serde_json::to_string(&envelope).map_err(Error::other)?;
+        let token = next_delivery_token();
+        self.dispatcher
+            .runtime
+            .backend
+            .enqueue_job(&first.queue, &token, &serialized)
+            .await?;
+        self.dispatcher
+            .diagnostics
             .record_job_outcome(RecordedJobOutcome::Enqueued);
 
         Ok(())
@@ -155,13 +487,94 @@ impl Worker {
         &self.app
     }
 
+    /// Run the worker. Spawns a tokio task per claimed job, bounded by
+    /// a semaphore (`workers` config = max concurrency). No fixed worker
+    /// threads — tasks are created on demand and released when done.
     pub async fn run(self) -> Result<()> {
+        let max_concurrent = self.runtime.config.workers.max(1) as u32;
+        let worker = Arc::new(self);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent as usize));
+
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        {
+            let tx = shutdown_tx.clone();
+            tokio::spawn(async move {
+                crate::kernel::shutdown::shutdown_signal().await;
+                let _ = tx.send(true);
+            });
+        }
+        let mut shutdown_rx = shutdown_tx.subscribe();
+
+        tracing::info!(
+            target: "forge.worker",
+            max_concurrent = max_concurrent,
+            "worker started"
+        );
+
+        // Separate maintenance task — runs on its own timer, not on every claim
+        let maintenance_worker = worker.clone();
+        let mut maintenance_shutdown = shutdown_tx.subscribe();
+        let maintenance_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(maintenance_worker.runtime.poll_interval());
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = maintenance_shutdown.changed() => break,
+                    _ = interval.tick() => {
+                        let now_millis = Utc::now().timestamp_millis();
+                        let _ = maintenance_worker.runtime.promote_due_jobs(now_millis).await;
+                        let requeued = maintenance_worker.runtime.requeue_expired_jobs(now_millis).await.unwrap_or(0);
+                        for _ in 0..requeued {
+                            maintenance_worker.diagnostics.record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);
+                        }
+                    }
+                }
+            }
+        });
+
         loop {
-            let did_work = self.run_once().await?;
-            if !did_work {
-                tokio::time::sleep(self.runtime.poll_interval()).await;
+            if *shutdown_rx.borrow() {
+                tracing::info!(target: "forge.worker", "shutting down, waiting for in-flight jobs");
+                let _ = semaphore.acquire_many(max_concurrent).await;
+                maintenance_handle.abort();
+                tracing::info!(target: "forge.worker", "all jobs drained, worker stopped");
+                break;
+            }
+
+            // Acquire permit before claiming — bounds concurrency
+            let permit = tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => continue,
+                permit = semaphore.clone().acquire_owned() => match permit {
+                    Ok(p) => p,
+                    Err(_) => break,
+                }
+            };
+
+            match worker.runtime.claim_job().await {
+                Ok(Some(lease)) => {
+                    worker.diagnostics.record_job_outcome(RecordedJobOutcome::Leased);
+                    let w = worker.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = w.process_claimed_job(lease).await {
+                            tracing::error!(target: "forge.worker", error = %error, "job processing failed");
+                        }
+                        drop(permit);
+                    });
+                }
+                Ok(None) => {
+                    drop(permit);
+                    tokio::time::sleep(worker.runtime.poll_interval()).await;
+                }
+                Err(error) => {
+                    drop(permit);
+                    tracing::error!(target: "forge.worker", error = %error, "claim failed");
+                    tokio::time::sleep(worker.runtime.poll_interval()).await;
+                }
             }
         }
+
+        Ok(())
     }
 
     pub async fn run_once(&self) -> Result<bool> {
@@ -195,11 +608,77 @@ impl Worker {
             .get(&envelope.job)
             .ok_or_else(|| Error::message(format!("job `{}` is not registered", envelope.job)))?;
 
+        // Rate limit check: requeue without incrementing attempts if over limit
+        if let Some((max_per_window, window)) = registration.handler.check_rate_limit(&envelope) {
+            let window_secs = window.as_secs().max(1);
+            let window_bucket = Utc::now().timestamp() / window_secs as i64;
+            let rate_key = format!(
+                "jobs:rate:{}:{}",
+                envelope.job, window_bucket
+            );
+            let current_count = self
+                .runtime
+                .backend
+                .incr_with_ttl(&rate_key, window_secs)
+                .await?;
+            if current_count > max_per_window as u64 {
+                // Over the rate limit — requeue with the same attempt count
+                // and a short delay so it retries soon without counting as a failure.
+                let delay_ms = 1000; // 1 second delay before retry
+                let requeue_at = Utc::now().timestamp_millis() + delay_ms;
+                let requeue_envelope = JobEnvelope {
+                    scheduled_at: requeue_at,
+                    ..envelope
+                };
+                let payload =
+                    serde_json::to_string(&requeue_envelope).map_err(Error::other)?;
+                let requeue_token = next_delivery_token();
+                self.runtime
+                    .retry_job(
+                        &lease.queue,
+                        &lease.token,
+                        &requeue_token,
+                        &payload,
+                        requeue_at,
+                    )
+                    .await?;
+                tracing::debug!(
+                    target: "forge.worker",
+                    job = %requeue_envelope.job,
+                    count = current_count,
+                    limit = max_per_window,
+                    "Job rate-limited, requeued with delay"
+                );
+                return Ok(());
+            }
+        }
+
+        let middleware = self.app.resolve::<JobMiddlewareRegistry>().ok();
+        let job_context = JobContext::new(
+            self.app.clone(),
+            envelope.queue.clone(),
+            envelope.attempts + 1,
+        );
+
+        // Before hooks
+        if let Some(ref mw) = middleware {
+            mw.run_before(&envelope.job, &job_context).await;
+        }
+
+        let started_at = Utc::now().timestamp_millis();
+
         let (heartbeat, shutdown_heartbeat) =
             self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
+        let default_timeout =
+            Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
         let execution = registration
             .handler
-            .execute(&self.app, &envelope, self.runtime.config.max_retries)
+            .execute(
+                &self.app,
+                &envelope,
+                self.runtime.config.max_retries,
+                default_timeout,
+            )
             .await?;
         let _ = shutdown_heartbeat.send(());
         heartbeat.abort();
@@ -207,6 +686,9 @@ impl Worker {
 
         match execution {
             JobExecutionOutcome::Success => {
+                if let Some(ref mw) = middleware {
+                    mw.run_after(&envelope.job, &job_context).await;
+                }
                 if !self.runtime.ack_job(&lease.queue, &lease.token).await? {
                     tracing::warn!(
                         target: "forge.worker",
@@ -225,12 +707,54 @@ impl Worker {
                 );
                 self.diagnostics
                     .record_job_outcome(RecordedJobOutcome::Succeeded);
+
+                let duration_ms = Utc::now().timestamp_millis() - started_at;
+                self.record_job_history(
+                    &envelope.job,
+                    &envelope.queue,
+                    "succeeded",
+                    envelope.attempts + 1,
+                    None,
+                    started_at,
+                    duration_ms,
+                )
+                .await;
+
+                // --- Batch completion check ---
+                if let Some(ref batch_id) = envelope.batch_id {
+                    if let Err(error) = self.handle_batch_completion(batch_id).await {
+                        tracing::error!(
+                            target: "forge.worker",
+                            batch_id = %batch_id,
+                            error = %error,
+                            "Failed to handle batch completion"
+                        );
+                    }
+                }
+
+                // --- Chain continuation ---
+                if let Some(remaining) = envelope.chain_remaining {
+                    if let Err(error) = self.handle_chain_continuation(remaining).await {
+                        tracing::error!(
+                            target: "forge.worker",
+                            error = %error,
+                            "Failed to dispatch next job in chain"
+                        );
+                    }
+                }
+
                 Ok(())
             }
             JobExecutionOutcome::Retry {
                 run_at_millis,
                 attempts,
             } => {
+                if let Some(ref mw) = middleware {
+                    mw.run_failed(&envelope.job, &job_context, "job failed, scheduling retry")
+                        .await;
+                }
+                let retry_job_id = envelope.job.clone();
+                let retry_queue = envelope.queue.clone();
                 let retry_envelope = JobEnvelope {
                     attempts,
                     scheduled_at: run_at_millis,
@@ -259,9 +783,25 @@ impl Worker {
                 }
                 self.diagnostics
                     .record_job_outcome(RecordedJobOutcome::Retried);
+
+                let duration_ms = Utc::now().timestamp_millis() - started_at;
+                self.record_job_history(
+                    &retry_job_id,
+                    &retry_queue,
+                    "retried",
+                    attempts,
+                    Some("job failed, scheduling retry"),
+                    started_at,
+                    duration_ms,
+                )
+                .await;
+
                 Ok(())
             }
             JobExecutionOutcome::DeadLetter { error, attempts } => {
+                if let Some(ref mw) = middleware {
+                    mw.run_failed(&envelope.job, &job_context, &error).await;
+                }
                 let job_name = envelope.job.clone();
                 let queue_name = envelope.queue.clone();
                 let dead_letter = FailedJobEnvelope {
@@ -296,6 +836,19 @@ impl Worker {
                 );
                 self.diagnostics
                     .record_job_outcome(RecordedJobOutcome::DeadLettered);
+
+                let duration_ms = Utc::now().timestamp_millis() - started_at;
+                self.record_job_history(
+                    &job_name,
+                    &queue_name,
+                    "dead_lettered",
+                    attempts,
+                    Some(&error),
+                    started_at,
+                    duration_ms,
+                )
+                .await;
+
                 Ok(())
             }
         }
@@ -337,6 +890,137 @@ impl Worker {
             }
         });
         (heartbeat, shutdown_tx)
+    }
+
+    /// After a batched job succeeds, increment the completion counter and
+    /// dispatch the on_complete callback when all jobs are done.
+    async fn handle_batch_completion(&self, batch_id: &str) -> Result<()> {
+        let (completed, total, on_complete_payload, on_complete_queue) = self
+            .runtime
+            .backend
+            .increment_batch_completed(batch_id)
+            .await?;
+
+        tracing::debug!(
+            target: "forge.worker",
+            batch_id = %batch_id,
+            completed = completed,
+            total = total,
+            "Batch progress"
+        );
+
+        if completed >= total {
+            if let Some(payload) = on_complete_payload {
+                let queue = on_complete_queue
+                    .map(QueueId::owned)
+                    .unwrap_or_else(|| self.runtime.config.queue.clone());
+                let token = next_delivery_token();
+                self.runtime
+                    .backend
+                    .enqueue_job(&queue, &token, &payload)
+                    .await?;
+                self.diagnostics
+                    .record_job_outcome(RecordedJobOutcome::Enqueued);
+                tracing::info!(
+                    target: "forge.worker",
+                    batch_id = %batch_id,
+                    "Batch completed, on_complete job dispatched"
+                );
+            } else {
+                tracing::info!(
+                    target: "forge.worker",
+                    batch_id = %batch_id,
+                    "Batch completed (no on_complete callback)"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// After a chained job succeeds, dispatch the next job in the chain,
+    /// carrying forward the remaining chain entries.
+    async fn handle_chain_continuation(&self, mut remaining: Vec<ChainedJob>) -> Result<()> {
+        if remaining.is_empty() {
+            return Ok(());
+        }
+
+        let next = remaining.remove(0);
+        let chain_remaining = if remaining.is_empty() {
+            None
+        } else {
+            Some(remaining)
+        };
+
+        let now = Utc::now().timestamp_millis();
+        let envelope = JobEnvelope {
+            job: next.job.clone(),
+            queue: next.queue.clone(),
+            attempts: 0,
+            scheduled_at: now,
+            payload: next.payload,
+            batch_id: None,
+            chain_remaining,
+        };
+        let serialized = serde_json::to_string(&envelope).map_err(Error::other)?;
+        let token = next_delivery_token();
+        self.runtime
+            .backend
+            .enqueue_job(&next.queue, &token, &serialized)
+            .await?;
+        self.diagnostics
+            .record_job_outcome(RecordedJobOutcome::Enqueued);
+
+        tracing::info!(
+            target: "forge.worker",
+            job = %next.job,
+            "Chain continuation dispatched"
+        );
+
+        Ok(())
+    }
+
+    async fn record_job_history(
+        &self,
+        job_id: &JobId,
+        queue: &QueueId,
+        status: &str,
+        attempt: u32,
+        error: Option<&str>,
+        started_at: i64,
+        duration_ms: i64,
+    ) {
+        if !self.runtime.config.track_history {
+            return;
+        }
+        if let Ok(db) = self.app.database() {
+            if let Err(error) = db
+                .raw_execute(
+                    "INSERT INTO job_history (job_id, queue, status, attempt, error, started_at, completed_at, duration_ms) VALUES ($1, $2, $3, $4, $5, to_timestamp($6::double precision / 1000), NOW(), $7)",
+                    &[
+                        DbValue::Text(job_id.to_string()),
+                        DbValue::Text(queue.to_string()),
+                        DbValue::Text(status.to_string()),
+                        DbValue::Int32(attempt as i32),
+                        if let Some(e) = error {
+                            DbValue::Text(e.to_string())
+                        } else {
+                            DbValue::Null(DbType::Text)
+                        },
+                        DbValue::Int64(started_at),
+                        DbValue::Int64(duration_ms),
+                    ],
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "forge.worker",
+                    job = %job_id,
+                    error = %error,
+                    "failed to record job history"
+                );
+            }
+        }
     }
 }
 
@@ -524,6 +1208,18 @@ struct JobEnvelope {
     attempts: u32,
     scheduled_at: i64,
     payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chain_remaining: Option<Vec<ChainedJob>>,
+}
+
+/// A serialized job entry used in chain sequences.
+#[derive(Clone, Serialize, Deserialize)]
+struct ChainedJob {
+    job: JobId,
+    queue: QueueId,
+    payload: serde_json::Value,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -546,7 +1242,12 @@ trait DynJobHandler: Send + Sync {
         app: &AppContext,
         envelope: &JobEnvelope,
         default_max_retries: u32,
+        default_timeout: Duration,
     ) -> Result<JobExecutionOutcome>;
+
+    /// Check whether the job type has a rate limit, and if so, return it.
+    /// Deserializes the payload to read the concrete job's `rate_limit()`.
+    fn check_rate_limit(&self, envelope: &JobEnvelope) -> Option<(u32, Duration)>;
 }
 
 struct JobHandlerAdapter<J> {
@@ -563,6 +1264,7 @@ where
         app: &AppContext,
         envelope: &JobEnvelope,
         default_max_retries: u32,
+        default_timeout: Duration,
     ) -> Result<JobExecutionOutcome> {
         let job: J = match serde_json::from_value(envelope.payload.clone()) {
             Ok(job) => job,
@@ -574,27 +1276,38 @@ where
             }
         };
 
+        let timeout_duration = job.timeout().unwrap_or(default_timeout);
         let context = JobContext::new(app.clone(), envelope.queue.clone(), envelope.attempts + 1);
-        match job.handle(context).await {
-            Ok(()) => Ok(JobExecutionOutcome::Success),
-            Err(error) => {
-                let attempts = envelope.attempts + 1;
-                let max_retries = job.max_retries().unwrap_or(default_max_retries);
-                if attempts >= max_retries {
-                    Ok(JobExecutionOutcome::DeadLetter {
-                        error: error.to_string(),
-                        attempts,
-                    })
-                } else {
-                    let run_at_millis =
-                        Utc::now().timestamp_millis() + job.backoff(attempts).as_millis() as i64;
-                    Ok(JobExecutionOutcome::Retry {
-                        run_at_millis,
-                        attempts,
-                    })
-                }
-            }
+        let result = tokio::time::timeout(timeout_duration, job.handle(context)).await;
+
+        let error_msg = match result {
+            Ok(Ok(())) => return Ok(JobExecutionOutcome::Success),
+            Ok(Err(error)) => error.to_string(),
+            Err(_elapsed) => format!("job timed out after {}s", timeout_duration.as_secs()),
+        };
+
+        // Failure — decide retry vs dead-letter
+        let attempts = envelope.attempts + 1;
+        let max_retries = job.max_retries().unwrap_or(default_max_retries);
+        if attempts >= max_retries {
+            return Ok(JobExecutionOutcome::DeadLetter {
+                error: error_msg,
+                attempts,
+            });
+        } else {
+            let run_at_millis =
+                Utc::now().timestamp_millis() + job.backoff(attempts).as_millis() as i64;
+            return Ok(JobExecutionOutcome::Retry {
+                run_at_millis,
+                attempts,
+            });
         }
+
+    }
+
+    fn check_rate_limit(&self, envelope: &JobEnvelope) -> Option<(u32, Duration)> {
+        let job: J = serde_json::from_value(envelope.payload.clone()).ok()?;
+        job.rate_limit()
     }
 }
 
@@ -690,5 +1403,193 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dead_letters.len(), 1);
+    }
+
+    // --- Batch & chain test helpers ---
+
+    static EXECUTION_LOG: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+    fn append_log(entry: String) {
+        EXECUTION_LOG.lock().unwrap().push(entry);
+    }
+
+    fn read_log_filtered(prefix: &str) -> Vec<String> {
+        EXECUTION_LOG
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.starts_with(prefix))
+            .map(|e| e.strip_prefix(prefix).unwrap_or(e).to_string())
+            .collect()
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct StepJob {
+        tag: String,
+        name: String,
+    }
+
+    #[async_trait]
+    impl Job for StepJob {
+        const ID: JobId = JobId::new("step.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            append_log(format!("{}:{}", self.tag, self.name));
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct CompletionJob {
+        tag: String,
+        label: String,
+    }
+
+    #[async_trait]
+    impl Job for CompletionJob {
+        const ID: JobId = JobId::new("completion.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            append_log(format!("{}:complete:{}", self.tag, self.label));
+            Ok(())
+        }
+    }
+
+    fn build_runtime_and_dispatcher(
+        namespace: &str,
+    ) -> (RuntimeBackend, Arc<JobRuntime>, Arc<RuntimeDiagnostics>, JobDispatcher) {
+        let backend = RuntimeBackend::memory(namespace);
+        let mut registry = JobRegistryBuilder::default();
+        registry.register::<FailingJob>().unwrap();
+        registry.register::<StepJob>().unwrap();
+        registry.register::<CompletionJob>().unwrap();
+
+        let jobs_config = JobsConfig {
+            max_retries: 1,
+            poll_interval_ms: 1,
+            lease_ttl_ms: 50,
+            requeue_batch_size: 8,
+            ..JobsConfig::default()
+        };
+        let runtime = Arc::new(JobRuntime::new(
+            backend.clone(),
+            jobs_config.clone(),
+            JobRegistryBuilder::freeze_shared(Arc::new(Mutex::new(registry)), &jobs_config),
+        ));
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistryBuilder::freeze_shared(ReadinessRegistryBuilder::shared()),
+        ));
+        let dispatcher = JobDispatcher::new(runtime.clone(), diagnostics.clone());
+        (backend, runtime, diagnostics, dispatcher)
+    }
+
+    #[tokio::test]
+    async fn batch_dispatches_all_jobs_and_fires_on_complete() {
+        let tag = "batch1";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("batch-complete");
+        let app = build_app(runtime, diagnostics);
+
+        let batch_id = dispatcher
+            .batch("test")
+            .add(StepJob { tag: tag.into(), name: "a".into() })
+            .unwrap()
+            .add(StepJob { tag: tag.into(), name: "b".into() })
+            .unwrap()
+            .on_complete(CompletionJob {
+                tag: tag.into(),
+                label: "done".into(),
+            })
+            .unwrap()
+            .dispatch()
+            .await
+            .unwrap();
+        assert!(batch_id.starts_with("batch-test-"));
+
+        let worker = Worker::from_app(app).unwrap();
+        // Process both batch jobs
+        assert!(worker.run_once().await.unwrap());
+        assert!(worker.run_once().await.unwrap());
+        // Process the on_complete callback
+        assert!(worker.run_once().await.unwrap());
+
+        let log = read_log_filtered(&format!("{tag}:"));
+        // The two step jobs executed (order may vary), then the completion
+        assert!(log.contains(&"a".to_string()));
+        assert!(log.contains(&"b".to_string()));
+        assert!(log.contains(&"complete:done".to_string()));
+        // Completion is always last
+        assert_eq!(log.last().unwrap(), "complete:done");
+    }
+
+    #[tokio::test]
+    async fn batch_without_on_complete_works() {
+        let tag = "batch2";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("batch-no-callback");
+        let app = build_app(runtime, diagnostics);
+
+        dispatcher
+            .batch("simple")
+            .add(StepJob { tag: tag.into(), name: "x".into() })
+            .unwrap()
+            .dispatch()
+            .await
+            .unwrap();
+
+        let worker = Worker::from_app(app).unwrap();
+        assert!(worker.run_once().await.unwrap());
+        // No more work
+        assert!(!worker.run_once().await.unwrap());
+
+        let log = read_log_filtered(&format!("{tag}:"));
+        assert_eq!(log, vec!["x"]);
+    }
+
+    #[tokio::test]
+    async fn chain_executes_jobs_sequentially() {
+        let tag = "chain1";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("chain-sequential");
+        let app = build_app(runtime, diagnostics);
+
+        dispatcher
+            .chain()
+            .add(StepJob { tag: tag.into(), name: "first".into() })
+            .unwrap()
+            .add(StepJob { tag: tag.into(), name: "second".into() })
+            .unwrap()
+            .add(StepJob { tag: tag.into(), name: "third".into() })
+            .unwrap()
+            .dispatch()
+            .await
+            .unwrap();
+
+        let worker = Worker::from_app(app).unwrap();
+        // Process chain — each run_once handles one job and enqueues the next
+        for _ in 0..10 {
+            let _ = worker.run_once().await;
+        }
+
+        let log = read_log_filtered(&format!("{tag}:"));
+        assert_eq!(log, vec!["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn empty_batch_returns_error() {
+        let (_backend, _runtime, _diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("batch-empty");
+        let result = dispatcher.batch("empty").dispatch().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_chain_returns_error() {
+        let (_backend, _runtime, _diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("chain-empty");
+        let result = dispatcher.chain().dispatch().await;
+        assert!(result.is_err());
     }
 }

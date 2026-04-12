@@ -204,6 +204,37 @@ impl RuntimeBackend {
         }
     }
 
+    /// Create batch metadata. Returns nothing; the batch_id is caller-generated.
+    pub(crate) async fn create_batch(
+        &self,
+        batch_id: &str,
+        total: u64,
+        on_complete_payload: Option<&str>,
+        on_complete_queue: Option<&str>,
+    ) -> Result<()> {
+        match self {
+            Self::Redis(runtime) => {
+                create_batch_redis(runtime, batch_id, total, on_complete_payload, on_complete_queue)
+                    .await
+            }
+            Self::Memory(runtime) => {
+                create_batch_memory(runtime, batch_id, total, on_complete_payload, on_complete_queue)
+                    .await
+            }
+        }
+    }
+
+    /// Increment completed count for a batch. Returns `(completed, total, on_complete_payload, on_complete_queue)`.
+    pub(crate) async fn increment_batch_completed(
+        &self,
+        batch_id: &str,
+    ) -> Result<(u64, u64, Option<String>, Option<String>)> {
+        match self {
+            Self::Redis(runtime) => increment_batch_completed_redis(runtime, batch_id).await,
+            Self::Memory(runtime) => increment_batch_completed_memory(runtime, batch_id).await,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn dead_letters(&self, queue: &QueueId) -> Result<Vec<String>> {
         match self {
@@ -766,6 +797,132 @@ async fn ack_like_memory(runtime: &MemoryRuntime, queue: &QueueId, token: &str) 
         runtime.payloads.lock().await.remove(token);
     }
     Ok(removed)
+}
+
+// ---------------------------------------------------------------------------
+// Batch tracking — Redis
+// ---------------------------------------------------------------------------
+
+fn batch_key(runtime: &RedisRuntime, batch_id: &str) -> String {
+    namespaced_value(&runtime.namespace, &format!("jobs:batch:{batch_id}"))
+}
+
+const CREATE_BATCH_SCRIPT: &str = r#"
+redis.call('HSET', KEYS[1], 'total', ARGV[1], 'completed', '0')
+if ARGV[2] ~= '' then
+  redis.call('HSET', KEYS[1], 'on_complete_payload', ARGV[2])
+end
+if ARGV[3] ~= '' then
+  redis.call('HSET', KEYS[1], 'on_complete_queue', ARGV[3])
+end
+redis.call('EXPIRE', KEYS[1], 86400)
+return 1
+"#;
+
+const INCREMENT_BATCH_SCRIPT: &str = r#"
+local completed = redis.call('HINCRBY', KEYS[1], 'completed', 1)
+local total = tonumber(redis.call('HGET', KEYS[1], 'total'))
+local payload = redis.call('HGET', KEYS[1], 'on_complete_payload') or ''
+local queue = redis.call('HGET', KEYS[1], 'on_complete_queue') or ''
+return {completed, total, payload, queue}
+"#;
+
+async fn create_batch_redis(
+    runtime: &RedisRuntime,
+    batch_id: &str,
+    total: u64,
+    on_complete_payload: Option<&str>,
+    on_complete_queue: Option<&str>,
+) -> Result<()> {
+    let mut conn = runtime
+        .client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(Error::other)?;
+    let _: i64 = ::redis::cmd("EVAL")
+        .arg(CREATE_BATCH_SCRIPT)
+        .arg(1)
+        .arg(batch_key(runtime, batch_id))
+        .arg(total)
+        .arg(on_complete_payload.unwrap_or(""))
+        .arg(on_complete_queue.unwrap_or(""))
+        .query_async(&mut conn)
+        .await
+        .map_err(Error::other)?;
+    Ok(())
+}
+
+async fn increment_batch_completed_redis(
+    runtime: &RedisRuntime,
+    batch_id: &str,
+) -> Result<(u64, u64, Option<String>, Option<String>)> {
+    let mut conn = runtime
+        .client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(Error::other)?;
+    let result: Vec<String> = ::redis::cmd("EVAL")
+        .arg(INCREMENT_BATCH_SCRIPT)
+        .arg(1)
+        .arg(batch_key(runtime, batch_id))
+        .query_async(&mut conn)
+        .await
+        .map_err(Error::other)?;
+
+    let completed = result
+        .first()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let total = result
+        .get(1)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let payload = result.get(2).filter(|s| !s.is_empty()).cloned();
+    let queue = result.get(3).filter(|s| !s.is_empty()).cloned();
+    Ok((completed, total, payload, queue))
+}
+
+// ---------------------------------------------------------------------------
+// Batch tracking — Memory
+// ---------------------------------------------------------------------------
+
+async fn create_batch_memory(
+    runtime: &MemoryRuntime,
+    batch_id: &str,
+    total: u64,
+    on_complete_payload: Option<&str>,
+    on_complete_queue: Option<&str>,
+) -> Result<()> {
+    use crate::support::runtime::MemoryBatchMeta;
+    let mut batches = runtime.batches.lock().await;
+    batches.insert(
+        batch_id.to_string(),
+        MemoryBatchMeta {
+            total,
+            completed: 0,
+            on_complete_job: on_complete_payload.map(|s| s.to_string()),
+            on_complete_queue: on_complete_queue.map(|s| s.to_string()),
+        },
+    );
+    Ok(())
+}
+
+async fn increment_batch_completed_memory(
+    runtime: &MemoryRuntime,
+    batch_id: &str,
+) -> Result<(u64, u64, Option<String>, Option<String>)> {
+    let mut batches = runtime.batches.lock().await;
+    let meta = batches
+        .get_mut(batch_id)
+        .ok_or_else(|| Error::message(format!("batch `{batch_id}` not found")))?;
+    meta.completed += 1;
+    let result = (
+        meta.completed,
+        meta.total,
+        meta.on_complete_job.clone(),
+        meta.on_complete_queue.clone(),
+    );
+    Ok(result)
 }
 
 #[cfg(test)]

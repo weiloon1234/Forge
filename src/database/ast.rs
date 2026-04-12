@@ -1048,6 +1048,10 @@ pub enum Condition {
     IsNull(ColumnRef),
     IsNotNull(ColumnRef),
     Exists(Box<QueryAst>),
+    Raw {
+        sql: String,
+        bindings: Vec<DbValue>,
+    },
 }
 
 impl Condition {
@@ -1073,6 +1077,13 @@ impl Condition {
 
     pub fn exists(query: impl Into<QueryAst>) -> Self {
         Self::Exists(Box::new(query.into()))
+    }
+
+    pub fn raw(sql: impl Into<String>, bindings: Vec<DbValue>) -> Self {
+        Self::Raw {
+            sql: sql.into(),
+            bindings,
+        }
     }
 }
 

@@ -86,20 +86,24 @@ This is the **target developer experience**.
 src/
 ├── foundation/    ✅ App, Builder, Container, ServiceProvider, Error
 ├── kernel/        ✅ HTTP, CLI, Scheduler, WebSocket, Worker kernels
-├── http/          ✅ Routing, route options, auth middleware, security middleware system
-├── websocket/     ✅ Connection, channels, pub/sub, rooms, Redis backend
+├── http/          ✅ Routing, route options, API versioning (group/api_version), auth middleware, 9 middleware types (CORS, SecurityHeaders, CSRF, RateLimit w/ per-user, MaxBodySize, Timeout, TrustedProxy, Compression, SPA serving)
+├── websocket/     ✅ Channels, pub/sub, rooms, presence (join/leave events), heartbeat, rate limiting, max connections, auth callbacks, force disconnect, client events, lifecycle hooks, message ACK, replay on subscribe
 ├── scheduler/     ✅ Cron, interval, distributed leadership via Redis
-├── cli/           ✅ Command registration, Clap integration
+├── cli/           ✅ Command registration, Clap integration, make:model/job/command scaffolding
 ├── validation/    ✅ 30 built-in rules + custom rule registration + #[derive(Validate)] macro + app_enum validation
-├── auth/          🔄 Actor, role, permission, policy (see details below)
+├── auth/          ✅ Actor, role, permission, policy, Authenticatable, Auth<M>, TokenManager, SessionManager, multi-guard (token + session)
 ├── events/        ✅ Event dispatch, typed listeners, job dispatch
-├── jobs/          ✅ Redis + memory backends, retry, dead-letter, leasing
+├── jobs/          ✅ Spawn-per-job (semaphore-bounded), timeout, shutdown, middleware hooks, batching, chaining, rate limiting, unique jobs, status tracking, dashboard API
 ├── config/        ✅ TOML + env overlay, 11 typed config sections
-├── logging/       ✅ NDJSON structured logging, file sink, request duration, panic hook, kernel lifecycle events
-├── database/      ✅ Full ORM (see drift details below)
+├── logging/       ✅ NDJSON structured logging, file sink, Prometheus /metrics, optional OpenTelemetry tracing (otel feature)
+├── database/      ✅ Full ORM, PostgreSQL FTS (.search()), Condition::Raw, audit trail (actor in hooks)
+├── openapi/       ✅ #[derive(ApiSchema)], RouteDoc builder, OpenAPI 3.1 spec generation, /_forge/openapi.json
 ├── email/         ✅ Multi-mailer email system (SMTP + log drivers), queue integration
 ├── storage/       ✅ Multi-disk storage (local + S3), upload helpers, multipart extractors
-├── support/       ✅ Collection<T>, semantic IDs, RuntimeBackend, HashManager (argon2), CryptManager (AES-256-GCM), Token generation
+├── cache/         ✅ CacheManager with Redis + Memory drivers, get/put/remember/forget/flush
+├── notifications/ ✅ Adapter pattern, NotificationChannel trait, typed NotificationChannelId, channel registry, 3 built-in channels (Email/Database/Broadcast), project-level custom channels, per-channel routing, queued dispatch via SendNotificationJob
+├── testing/       ✅ TestApp, TestClient, TestResponse (no-TCP testing), Factory trait, FactoryBuilder
+├── support/       ✅ Collection<T>, semantic IDs, HashManager, CryptManager, Token, SHA-256, sanitize_html
 ├── redis/         ✅ Public namespaced Redis app API
 ├── plugin/        ✅ Dependency resolution, assets, scaffolding, CLI
 ├── i18n/          ✅ I18nManager, i18next-compatible JSON, per-request locale, Axum extractor
@@ -543,18 +547,25 @@ See **[rust_auth_actor_system_blueprint.md](rust_auth_actor_system_blueprint.md)
 
 # 10. jobs/
 
-**Status: ✅ Done — Exceeds blueprint**
+**Status: ✅ Core done — Improvements planned**
 
-## Responsibilities
-- background job abstraction
-- queue integration (future)
+See **[rust_job_system_blueprint.md](rust_job_system_blueprint.md)** for the full standalone blueprint covering planned improvements: worker concurrency, per-job timeout, graceful shutdown, job middleware, batching, chaining, rate limiting, unique jobs, status tracking.
 
-### Drift
-Blueprint listed "queue integration (future)". Already implemented:
-- Redis backend with retry + dead-letter queue
+## What's Done
+- Job trait with typed ID, configurable retries + backoff
+- JobDispatcher (dispatch/dispatch_later)
+- Redis backend with Lua scripts for atomic claim/ack/retry
 - Memory backend for testing
-- Job leasing with TTL
-- Worker kernel for processing
+- Dead letter queue
+- Lease-based locking with heartbeat renewal
+- Worker kernel
+- 3 framework-provided jobs (email, notification, datatable export)
+
+## TODO (Phased — see job blueprint)
+- **Phase 1 (Critical):** Worker concurrency, per-job timeout, graceful shutdown
+- **Phase 2 (High):** Job middleware (before/after/failed hooks)
+- **Phase 3 (Medium):** Batching, chaining, rate limiting, unique jobs
+- **Phase 4 (Low):** Job status tracking, dashboard endpoint
 
 ---
 
@@ -1176,7 +1187,7 @@ app.register_validation_rule("phone", PhoneRule);
 ## Phase 3
 - Plugin system ✅ (implemented early)
 - I18n system ✅ (implemented early — i18next-compatible, shared frontend+backend)
-- Distributed job system ❌ TODO
+- Distributed job system ✅ Core done (Redis + memory backends, retry, dead-letter) — improvements planned in job blueprint
 - Observability tools ✅ (NDJSON structured logging, file sink, request duration, panic hook, kernel events, health probes)
 
 ---
@@ -1190,11 +1201,11 @@ These were not in the original blueprint but are necessary for a production fram
 - Consistent JSON responses: `{"message": "...", "status": N}`
 - `From<ValidationErrors>` and `From<AuthError>` conversions
 
-### Testing Utilities ❌ TODO
-- Test app builder (simplified bootstrap)
-- HTTP test client
-- Test database helpers (migrate/seed/rollback)
-- Mock services for container
+### Testing Utilities ✅ Done
+- TestApp builder (simplified bootstrap without server)
+- TestClient (HTTP requests directly to router, no TCP)
+- TestResponse (json/text/status/header helpers)
+- Factory trait + FactoryBuilder for model test data
 
 ### HTTP Middleware System ✅ Done
 - CORS, Security Headers, Rate Limiting (Redis + in-memory), Body Size Limit, Timeout, Trusted Proxy (Cloudflare)
@@ -1223,12 +1234,12 @@ These were not in the original blueprint but are necessary for a production fram
 |--------|-----------|--------|--------|
 | foundation/ | App, Builder, Container, ServiceProvider | Full DI, lifecycle, transactions, plugin, structured errors | ✅ Exceeds |
 | kernel/ | HTTP, CLI, Scheduler, WebSocket | All 4 + Worker kernel | ✅ Exceeds |
-| http/ | Routing, middleware, guards | Axum-based, route options, auth middleware, 6 security middleware types with priority ordering | ✅ Done |
+| http/ | Routing, middleware, guards, SPA | Axum-based, route options, auth middleware, 8 middleware types (CORS, SecurityHeaders, CSRF, RateLimit w/ per-user, MaxBodySize, Timeout, TrustedProxy), SPA serving, cookie helpers | ✅ Exceeds |
 | websocket/ | Connection, channels, routing | Pub/sub, rooms, auth, Redis backend | ✅ Exceeds |
 | scheduler/ | Cron, interval, registry | Distributed leadership with Redis | ✅ Exceeds |
 | cli/ | Commands, arg parsing | Clap integration, command registry | ✅ Done |
 | validation/ | Built-in rules, custom rules, chainable API, derive macro | 36 rules (30 text + 6 file), modifiers, request validator, async custom rules, translation-aware messages, custom messages/attributes, `#[derive(Validate)]` proc macro, `FromMultipart` auto-generation, unified JSON/multipart extraction | ✅ Exceeds |
-| auth/ | Actor, role, permission, policy, authenticatable | Authenticatable trait, Auth<M> extractor, multi-guard model resolution. Login/session/PAT remaining | 🔄 Partial |
+| auth/ | Actor, role, permission, policy, authenticatable, token, session | Authenticatable, Auth<M> extractor, multi-guard, TokenManager (PAT + refresh rotation), SessionManager (Redis-backed), config-driven guard drivers | ✅ Done |
 | events/ | Dispatch, listeners | EventBus, typed listeners, job dispatch | ✅ Done |
 | jobs/ | Background jobs, queue | Redis + memory, retry, dead-letter, leasing | ✅ Exceeds |
 | config/ | Env loading, config merging | TOML + env overlay, 11 typed sections | ✅ Exceeds |
@@ -1236,7 +1247,7 @@ These were not in the original blueprint but are necessary for a production fram
 | database/ | Connection, transaction helpers | Full ORM: AST query builder, Model, relations, migrations | ✅ MASSIVELY exceeds |
 | email/ | Multi-mailer email | SMTP + log + Resend + Postmark + Mailgun + SES drivers, queue integration, custom drivers, message builder | ✅ Done |
 | storage/ | Multi-disk storage | StorageManager, local + S3 adapters, upload helpers, multipart extractors, custom drivers | ✅ Done |
-| support/ | Utilities | Collection<T>, semantic IDs, RuntimeBackend, HashManager (argon2), CryptManager (AES-256-GCM), Token generation | ✅ Exceeds |
+| support/ | Utilities | Collection<T>, semantic IDs, RuntimeBackend, HashManager (argon2), CryptManager (AES-256-GCM), Token generation, SHA-256, sanitize_html/strip_tags | ✅ Exceeds |
 | redis/ | App-facing Redis API | Namespaced RedisManager, RedisKey, RedisChannel, RedisConnection | ✅ Done |
 | plugin/ | (Phase 3) | Dependency resolution, assets, scaffolding, CLI | ✅ Done early |
 | i18n/ | (Not in original) | I18nManager, i18next JSON, per-request locale, `t!` macro, Axum extractor | ✅ Done |
@@ -1251,9 +1262,9 @@ These were not in the original blueprint but are necessary for a production fram
 3. ~~**Per-Route Middleware**~~ — ✅ Done (via `HttpRouteOptions::middleware()`)
 4. ~~**I18n System**~~ — ✅ Done (I18nManager, i18next-compatible JSON, per-request locale, Axum extractor, config-driven)
 5. ~~**Structured Logging System**~~ — ✅ Done (NDJSON format, file sink, request duration, panic hook, kernel lifecycle events)
-6. **Authenticator (non-JWT)** — User will implement custom auth method
-7. **Testing Utilities** — Framework DX multiplier
-8. **Distributed Job System** — Phase 3 item
+6. ~~**Authenticator (non-JWT)**~~ — ✅ Done (TokenManager PAT + SessionManager, config-driven guard drivers, Auth<M> extractor)
+7. ~~**Testing Utilities**~~ — ✅ Done (TestApp, TestClient, TestResponse, Factory)
+8. ~~**Distributed Job System**~~ — ✅ Core done (improvements planned in job blueprint)
 9. ~~**Storage System**~~ — ✅ Done (multi-disk, local + S3, upload helpers, multipart extractors)
 10. ~~**Email System**~~ — ✅ Done (multi-mailer, SMTP + log drivers, queue integration, custom drivers, message builder)
 11. ~~**Security Utilities (Hash/Crypt/Token)**~~ — ✅ Done (HashManager argon2, CryptManager AES-256-GCM, Token generation)

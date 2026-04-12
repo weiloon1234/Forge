@@ -22,6 +22,9 @@ const DB_ROLLBACK_COMMAND: CommandId = CommandId::new("db:rollback");
 const DB_SEED_COMMAND: CommandId = CommandId::new("db:seed");
 const MAKE_MIGRATION_COMMAND: CommandId = CommandId::new("make:migration");
 const MAKE_SEEDER_COMMAND: CommandId = CommandId::new("make:seeder");
+const MAKE_MODEL_COMMAND: CommandId = CommandId::new("make:model");
+const MAKE_JOB_COMMAND: CommandId = CommandId::new("make:job");
+const MAKE_COMMAND_COMMAND: CommandId = CommandId::new("make:command");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppliedMigration {
@@ -509,6 +512,63 @@ pub(crate) fn builtin_cli_registrar() -> CommandRegistrar {
                 ),
             |invocation| async move { make_seeder_command(invocation).await },
         )?;
+        registry.command(
+            MAKE_MODEL_COMMAND,
+            Command::new(MAKE_MODEL_COMMAND.as_str().to_string())
+                .about("Generate a Rust model scaffold")
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Model name in PascalCase (e.g. User, SendWelcomeEmail)"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("Overwrite an existing generated file"),
+                ),
+            |invocation| async move { make_model_command(invocation).await },
+        )?;
+        registry.command(
+            MAKE_JOB_COMMAND,
+            Command::new(MAKE_JOB_COMMAND.as_str().to_string())
+                .about("Generate a Rust job scaffold")
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Job name in PascalCase (e.g. SendWelcomeEmail)"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("Overwrite an existing generated file"),
+                ),
+            |invocation| async move { make_job_command(invocation).await },
+        )?;
+        registry.command(
+            MAKE_COMMAND_COMMAND,
+            Command::new(MAKE_COMMAND_COMMAND.as_str().to_string())
+                .about("Generate a Rust CLI command scaffold")
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Command name in PascalCase (e.g. SyncInventory)"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("Overwrite an existing generated file"),
+                ),
+            |invocation| async move { make_command_command(invocation).await },
+        )?;
         Ok(())
     })
 }
@@ -601,6 +661,66 @@ async fn make_seeder_command(invocation: CommandInvocation) -> Result<()> {
 
     println!("wrote {}", seeder_path.display());
     println!("rebuild the app before running db:seed so the new seeder is discovered");
+    Ok(())
+}
+
+async fn make_model_command(invocation: CommandInvocation) -> Result<()> {
+    let name = invocation
+        .matches()
+        .get_one::<String>("name")
+        .ok_or_else(|| Error::message("missing required `--name` argument"))?;
+    let pascal = to_pascal_case(name);
+    let snake = to_snake_case(name);
+    let model_dir = resolve_app_path("src/app/models")?;
+    let model_path = model_dir.join(format!("{snake}.rs"));
+
+    fs::create_dir_all(&model_dir).map_err(Error::other)?;
+    ensure_writable(&model_path, invocation.matches().get_flag("force"))?;
+    fs::write(&model_path, render_model_template(&pascal, &snake)).map_err(Error::other)?;
+
+    println!("wrote {}", model_path.display());
+    Ok(())
+}
+
+async fn make_job_command(invocation: CommandInvocation) -> Result<()> {
+    let name = invocation
+        .matches()
+        .get_one::<String>("name")
+        .ok_or_else(|| Error::message("missing required `--name` argument"))?;
+    let pascal = to_pascal_case(name);
+    let snake = to_snake_case(name);
+    let screaming = to_screaming_snake_case(&snake);
+    let job_dir = resolve_app_path("src/app/jobs")?;
+    let job_path = job_dir.join(format!("{snake}.rs"));
+
+    fs::create_dir_all(&job_dir).map_err(Error::other)?;
+    ensure_writable(&job_path, invocation.matches().get_flag("force"))?;
+    fs::write(&job_path, render_job_template(&pascal, &snake, &screaming)).map_err(Error::other)?;
+
+    println!("wrote {}", job_path.display());
+    Ok(())
+}
+
+async fn make_command_command(invocation: CommandInvocation) -> Result<()> {
+    let name = invocation
+        .matches()
+        .get_one::<String>("name")
+        .ok_or_else(|| Error::message("missing required `--name` argument"))?;
+    let pascal = to_pascal_case(name);
+    let snake = to_snake_case(name);
+    let screaming = to_screaming_snake_case(&snake);
+    let command_dir = resolve_app_path("src/app/commands")?;
+    let command_path = command_dir.join(format!("{snake}.rs"));
+
+    fs::create_dir_all(&command_dir).map_err(Error::other)?;
+    ensure_writable(&command_path, invocation.matches().get_flag("force"))?;
+    fs::write(
+        &command_path,
+        render_command_template(&pascal, &snake, &screaming),
+    )
+    .map_err(Error::other)?;
+
+    println!("wrote {}", command_path.display());
     Ok(())
 }
 
@@ -1141,6 +1261,92 @@ fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn resolve_app_path(relative: &str) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(Error::other)?;
+    Ok(cwd.join(relative))
+}
+
+fn to_pascal_case(value: &str) -> String {
+    let snake = to_snake_case(value);
+    snake
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut word = first.to_ascii_uppercase().to_string();
+                    word.extend(chars);
+                    word
+                }
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn to_screaming_snake_case(snake: &str) -> String {
+    snake.to_ascii_uppercase()
+}
+
+fn render_model_template(pascal: &str, snake: &str) -> String {
+    // Pluralize table name with simple 's' suffix
+    let table_name = format!("{snake}s");
+    format!(
+        "use forge::prelude::*;\n\
+         \n\
+         #[derive(Clone, Debug, forge::Model)]\n\
+         #[forge(model = \"{table_name}\")]\n\
+         pub struct {pascal} {{\n\
+         \x20   pub id: ModelId<{pascal}>,\n\
+         \x20   pub created_at: DateTime,\n\
+         \x20   pub updated_at: DateTime,\n\
+         }}\n"
+    )
+}
+
+fn render_job_template(pascal: &str, snake: &str, screaming: &str) -> String {
+    format!(
+        "use async_trait::async_trait;\n\
+         use forge::prelude::*;\n\
+         \n\
+         pub const {screaming}_JOB: JobId = JobId::new(\"{snake}\");\n\
+         \n\
+         #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]\n\
+         pub struct {pascal};\n\
+         \n\
+         #[async_trait]\n\
+         impl Job for {pascal} {{\n\
+         \x20   const ID: JobId = {screaming}_JOB;\n\
+         \n\
+         \x20   async fn handle(&self, _context: JobContext) -> Result<()> {{\n\
+         \x20       // TODO: implement\n\
+         \x20       Ok(())\n\
+         \x20   }}\n\
+         }}\n"
+    )
+}
+
+fn render_command_template(pascal: &str, snake: &str, screaming: &str) -> String {
+    format!(
+        "use forge::prelude::*;\n\
+         \n\
+         pub const {screaming}_COMMAND: CommandId = CommandId::new(\"{snake}\");\n\
+         \n\
+         pub fn register(registry: &mut CommandRegistry) -> Result<()> {{\n\
+         \x20   registry.command(\n\
+         \x20       {screaming}_COMMAND,\n\
+         \x20       clap::Command::new(\"{snake}\").about(\"{pascal} command\"),\n\
+         \x20       |_invocation: CommandInvocation| async move {{\n\
+         \x20           // TODO: implement\n\
+         \x20           Ok(())\n\
+         \x20       }},\n\
+         \x20   )?;\n\
+         \x20   Ok(())\n\
+         }}\n"
+    )
+}
+
 fn advisory_lock_key(config: &DatabaseConfig) -> i64 {
     let input = format!("forge:{}:{}", config.schema, config.migration_table);
     let mut hash = 0xcbf29ce484222325_u64;
@@ -1289,5 +1495,50 @@ mod tests {
         };
 
         assert_ne!(advisory_lock_key(&public), advisory_lock_key(&custom));
+    }
+
+    #[test]
+    fn to_pascal_case_from_snake() {
+        assert_eq!(super::to_pascal_case("send_welcome_email"), "SendWelcomeEmail");
+    }
+
+    #[test]
+    fn to_pascal_case_from_pascal() {
+        assert_eq!(super::to_pascal_case("SendWelcomeEmail"), "SendWelcomeEmail");
+    }
+
+    #[test]
+    fn to_pascal_case_single_word() {
+        assert_eq!(super::to_pascal_case("user"), "User");
+        assert_eq!(super::to_pascal_case("User"), "User");
+    }
+
+    #[test]
+    fn to_screaming_snake_case_converts() {
+        assert_eq!(super::to_screaming_snake_case("send_welcome_email"), "SEND_WELCOME_EMAIL");
+    }
+
+    #[test]
+    fn render_model_template_contains_struct() {
+        let output = super::render_model_template("User", "user");
+        assert!(output.contains("pub struct User {"));
+        assert!(output.contains("#[forge(model = \"users\")]"));
+        assert!(output.contains("pub id: ModelId<User>"));
+    }
+
+    #[test]
+    fn render_job_template_contains_const_and_impl() {
+        let output = super::render_job_template("SendWelcomeEmail", "send_welcome_email", "SEND_WELCOME_EMAIL");
+        assert!(output.contains("pub const SEND_WELCOME_EMAIL_JOB: JobId"));
+        assert!(output.contains("pub struct SendWelcomeEmail;"));
+        assert!(output.contains("const ID: JobId = SEND_WELCOME_EMAIL_JOB;"));
+    }
+
+    #[test]
+    fn render_command_template_contains_register() {
+        let output = super::render_command_template("SyncInventory", "sync_inventory", "SYNC_INVENTORY");
+        assert!(output.contains("pub const SYNC_INVENTORY_COMMAND: CommandId"));
+        assert!(output.contains("pub fn register("));
+        assert!(output.contains("Command::new(\"sync_inventory\")"));
     }
 }

@@ -1055,10 +1055,10 @@ Each guard is a separate authentication domain:
 
 # TODO (Beyond Token + Session)
 
-- **Rate limiting per actor** — per-user rate limits instead of per-IP only
-- **Audit trail** — optional actor injection into `ModelHookContext` for tracking who changed what
-- **Token scoping/abilities** — scoped permissions per token (abilities JSONB column is ready)
-- **Token pruning** — scheduled job to clean up expired/revoked tokens
+- **Rate limiting per actor** — ✅ Done (per-user rate limiting in HTTP middleware)
+- **Audit trail** — ✅ Done (optional actor in ModelHookContext via AppTransaction::set_actor())
+- **Token scoping/abilities** — ✅ Done (issue_with_abilities, abilities parsed into Actor permissions on validate)
+- **Token pruning** — ✅ Done (token:prune CLI command, TokenManager::prune())
 
 ---
 

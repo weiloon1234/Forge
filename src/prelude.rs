@@ -5,7 +5,12 @@ pub use crate::auth::{
     AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor, GuardedAccess,
     OptionalActor, Policy, StaticBearerAuthenticator,
 };
+pub use crate::cache::{CacheManager, CacheStore};
 pub use crate::cli::{CommandInvocation, CommandRegistry};
+pub use crate::notifications::{
+    Notifiable, Notification, NotificationChannel, NotificationChannelRegistry,
+};
+pub use crate::testing::{Factory, FactoryBuilder, TestApp, TestClient, TestResponse};
 pub use crate::database::{
     belongs_to, has_many, has_one, many_to_many, AggregateExpr, AggregateFn, AggregateNode,
     AggregateProjection, BinaryExpr, BinaryOperator, Case, Column, ColumnInfo, ColumnRef,
@@ -39,8 +44,12 @@ pub use crate::http::middleware::{
     SecurityHeaders, TrustedProxy,
 };
 pub use crate::http::{HttpRegistrar, HttpRouteOptions, Validated};
+pub use crate::openapi::{ApiSchema, RouteDoc, SchemaRef};
 pub use crate::i18n::{I18n, I18nManager, Locale};
-pub use crate::jobs::{spawn_worker, Job, JobContext, JobDispatcher, Worker};
+pub use crate::jobs::{
+    spawn_worker, Job, JobBatchBuilder, JobChainBuilder, JobContext, JobDispatcher, JobMiddleware,
+    Worker,
+};
 pub use crate::kernel::worker::WorkerKernel;
 pub use crate::logging::{
     AuthOutcome, HttpOutcomeClass, JobOutcome, LivenessReport, LogFormat, LogLevel,
@@ -58,9 +67,10 @@ pub use crate::storage::{
     MultipartForm, StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadedFile,
 };
 pub use crate::support::{
-    sha256_hex, sha256_hex_str, ChannelEventId, ChannelId, Clock, Collection, CommandId,
+    sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock, Collection, CommandId,
     CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId, LocalDateTime, MigrationId,
-    ModelId, PermissionId, PluginAssetId, PluginId, PluginScaffoldId, PolicyId, ProbeId, QueueId,
+    ModelId, NotificationChannelId, PermissionId, PluginAssetId, PluginId, PluginScaffoldId,
+    PolicyId, ProbeId, QueueId,
     RoleId, ScheduleId, SeederId, Time, Timezone, Token, ValidationRuleId,
 };
 pub use crate::validation::{
@@ -68,9 +78,9 @@ pub use crate::validation::{
     Validator,
 };
 pub use crate::websocket::{
-    ChannelHandler, ClientAction, ClientMessage, ServerMessage, WebSocketChannelOptions,
-    WebSocketContext, WebSocketPublisher, WebSocketRegistrar, ERROR_EVENT, SUBSCRIBED_EVENT,
-    SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT,
+    ChannelHandler, ClientAction, ClientMessage, PresenceInfo, ServerMessage,
+    WebSocketChannelOptions, WebSocketContext, WebSocketPublisher, WebSocketRegistrar, ERROR_EVENT,
+    SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT,
 };
 pub use axum::extract::State;
 pub use axum::http::StatusCode;

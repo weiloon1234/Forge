@@ -1,6 +1,8 @@
 pub mod session;
 pub mod token;
 
+pub(crate) use token::builtin_cli_registrar;
+
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
@@ -542,9 +544,9 @@ impl AuthManager {
                 };
                 Ok(actor.with_guard(guard_id))
             }
-            GuardAuthenticator::Session(_) => Err(AuthError::internal(
-                "authenticate_token called on a session guard",
-            )),
+            GuardAuthenticator::Session(_) => Err(AuthError::internal(format!(
+                "guard `{guard_id}` uses session authentication; use a bearer token guard or authenticate via cookies instead"
+            ))),
         }
     }
 

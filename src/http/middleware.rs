@@ -39,9 +39,11 @@ pub enum MiddlewareConfig {
     TrustedProxy(TrustedProxy),
     Cors(Cors),
     SecurityHeaders(SecurityHeaders),
+    Csrf(Csrf),
     RateLimit(RateLimit),
     MaxBodySize(MaxBodySize),
     RequestTimeout(RequestTimeout),
+    Compression(Compression),
 }
 
 impl MiddlewareConfig {
@@ -51,9 +53,11 @@ impl MiddlewareConfig {
             Self::TrustedProxy(_) => 0,
             Self::Cors(_) => 10,
             Self::SecurityHeaders(_) => 20,
+            Self::Csrf(_) => 25,
             Self::RateLimit(_) => 30,
             Self::MaxBodySize(_) => 40,
             Self::RequestTimeout(_) => 50,
+            Self::Compression(_) => 60,
         }
     }
 
@@ -67,9 +71,11 @@ impl MiddlewareConfig {
             Self::TrustedProxy(config) => config.apply(router),
             Self::Cors(config) => config.apply(router),
             Self::SecurityHeaders(config) => config.apply(router),
+            Self::Csrf(config) => config.apply(router),
             Self::RateLimit(config) => config.apply(router, app),
             Self::MaxBodySize(config) => config.apply(router),
             Self::RequestTimeout(config) => config.apply(router),
+            Self::Compression(config) => config.apply(router),
         }
     }
 }
@@ -352,12 +358,12 @@ impl SecurityHeaders {
         self
     }
 
-    /// Add a `Content-Security-Policy` header.
-    pub fn content_security_policy(self, policy: &str) -> Self {
-        self.header(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_str(policy).expect("invalid CSP header value"),
-        )
+    /// Add a `Content-Security-Policy` header. Invalid values are silently skipped.
+    pub fn content_security_policy(mut self, policy: &str) -> Self {
+        if let Ok(hv) = HeaderValue::from_str(policy) {
+            self = self.header(header::CONTENT_SECURITY_POLICY, hv);
+        }
+        self
     }
 
     /// Set the `Referrer-Policy` value.
@@ -410,6 +416,236 @@ impl Default for SecurityHeaders {
 }
 
 // ---------------------------------------------------------------------------
+// Csrf
+// ---------------------------------------------------------------------------
+
+/// CSRF protection middleware using the double-submit cookie pattern.
+///
+/// Generates a token stored in a cookie and validates that state-changing
+/// requests (POST/PUT/PATCH/DELETE) include the matching token in a header
+/// or form field. GET/HEAD/OPTIONS requests are exempt.
+#[derive(Clone, Debug)]
+pub struct Csrf {
+    cookie_name: String,
+    header_name: HeaderName,
+    secure: bool,
+    exclude: Vec<String>,
+}
+
+impl Csrf {
+    pub fn new() -> Self {
+        Self {
+            cookie_name: "forge_csrf".to_string(),
+            header_name: HeaderName::from_static("x-csrf-token"),
+            secure: true,
+            exclude: Vec::new(),
+        }
+    }
+
+    pub fn cookie_name(mut self, name: &str) -> Self {
+        self.cookie_name = name.to_string();
+        self
+    }
+
+    pub fn header_name(mut self, name: HeaderName) -> Self {
+        self.header_name = name;
+        self
+    }
+
+    pub fn secure(mut self, secure: bool) -> Self {
+        self.secure = secure;
+        self
+    }
+
+    /// Add a path prefix to exclude from CSRF validation (e.g., "/api").
+    pub fn exclude(mut self, path: &str) -> Self {
+        self.exclude.push(path.to_string());
+        self
+    }
+
+    pub fn build(self) -> MiddlewareConfig {
+        MiddlewareConfig::Csrf(self)
+    }
+
+    fn apply(self, router: axum::Router<AppContext>) -> axum::Router<AppContext> {
+        let state = CsrfState {
+            cookie_name: self.cookie_name,
+            header_name: self.header_name,
+            secure: self.secure,
+            exclude: self.exclude,
+        };
+        router.layer(middleware::from_fn_with_state(state, csrf_middleware))
+    }
+}
+
+impl Default for Csrf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+struct CsrfState {
+    cookie_name: String,
+    header_name: HeaderName,
+    secure: bool,
+    exclude: Vec<String>,
+}
+
+/// Extension inserted by the CSRF middleware containing the current token.
+#[derive(Clone, Debug)]
+pub struct CsrfToken(String);
+
+impl CsrfToken {
+    /// The CSRF token value (for rendering in forms or meta tags).
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<S> axum::extract::FromRequestParts<S> for CsrfToken
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<CsrfToken>()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({
+                        "message": "CSRF middleware not active on this route",
+                        "status": 500
+                    })),
+                )
+                    .into_response()
+            })
+    }
+}
+
+async fn csrf_middleware(
+    State(state): State<CsrfState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+
+    // Check if path is excluded
+    if state.exclude.iter().any(|prefix| path.starts_with(prefix)) {
+        return next.run(request).await;
+    }
+
+    let method = request.method().clone();
+    let is_safe = matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+
+    // Extract existing token from cookie
+    let existing_token = extract_cookie_value(request.headers(), &state.cookie_name);
+
+    if is_safe {
+        // Safe methods: ensure token cookie exists, set extension
+        let token = match existing_token {
+            Some(ref token) => token.clone(),
+            None => {
+                // Generate new token
+                match crate::support::Token::base64(32) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({
+                                "message": "Failed to generate CSRF token",
+                                "status": 500
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        };
+
+        request.extensions_mut().insert(CsrfToken(token.clone()));
+        let mut response = next.run(request).await;
+
+        // Set cookie if it wasn't present
+        if existing_token.is_none() {
+            let cookie = build_csrf_cookie(&state.cookie_name, &token, state.secure);
+            if let Ok(hv) = cookie.parse::<HeaderValue>() {
+                response.headers_mut().append(header::SET_COOKIE, hv);
+            }
+        }
+
+        response
+    } else {
+        // State-changing methods: validate token
+        let Some(cookie_token) = existing_token else {
+            return csrf_forbidden("CSRF token cookie missing");
+        };
+
+        // Check header first, then query for the form field value won't work easily
+        // without consuming the body. For API-first framework, header is primary.
+        let request_token = request
+            .headers()
+            .get(&state.header_name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let Some(request_token) = request_token else {
+            return csrf_forbidden("CSRF token missing from request header");
+        };
+
+        if !constant_time_eq(cookie_token.as_bytes(), request_token.as_bytes()) {
+            return csrf_forbidden("CSRF token mismatch");
+        }
+
+        request.extensions_mut().insert(CsrfToken(cookie_token));
+        next.run(request).await
+    }
+}
+
+/// Build a CSRF cookie string. Intentionally NOT HttpOnly — the frontend JS must
+/// read this cookie to include the token in the X-CSRF-TOKEN request header
+/// (double-submit cookie pattern).
+fn build_csrf_cookie(name: &str, value: &str, secure: bool) -> String {
+    let mut cookie = format!("{name}={value}; Path=/; SameSite=Lax");
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn csrf_forbidden(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({
+            "message": message,
+            "status": 403
+        })),
+    )
+        .into_response()
+}
+
+/// Constant-time comparison to prevent timing attacks on CSRF tokens.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+// extract_cookie_value is in crate::http::cookie (shared with session auth)
+use super::cookie::extract_cookie_value;
+
+// ---------------------------------------------------------------------------
 // RateLimit
 // ---------------------------------------------------------------------------
 
@@ -431,9 +667,21 @@ impl RateLimitWindow {
     }
 }
 
+/// Determines how rate-limit keys are derived.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum RateLimitBy {
+    /// Key by client IP address (default).
+    #[default]
+    Ip,
+    /// Key by authenticated actor ID (requires auth middleware).
+    Actor,
+    /// Key by actor ID when authenticated, falling back to IP.
+    ActorOrIp,
+}
+
 /// Rate-limit store backend.
 #[derive(Clone)]
-enum RateLimitStore {
+pub(crate) enum RateLimitStore {
     /// In-memory fixed-window counter. Used when Redis is not configured.
     Memory(Arc<Mutex<HashMap<String, (u32, u64)>>>),
     /// Redis-backed counter via `INCR` + `EXPIRE`. Used automatically when
@@ -458,6 +706,7 @@ pub struct RateLimit {
     max: u32,
     window: RateLimitWindow,
     key_prefix: String,
+    by: RateLimitBy,
 }
 
 impl RateLimit {
@@ -467,6 +716,7 @@ impl RateLimit {
             max,
             window: RateLimitWindow::Minute,
             key_prefix: "rl:".to_string(),
+            by: RateLimitBy::Ip,
         }
     }
 
@@ -494,19 +744,45 @@ impl RateLimit {
         self
     }
 
+    /// Rate-limit by authenticated actor ID instead of IP.
+    pub fn by_actor(mut self) -> Self {
+        self.by = RateLimitBy::Actor;
+        self
+    }
+
+    /// Rate-limit by actor ID when authenticated, falling back to IP.
+    pub fn by_actor_or_ip(mut self) -> Self {
+        self.by = RateLimitBy::ActorOrIp;
+        self
+    }
+
+    /// Returns the configured rate-limit key strategy.
+    pub fn rate_limit_by(&self) -> RateLimitBy {
+        self.by
+    }
+
+    /// Returns the maximum requests allowed per window.
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+
+    /// Returns the configured window.
+    pub fn window(&self) -> RateLimitWindow {
+        self.window
+    }
+
+    /// Returns the key prefix.
+    pub fn key_prefix_str(&self) -> &str {
+        &self.key_prefix
+    }
+
     /// Convert into a `MiddlewareConfig`.
     pub fn build(self) -> MiddlewareConfig {
         MiddlewareConfig::RateLimit(self)
     }
 
     fn apply(self, router: axum::Router<AppContext>, app: &AppContext) -> axum::Router<AppContext> {
-        let store = match app.resolve::<RuntimeBackend>() {
-            Ok(backend) if matches!(backend.kind(), RuntimeBackendKind::Redis) => {
-                tracing::debug!("forge: rate limiter using Redis backend");
-                RateLimitStore::Redis((*backend).clone())
-            }
-            _ => RateLimitStore::Memory(Arc::new(Mutex::new(HashMap::new()))),
-        };
+        let store = create_rate_limit_store(app);
         let state = RateLimitState {
             max: self.max,
             window: self.window,
@@ -517,12 +793,25 @@ impl RateLimit {
     }
 }
 
+/// Create a rate-limit store backend from the application context.
+///
+/// Uses Redis when configured, otherwise falls back to in-memory storage.
+pub(crate) fn create_rate_limit_store(app: &AppContext) -> RateLimitStore {
+    match app.resolve::<RuntimeBackend>() {
+        Ok(backend) if matches!(backend.kind(), RuntimeBackendKind::Redis) => {
+            tracing::debug!("forge: rate limiter using Redis backend");
+            RateLimitStore::Redis((*backend).clone())
+        }
+        _ => RateLimitStore::Memory(Arc::new(Mutex::new(HashMap::new()))),
+    }
+}
+
 #[derive(Clone)]
-struct RateLimitState {
-    max: u32,
-    window: RateLimitWindow,
-    key_prefix: String,
-    store: RateLimitStore,
+pub(crate) struct RateLimitState {
+    pub(crate) max: u32,
+    pub(crate) window: RateLimitWindow,
+    pub(crate) key_prefix: String,
+    pub(crate) store: RateLimitStore,
 }
 
 async fn rate_limit_middleware(
@@ -531,13 +820,73 @@ async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     let ip = extract_client_ip(&request);
+    let key_identifier = format!("ip:{}", ip);
+    let info = rate_limit_info(&state, &key_identifier).await;
+
+    if info.current > info.limit {
+        let body = serde_json::json!({
+            "message": "Rate limit exceeded",
+            "status": 429
+        });
+
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (
+                    HeaderName::from_static("x-ratelimit-limit"),
+                    HeaderValue::from_str(&info.limit.to_string()).unwrap(),
+                ),
+                (
+                    HeaderName::from_static("x-ratelimit-remaining"),
+                    HeaderValue::from_str("0").unwrap(),
+                ),
+                (
+                    HeaderName::from_static("x-ratelimit-reset"),
+                    HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                ),
+                (
+                    header::RETRY_AFTER,
+                    HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                ),
+            ],
+            axum::Json(body),
+        )
+            .into_response();
+    }
+
+    let mut response = next.run(request).await;
+    let resp_headers = response.headers_mut();
+    let _ = resp_headers.try_insert(
+        HeaderName::from_static("x-ratelimit-limit"),
+        HeaderValue::from_str(&info.limit.to_string()).unwrap(),
+    );
+    let _ = resp_headers.try_insert(
+        HeaderName::from_static("x-ratelimit-remaining"),
+        HeaderValue::from_str(&info.remaining.to_string()).unwrap(),
+    );
+    let _ = resp_headers.try_insert(
+        HeaderName::from_static("x-ratelimit-reset"),
+        HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+    );
+    response
+}
+
+struct RateLimitInfo {
+    current: u32,
+    remaining: u32,
+    limit: u32,
+    secs_until_reset: u64,
+}
+
+/// Increment the rate-limit counter for the given key and return current info.
+async fn rate_limit_info(state: &RateLimitState, key_identifier: &str) -> RateLimitInfo {
     let window_secs = state.window.duration_secs();
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let bucket = now_secs / window_secs;
-    let key = format!("{}{}:{}", state.key_prefix, ip, bucket);
+    let key = format!("{}{}:{}", state.key_prefix, key_identifier, bucket);
 
     let (current, secs_until_reset) = match &state.store {
         RateLimitStore::Redis(backend) => {
@@ -571,56 +920,55 @@ async fn rate_limit_middleware(
         }
     };
 
-    let remaining = state.max.saturating_sub(current);
-    let limit = state.max;
+    RateLimitInfo {
+        current,
+        remaining: state.max.saturating_sub(current),
+        limit: state.max,
+        secs_until_reset,
+    }
+}
 
-    if current > state.max {
+/// Check the rate limit for a given key identifier and return a 429 response if exceeded.
+///
+/// Returns `Some(Response)` with a 429 status if the limit is exceeded, `None` otherwise.
+/// The response includes standard rate-limit headers.
+pub(crate) async fn enforce_rate_limit(state: &RateLimitState, key_identifier: &str) -> Option<Response> {
+    let info = rate_limit_info(state, key_identifier).await;
+
+    if info.current > info.limit {
         let body = serde_json::json!({
             "message": "Rate limit exceeded",
             "status": 429
         });
 
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [
-                (
-                    HeaderName::from_static("x-ratelimit-limit"),
-                    HeaderValue::from_str(&limit.to_string()).unwrap(),
-                ),
-                (
-                    HeaderName::from_static("x-ratelimit-remaining"),
-                    HeaderValue::from_str("0").unwrap(),
-                ),
-                (
-                    HeaderName::from_static("x-ratelimit-reset"),
-                    HeaderValue::from_str(&secs_until_reset.to_string()).unwrap(),
-                ),
-                (
-                    header::RETRY_AFTER,
-                    HeaderValue::from_str(&secs_until_reset.to_string()).unwrap(),
-                ),
-            ],
-            axum::Json(body),
-        )
-            .into_response();
+        return Some(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [
+                    (
+                        HeaderName::from_static("x-ratelimit-limit"),
+                        HeaderValue::from_str(&info.limit.to_string()).unwrap(),
+                    ),
+                    (
+                        HeaderName::from_static("x-ratelimit-remaining"),
+                        HeaderValue::from_str("0").unwrap(),
+                    ),
+                    (
+                        HeaderName::from_static("x-ratelimit-reset"),
+                        HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                    ),
+                    (
+                        header::RETRY_AFTER,
+                        HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                    ),
+                ],
+                axum::Json(body),
+            )
+                .into_response(),
+        );
     }
 
-    let mut response = next.run(request).await;
-    let resp_headers = response.headers_mut();
-    let _ = resp_headers.try_insert(
-        HeaderName::from_static("x-ratelimit-limit"),
-        HeaderValue::from_str(&limit.to_string()).unwrap(),
-    );
-    let _ = resp_headers.try_insert(
-        HeaderName::from_static("x-ratelimit-remaining"),
-        HeaderValue::from_str(&remaining.to_string()).unwrap(),
-    );
-    let _ = resp_headers.try_insert(
-        HeaderName::from_static("x-ratelimit-reset"),
-        HeaderValue::from_str(&secs_until_reset.to_string()).unwrap(),
-    );
-
-    response
+    None
 }
 
 fn extract_client_ip(request: &Request) -> IpAddr {
@@ -715,6 +1063,36 @@ impl RequestTimeout {
 }
 
 // ---------------------------------------------------------------------------
+// Compression
+// ---------------------------------------------------------------------------
+
+/// Response compression middleware (gzip + brotli).
+///
+/// Wraps `tower_http::compression::CompressionLayer`.
+#[derive(Clone, Debug)]
+pub struct Compression;
+
+impl Compression {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn build(self) -> MiddlewareConfig {
+        MiddlewareConfig::Compression(self)
+    }
+
+    fn apply(self, router: axum::Router<AppContext>) -> axum::Router<AppContext> {
+        router.layer(tower_http::compression::CompressionLayer::new())
+    }
+}
+
+impl Default for Compression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TrustedProxy
 // ---------------------------------------------------------------------------
 
@@ -786,7 +1164,7 @@ async fn trusted_proxy_fn(
     next.run(request).await
 }
 
-fn resolve_real_ip(headers: &HeaderMap, custom_headers: &[HeaderName]) -> IpAddr {
+pub(crate) fn resolve_real_ip(headers: &HeaderMap, custom_headers: &[HeaderName]) -> IpAddr {
     // 1. CF-Connecting-IP
     if let Some(ip) = headers
         .get(CF_CONNECTING_IP)
@@ -1110,9 +1488,11 @@ mod tests {
             MiddlewareConfig::MaxBodySize(MaxBodySize::mb(1)),
             MiddlewareConfig::Cors(Cors::new()),
             MiddlewareConfig::TrustedProxy(TrustedProxy::new()),
+            MiddlewareConfig::Csrf(Csrf::new()),
             MiddlewareConfig::RateLimit(RateLimit::new(100)),
             MiddlewareConfig::RequestTimeout(RequestTimeout::secs(30)),
             MiddlewareConfig::SecurityHeaders(SecurityHeaders::new()),
+            MiddlewareConfig::Compression(Compression::new()),
         ];
 
         let mut with_priorities: Vec<(u8, &str)> = configs
@@ -1122,9 +1502,11 @@ mod tests {
                     MiddlewareConfig::TrustedProxy(_) => "TrustedProxy",
                     MiddlewareConfig::Cors(_) => "Cors",
                     MiddlewareConfig::SecurityHeaders(_) => "SecurityHeaders",
+                    MiddlewareConfig::Csrf(_) => "Csrf",
                     MiddlewareConfig::RateLimit(_) => "RateLimit",
                     MiddlewareConfig::MaxBodySize(_) => "MaxBodySize",
                     MiddlewareConfig::RequestTimeout(_) => "RequestTimeout",
+                    MiddlewareConfig::Compression(_) => "Compression",
                 };
                 (c.priority(), name)
             })
@@ -1139,9 +1521,11 @@ mod tests {
                 "TrustedProxy",
                 "Cors",
                 "SecurityHeaders",
+                "Csrf",
                 "RateLimit",
                 "MaxBodySize",
                 "RequestTimeout",
+                "Compression",
             ]
         );
     }

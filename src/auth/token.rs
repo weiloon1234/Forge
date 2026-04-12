@@ -3,12 +3,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use clap::{Arg, Command};
+
+use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::TokenConfig;
 use crate::database::{DatabaseManager, DbValue, FromDbValue};
 use crate::foundation::{Error, Result};
-use crate::support::{sha256_hex_str, GuardId, Token};
+use crate::support::{sha256_hex_str, CommandId, GuardId, PermissionId, Token};
 
 use super::{Actor, Authenticatable, BearerAuthenticator};
+
+const TOKEN_PRUNE_COMMAND: CommandId = CommandId::new("token:prune");
 
 /// A pair of access + refresh tokens returned to the client after login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +48,30 @@ impl TokenManager {
         actor_id: &str,
         name: &str,
     ) -> Result<TokenPair> {
-        self.insert_token_pair(&M::guard().to_string(), actor_id, name)
+        self.insert_token_pair(&M::guard().to_string(), actor_id, name, &[])
+            .await
+    }
+
+    /// Issue a new token pair with scoped abilities.
+    ///
+    /// Abilities are stored as a JSON array on the token row and automatically
+    /// become [`Actor`] permissions when the token is validated, integrating
+    /// with the existing permission system.
+    ///
+    /// ```ignore
+    /// let pair = app.tokens()?.issue_with_abilities::<User>(
+    ///     &user.id.to_string(),
+    ///     "mobile-app",
+    ///     vec!["orders:read".into(), "profile:write".into()],
+    /// ).await?;
+    /// ```
+    pub async fn issue_with_abilities<M: Authenticatable>(
+        &self,
+        actor_id: &str,
+        name: &str,
+        abilities: Vec<String>,
+    ) -> Result<TokenPair> {
+        self.insert_token_pair(&M::guard().to_string(), actor_id, name, &abilities)
             .await
     }
 
@@ -58,7 +86,7 @@ impl TokenManager {
             .db
             .raw_query(
                 r#"
-                SELECT guard, actor_id
+                SELECT guard, actor_id, abilities
                 FROM personal_access_tokens
                 WHERE access_token_hash = $1
                   AND revoked_at IS NULL
@@ -81,7 +109,22 @@ impl TokenManager {
                 .ok_or_else(|| Error::message("missing actor_id column"))?,
         )?;
 
-        Ok(Some(Actor::new(actor_id, GuardId::owned(guard))))
+        let mut actor = Actor::new(actor_id, GuardId::owned(guard));
+
+        // Parse token-scoped abilities into Actor permissions.
+        if let Some(abilities_value) = row.get("abilities") {
+            if let Ok(abilities_json) = serde_json::Value::from_db_value(abilities_value) {
+                if let Ok(abilities) =
+                    serde_json::from_value::<Vec<String>>(abilities_json)
+                {
+                    actor = actor.with_permissions(
+                        abilities.iter().map(|a| PermissionId::owned(a.clone())),
+                    );
+                }
+            }
+        }
+
+        Ok(Some(actor))
     }
 
     /// Update `last_used_at` for a token. Call this explicitly when you need
@@ -148,7 +191,7 @@ impl TokenManager {
                 .ok_or_else(|| Error::message("missing actor_id column"))?,
         )?;
 
-        self.insert_token_pair(&guard, &actor_id, "").await
+        self.insert_token_pair(&guard, &actor_id, "", &[]).await
     }
 
     /// Revoke a specific access token.
@@ -177,12 +220,29 @@ impl TokenManager {
             .await
     }
 
+    /// Delete tokens that are expired or revoked older than the given age.
+    ///
+    /// Returns the number of tokens deleted.
+    pub async fn prune(&self, older_than_days: u64) -> Result<u64> {
+        self.db
+            .raw_execute(
+                r#"
+                DELETE FROM personal_access_tokens
+                WHERE (revoked_at IS NOT NULL AND revoked_at < NOW() - $1 * INTERVAL '1 day')
+                   OR (expires_at < NOW() - $1 * INTERVAL '1 day')
+                "#,
+                &[DbValue::Int64(older_than_days as i64)],
+            )
+            .await
+    }
+
     /// Core token pair creation — shared by issue and refresh.
     async fn insert_token_pair(
         &self,
         guard: &str,
         actor_id: &str,
         name: &str,
+        abilities: &[String],
     ) -> Result<TokenPair> {
         let access_plain = Token::base64(self.config.token_length)?;
         let refresh_plain = Token::base64(self.config.token_length)?;
@@ -193,13 +253,20 @@ impl TokenManager {
         let expires_in_secs = self.config.access_token_ttl_minutes * 60;
         let refresh_expires_in_secs = self.config.refresh_token_ttl_days * 24 * 60 * 60;
 
+        let abilities_json = serde_json::Value::Array(
+            abilities
+                .iter()
+                .map(|a| serde_json::Value::String(a.clone()))
+                .collect(),
+        );
+
         self.db
             .raw_execute(
                 r#"
                 INSERT INTO personal_access_tokens
-                    (guard, actor_id, name, access_token_hash, refresh_token_hash, expires_at, refresh_expires_at)
+                    (guard, actor_id, name, access_token_hash, refresh_token_hash, abilities, expires_at, refresh_expires_at)
                 VALUES
-                    ($1, $2, $3, $4, $5, NOW() + $6 * INTERVAL '1 second', NOW() + $7 * INTERVAL '1 second')
+                    ($1, $2, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 second', NOW() + $8 * INTERVAL '1 second')
                 "#,
                 &[
                     DbValue::Text(guard.to_string()),
@@ -207,6 +274,7 @@ impl TokenManager {
                     DbValue::Text(name.to_string()),
                     DbValue::Text(access_hash),
                     DbValue::Text(refresh_hash),
+                    DbValue::Json(abilities_json),
                     DbValue::Int64(expires_in_secs as i64),
                     DbValue::Int64(refresh_expires_in_secs as i64),
                 ],
@@ -240,4 +308,39 @@ impl BearerAuthenticator for TokenAuthenticator {
     async fn authenticate(&self, token: &str) -> Result<Option<Actor>> {
         self.manager.validate(token).await
     }
+}
+
+pub(crate) fn builtin_cli_registrar() -> CommandRegistrar {
+    Arc::new(|registry| {
+        registry.command(
+            TOKEN_PRUNE_COMMAND,
+            Command::new(TOKEN_PRUNE_COMMAND.as_str().to_string())
+                .about("Delete expired and revoked personal access tokens")
+                .arg(
+                    Arg::new("days")
+                        .long("days")
+                        .value_name("DAYS")
+                        .default_value("30")
+                        .help("Delete tokens expired/revoked more than this many days ago"),
+                ),
+            |invocation| async move { token_prune_command(invocation).await },
+        )?;
+        Ok(())
+    })
+}
+
+async fn token_prune_command(invocation: CommandInvocation) -> Result<()> {
+    let days_str = invocation
+        .matches()
+        .get_one::<String>("days")
+        .map(|s| s.as_str())
+        .unwrap_or("30");
+    let days: u64 = days_str
+        .parse()
+        .map_err(|_| Error::message("--days must be a positive integer"))?;
+
+    let tokens = invocation.app().tokens()?;
+    let deleted = tokens.prune(days).await?;
+    println!("pruned {deleted} token(s) older than {days} day(s)");
+    Ok(())
 }

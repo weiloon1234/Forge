@@ -906,6 +906,7 @@ pub struct ModelHookContext<'a> {
     app: &'a AppContext,
     database: Arc<DatabaseManager>,
     transaction: &'a DatabaseTransaction,
+    actor: Option<&'a crate::auth::Actor>,
 }
 
 impl<'a> ModelHookContext<'a> {
@@ -913,11 +914,13 @@ impl<'a> ModelHookContext<'a> {
         app: &'a AppContext,
         database: Arc<DatabaseManager>,
         transaction: &'a DatabaseTransaction,
+        actor: Option<&'a crate::auth::Actor>,
     ) -> Self {
         Self {
             app,
             database,
             transaction,
+            actor,
         }
     }
 
@@ -931,6 +934,10 @@ impl<'a> ModelHookContext<'a> {
 
     pub fn transaction(&self) -> &DatabaseTransaction {
         self.transaction
+    }
+
+    pub fn actor(&self) -> Option<&crate::auth::Actor> {
+        self.actor
     }
 
     pub fn executor(&self) -> &dyn QueryExecutor {
@@ -1122,6 +1129,10 @@ pub trait ModelWriteExecutor: QueryExecutor + Send + Sync {
     fn app_context(&self) -> &AppContext;
 
     fn active_transaction(&self) -> Option<&DatabaseTransaction> {
+        None
+    }
+
+    fn actor(&self) -> Option<&crate::auth::Actor> {
         None
     }
 }

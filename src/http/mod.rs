@@ -1,5 +1,6 @@
 pub mod cookie;
 pub mod middleware;
+pub(crate) mod spa;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -20,10 +21,12 @@ pub use crate::validation::Validated;
 pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
 pub type HttpRouter = Router<AppContext>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct HttpRouteOptions {
     pub access: AccessScope,
     middlewares: Vec<MiddlewareConfig>,
+    pub(crate) post_auth_rate_limit: Option<middleware::RateLimit>,
+    pub(crate) doc: Option<crate::openapi::RouteDoc>,
 }
 
 impl HttpRouteOptions {
@@ -62,6 +65,29 @@ impl HttpRouteOptions {
     /// Multiple calls append middleware in order.
     pub fn middleware(mut self, config: MiddlewareConfig) -> Self {
         self.middlewares.push(config);
+        self
+    }
+
+    /// Attach a rate limiter to this route.
+    ///
+    /// IP-based rate limiting runs as a normal middleware layer. Actor-based or
+    /// actor-or-IP rate limiting is deferred until after authentication so the
+    /// actor identity is available for keying.
+    pub fn rate_limit(mut self, rate_limit: middleware::RateLimit) -> Self {
+        match rate_limit.rate_limit_by() {
+            middleware::RateLimitBy::Ip => {
+                self.middlewares.push(rate_limit.build());
+            }
+            _ => {
+                self.post_auth_rate_limit = Some(rate_limit);
+            }
+        }
+        self
+    }
+
+    /// Attach OpenAPI documentation to this route.
+    pub fn document(mut self, doc: crate::openapi::RouteDoc) -> Self {
+        self.doc = Some(doc);
         self
     }
 
@@ -141,6 +167,93 @@ impl HttpRegistrar {
         self
     }
 
+    /// Create a route group under a shared path prefix.
+    ///
+    /// Routes registered inside the closure are nested under `prefix`.
+    ///
+    /// ```ignore
+    /// r.group("/admin", |r| {
+    ///     r.route("/dashboard", get(dashboard));  // /admin/dashboard
+    ///     r.route("/settings", get(settings));     // /admin/settings
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub fn group(
+        &mut self,
+        prefix: &str,
+        f: impl FnOnce(&mut HttpRegistrar) -> Result<()>,
+    ) -> Result<&mut Self> {
+        let mut sub = HttpRegistrar::new();
+        f(&mut sub)?;
+        for registration in sub.registrations {
+            match registration {
+                HttpRegistration::Route {
+                    path,
+                    method_router,
+                    options,
+                } => {
+                    self.registrations.push(HttpRegistration::Route {
+                        path: format!("{prefix}{path}"),
+                        method_router,
+                        options,
+                    });
+                }
+                HttpRegistration::Nest { path, router } => {
+                    self.registrations.push(HttpRegistration::Nest {
+                        path: format!("{prefix}{path}"),
+                        router,
+                    });
+                }
+                HttpRegistration::Merge { router } => {
+                    // Merged routers cannot be trivially prefixed, so nest them.
+                    self.registrations.push(HttpRegistration::Nest {
+                        path: prefix.to_string(),
+                        router,
+                    });
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// Create an API version group.
+    ///
+    /// Routes registered inside the closure are nested under `/api/v{version}`.
+    ///
+    /// ```ignore
+    /// r.api_version(1, |r| {
+    ///     r.route("/users", get(list_users));   // /api/v1/users
+    ///     r.route("/orders", get(list_orders));  // /api/v1/orders
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub fn api_version(
+        &mut self,
+        version: u32,
+        f: impl FnOnce(&mut HttpRegistrar) -> Result<()>,
+    ) -> Result<&mut Self> {
+        self.group(&format!("/api/v{version}"), f)
+    }
+
+    /// Collect documented routes for OpenAPI spec generation.
+    pub(crate) fn collect_documented_routes(
+        &self,
+    ) -> Vec<crate::openapi::spec::DocumentedRoute> {
+        let mut docs = Vec::new();
+        for registration in &self.registrations {
+            if let HttpRegistration::Route { path, options, .. } = registration {
+                if let Some(ref doc) = options.doc {
+                    docs.push(crate::openapi::spec::DocumentedRoute {
+                        method: doc.method.clone().unwrap_or_else(|| "get".into()),
+                        path: path.clone(),
+                        doc: doc.clone(),
+                    });
+                }
+            }
+        }
+        docs
+    }
+
     pub fn into_router(self, app: AppContext) -> Router {
         self.into_router_with_middlewares(app, Vec::new())
     }
@@ -162,10 +275,19 @@ impl HttpRegistrar {
                     let method_router = *method_router;
                     let route_middlewares = options.middlewares.clone();
                     let method_router = if options.requires_auth() {
+                        let post_auth_rl = options.post_auth_rate_limit.as_ref().map(|rl| {
+                            middleware::RateLimitState {
+                                max: rl.max(),
+                                window: rl.window(),
+                                key_prefix: rl.key_prefix_str().to_string(),
+                                store: middleware::create_rate_limit_store(&app),
+                            }
+                        });
                         method_router.route_layer(axum_middleware::from_fn_with_state(
                             HttpAuthState {
                                 app: app.clone(),
                                 options,
+                                post_auth_rl,
                             },
                             http_auth_middleware,
                         ))
@@ -210,6 +332,7 @@ impl HttpRegistrar {
 struct HttpAuthState {
     app: AppContext,
     options: HttpRouteOptions,
+    post_auth_rl: Option<middleware::RateLimitState>,
 }
 
 async fn http_auth_middleware(
@@ -246,6 +369,14 @@ async fn http_auth_middleware(
     if let Err(error) = authorizer.authorize_permissions(&actor, &permissions).await {
         record_auth_outcome(&state.app, auth_outcome_from_error(&error));
         return error.into_response();
+    }
+
+    // Post-auth rate limiting (for by_actor / by_actor_or_ip)
+    if let Some(ref rl_state) = state.post_auth_rl {
+        let key_id = format!("actor:{}", actor.id);
+        if let Some(rejection) = middleware::enforce_rate_limit(rl_state, &key_id).await {
+            return rejection;
+        }
     }
 
     record_auth_outcome(&state.app, AuthOutcome::Success);

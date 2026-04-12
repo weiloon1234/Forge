@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use tokio::net::TcpListener;
 
@@ -13,6 +14,7 @@ pub struct HttpKernel {
     routes: Vec<RouteRegistrar>,
     middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
+    spa_dir: Option<PathBuf>,
 }
 
 impl HttpKernel {
@@ -21,12 +23,14 @@ impl HttpKernel {
         routes: Vec<RouteRegistrar>,
         middlewares: Vec<MiddlewareConfig>,
         observability: Option<ObservabilityOptions>,
+        spa_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             app,
             routes,
             middlewares,
             observability,
+            spa_dir,
         }
     }
 
@@ -40,13 +44,28 @@ impl HttpKernel {
             routes(&mut registrar)?;
         }
         if let Some(options) = &self.observability {
+            let obs_config = self.app.config().observability()?;
+
+            // Collect documented routes and publish OpenAPI spec
+            let documented = registrar.collect_documented_routes();
+            if !documented.is_empty() {
+                crate::logging::set_openapi_spec("API", "1.0.0", &documented);
+            }
+            crate::logging::register_openapi_route(&mut registrar, &obs_config, options)?;
             crate::logging::register_observability_routes(
                 &mut registrar,
-                &self.app.config().observability()?,
+                &obs_config,
                 options,
             )?;
         }
-        Ok(registrar.into_router_with_middlewares(self.app.clone(), self.middlewares.clone()))
+        let mut router =
+            registrar.into_router_with_middlewares(self.app.clone(), self.middlewares.clone());
+
+        if let Some(ref spa_dir) = self.spa_dir {
+            router = router.fallback_service(crate::http::spa::spa_fallback(spa_dir.clone()));
+        }
+
+        Ok(router)
     }
 
     pub async fn bind(self) -> Result<BoundHttpServer> {
@@ -80,6 +99,7 @@ impl BoundHttpServer {
 
     pub async fn serve(self) -> Result<()> {
         axum::serve(self.listener, self.router)
+            .with_graceful_shutdown(super::shutdown::shutdown_signal())
             .await
             .map_err(Error::other)
     }

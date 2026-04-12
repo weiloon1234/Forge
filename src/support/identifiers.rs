@@ -69,6 +69,7 @@ typed_identifier!(PluginAssetId);
 typed_identifier!(PluginScaffoldId);
 typed_identifier!(MigrationId);
 typed_identifier!(SeederId);
+typed_identifier!(NotificationChannelId);
 
 pub struct ModelId<M> {
     value: Uuid,

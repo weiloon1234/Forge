@@ -32,9 +32,10 @@ pub use model::{
 };
 pub use projection::{Projection, ProjectionField, ProjectionFieldInfo, ProjectionMeta};
 pub use query::{
-    Case, CreateManyModel, CreateModel, CreateRow, Cte, DeleteModel, JsonExprBuilder, ModelQuery,
-    Paginated, Pagination, ProjectionQuery, Query, RestoreModel, Sql, UpdateModel, Window,
-    WindowBuilder,
+    Case, CreateManyModel, CreateModel, CreateRow, Cte, CursorInfo, CursorMeta, CursorPaginated,
+    CursorPagination, DeleteModel, JsonExprBuilder, ModelQuery, Paginated, PaginatedResponse,
+    PaginationLinks, PaginationMeta, Pagination, ProjectionQuery, Query, RestoreModel, Sql,
+    UpdateModel, Window, WindowBuilder,
 };
 pub use relation::{
     belongs_to, has_many, has_one, many_to_many, AnyRelation, ManyToManyDef, RelationAggregateDef,
@@ -42,7 +43,7 @@ pub use relation::{
 };
 pub use runtime::{
     DatabaseManager, DatabaseTransaction, DbRecord, DbRecordStream, QueryExecutionOptions,
-    QueryExecutor,
+    QueryExecutor, SlowQueryEntry,
 };
 
 pub(crate) use lifecycle::{
@@ -50,3 +51,4 @@ pub(crate) use lifecycle::{
     SeederRegistryBuilder, SeederRegistryHandle,
 };
 pub(crate) use model::set_runtime_model_defaults;
+pub(crate) use runtime::recent_slow_queries;

@@ -58,6 +58,12 @@ impl HttpKernel {
                 options,
             )?;
         }
+
+        // Store the named route registry in the container for URL generation
+        let route_registry = std::sync::Arc::new(registrar.named_routes.clone());
+        // Ignore error if already registered (e.g. build_router called multiple times)
+        let _ = self.app.container().singleton_arc(route_registry);
+
         let mut router =
             registrar.into_router_with_middlewares(self.app.clone(), self.middlewares.clone());
 

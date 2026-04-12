@@ -16,7 +16,15 @@ pub enum Error {
 
     /// An HTTP error with a specific status code.
     #[error("{message}")]
-    Http { status: u16, message: String },
+    Http {
+        status: u16,
+        message: String,
+        error_code: Option<String>,
+    },
+
+    /// Validation errors with per-field detail. Maps to HTTP 422.
+    #[error("validation failed")]
+    Validation(crate::validation::ValidationErrors),
 
     /// A "not found" error. Maps to HTTP 404.
     #[error("{0}")]
@@ -41,6 +49,20 @@ impl Error {
         Self::Http {
             status,
             message: message.into(),
+            error_code: None,
+        }
+    }
+
+    /// Create an HTTP error with a specific status code and error code.
+    pub fn http_with_code(
+        status: u16,
+        message: impl Into<String>,
+        code: impl Into<String>,
+    ) -> Self {
+        Self::Http {
+            status,
+            message: message.into(),
+            error_code: Some(code.into()),
         }
     }
 
@@ -64,6 +86,7 @@ impl Error {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
             Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 }
@@ -73,15 +96,30 @@ impl Error {
 pub struct ErrorResponse {
     pub message: String,
     pub status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<crate::validation::FieldError>>,
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        // Validation errors delegate to their own structured response.
+        if let Error::Validation(errors) = self {
+            return errors.into_response();
+        }
+
         let status = self.status_code();
+        let error_code = match &self {
+            Error::Http { error_code, .. } => error_code.clone(),
+            _ => None,
+        };
         let message = self.to_string();
         let body = ErrorResponse {
             message,
             status: status.as_u16(),
+            error_code,
+            errors: None,
         };
         (status, Json(body)).into_response()
     }
@@ -90,10 +128,7 @@ impl IntoResponse for Error {
 /// Allow `ValidationErrors` to be converted into `Error`.
 impl From<crate::validation::ValidationErrors> for Error {
     fn from(errors: crate::validation::ValidationErrors) -> Self {
-        Self::Http {
-            status: 422,
-            message: errors.to_string(),
-        }
+        Self::Validation(errors)
     }
 }
 
@@ -105,6 +140,10 @@ impl From<crate::auth::AuthError> for Error {
             crate::auth::AuthError::Forbidden(msg) => (403, msg.clone()),
             crate::auth::AuthError::Internal(msg) => (500, msg.clone()),
         };
-        Self::Http { status, message }
+        Self::Http {
+            status,
+            message,
+            error_code: None,
+        }
     }
 }

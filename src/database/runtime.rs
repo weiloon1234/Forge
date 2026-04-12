@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{
@@ -24,12 +24,81 @@ use crate::support::{Date, DateTime, LocalDateTime, Time};
 use super::ast::{DbType, DbValue, Numeric};
 use super::compiler::CompiledSql;
 
+// ---------------------------------------------------------------------------
+// SQL query logging
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub(crate) struct SqlLogConfig {
+    pub log_queries: bool,
+    pub slow_threshold: Option<Duration>,
+}
+
+impl SqlLogConfig {
+    pub fn from_database_config(config: &DatabaseConfig) -> Self {
+        Self {
+            log_queries: config.log_queries,
+            slow_threshold: if config.slow_query_threshold_ms > 0 {
+                Some(Duration::from_millis(config.slow_query_threshold_ms))
+            } else {
+                None
+            },
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn disabled() -> Self {
+        Self {
+            log_queries: false,
+            slow_threshold: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SlowQueryEntry {
+    pub sql: String,
+    pub duration_ms: u64,
+    pub label: Option<String>,
+    pub recorded_at: String,
+}
+
+static SLOW_QUERY_LOG: OnceLock<std::sync::Mutex<VecDeque<SlowQueryEntry>>> = OnceLock::new();
+
+fn slow_query_log() -> &'static std::sync::Mutex<VecDeque<SlowQueryEntry>> {
+    SLOW_QUERY_LOG.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(100)))
+}
+
+fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>) {
+    if let Ok(mut log) = slow_query_log().lock() {
+        if log.len() >= 100 {
+            log.pop_front();
+        }
+        log.push_back(SlowQueryEntry {
+            sql: sql.to_string(),
+            duration_ms,
+            label: label.map(|s| s.to_string()),
+            recorded_at: ChronoUtc::now().to_rfc3339(),
+        });
+    }
+}
+
+pub fn recent_slow_queries() -> Vec<SlowQueryEntry> {
+    slow_query_log()
+        .lock()
+        .map(|log| log.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 pub type DbRecordStream<'a> = BoxStream<'a, Result<DbRecord>>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryExecutionOptions {
     pub timeout: Option<Duration>,
     pub label: Option<String>,
+    /// When true, forces this query to use the write (primary) pool instead
+    /// of the read replica. Useful for reads that must see the most recent writes.
+    pub use_write_pool: bool,
 }
 
 impl QueryExecutionOptions {
@@ -40,6 +109,11 @@ impl QueryExecutionOptions {
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    pub fn with_write_pool(mut self) -> Self {
+        self.use_write_pool = true;
         self
     }
 }
@@ -56,7 +130,21 @@ enum DatabaseState {
 
 struct DatabaseRuntime {
     pool: PgPool,
+    read_pool: Option<PgPool>,
     adapters: Arc<RwLock<BTreeMap<String, DbType>>>,
+    sql_log: SqlLogConfig,
+}
+
+impl DatabaseRuntime {
+    /// Returns the pool to use for read operations. Falls back to the write
+    /// pool when no read replica is configured or when `force_write` is true.
+    fn pool_for_reads(&self, force_write: bool) -> &PgPool {
+        if force_write {
+            &self.pool
+        } else {
+            self.read_pool.as_ref().unwrap_or(&self.pool)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -85,6 +173,7 @@ impl DbRecord {
 pub struct DatabaseTransaction {
     inner: Mutex<Option<Transaction<'static, Postgres>>>,
     adapters: Arc<RwLock<BTreeMap<String, DbType>>>,
+    sql_log: SqlLogConfig,
 }
 
 #[derive(Clone)]
@@ -92,6 +181,7 @@ pub(crate) struct DatabaseSession {
     pool: PgPool,
     inner: Arc<Mutex<Option<PoolConnection<Postgres>>>>,
     adapters: Arc<RwLock<BTreeMap<String, DbType>>>,
+    sql_log: SqlLogConfig,
 }
 
 #[async_trait]
@@ -182,14 +272,39 @@ impl DatabaseManager {
             .min_connections(config.min_connections)
             .max_connections(config.max_connections)
             .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_seconds))
+            .max_lifetime(Duration::from_secs(config.max_lifetime_seconds))
             .connect(&config.url)
             .await
             .map_err(Error::other)?;
 
+        let read_pool = if let Some(ref read_url) = config.read_url {
+            if !read_url.trim().is_empty() {
+                let rp = PgPoolOptions::new()
+                    .min_connections(config.min_connections)
+                    .max_connections(config.max_connections)
+                    .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+                    .idle_timeout(Duration::from_secs(config.idle_timeout_seconds))
+                    .max_lifetime(Duration::from_secs(config.max_lifetime_seconds))
+                    .connect(read_url)
+                    .await
+                    .map_err(Error::other)?;
+                Some(rp)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let sql_log = SqlLogConfig::from_database_config(config);
+
         Ok(Self {
             state: Arc::new(DatabaseState::Ready(DatabaseRuntime {
                 pool,
+                read_pool,
                 adapters: Arc::new(RwLock::new(BTreeMap::new())),
+                sql_log,
             })),
         })
     }
@@ -236,19 +351,23 @@ impl DatabaseManager {
     }
 
     pub async fn begin(&self) -> Result<DatabaseTransaction> {
-        let transaction = self.pool()?.begin().await.map_err(Error::other)?;
+        let runtime = self.runtime()?;
+        let transaction = runtime.pool.begin().await.map_err(Error::other)?;
         Ok(DatabaseTransaction {
             inner: Mutex::new(Some(transaction)),
-            adapters: self.runtime()?.adapters.clone(),
+            adapters: runtime.adapters.clone(),
+            sql_log: runtime.sql_log.clone(),
         })
     }
 
     pub(crate) async fn acquire_session(&self) -> Result<DatabaseSession> {
-        let connection = self.pool()?.acquire().await.map_err(Error::other)?;
+        let runtime = self.runtime()?;
+        let connection = runtime.pool.acquire().await.map_err(Error::other)?;
         Ok(DatabaseSession {
-            pool: self.pool()?.clone(),
+            pool: runtime.pool.clone(),
             inner: Arc::new(Mutex::new(Some(connection))),
-            adapters: self.runtime()?.adapters.clone(),
+            adapters: runtime.adapters.clone(),
+            sql_log: runtime.sql_log.clone(),
         })
     }
 
@@ -308,7 +427,8 @@ impl QueryExecutor for DatabaseManager {
         options: QueryExecutionOptions,
     ) -> Result<Vec<DbRecord>> {
         let runtime = self.runtime()?;
-        let mut connection = runtime.pool.acquire().await.map_err(Error::other)?;
+        let pool = runtime.pool_for_reads(options.use_write_pool);
+        let mut connection = pool.acquire().await.map_err(Error::other)?;
         query_records_on_connection(
             connection.as_mut(),
             &runtime.adapters,
@@ -316,6 +436,7 @@ impl QueryExecutor for DatabaseManager {
             bindings,
             &options,
             TimeoutMode::Session,
+            &runtime.sql_log,
         )
         .await
     }
@@ -334,6 +455,7 @@ impl QueryExecutor for DatabaseManager {
             bindings,
             &options,
             TimeoutMode::Session,
+            &runtime.sql_log,
         )
         .await
     }
@@ -348,11 +470,13 @@ impl QueryExecutor for DatabaseManager {
             Err(error) => return single_error_stream(error),
         };
 
+        let pool = runtime.pool_for_reads(options.use_write_pool);
         spawn_native_stream(
-            runtime.pool.clone(),
+            pool.clone(),
             runtime.adapters.clone(),
             compiled,
             options,
+            runtime.sql_log.clone(),
         )
     }
 }
@@ -376,6 +500,7 @@ impl QueryExecutor for DatabaseTransaction {
             bindings,
             &options,
             TimeoutMode::Local,
+            &self.sql_log,
         )
         .await
     }
@@ -396,6 +521,7 @@ impl QueryExecutor for DatabaseTransaction {
             bindings,
             &options,
             TimeoutMode::Local,
+            &self.sql_log,
         )
         .await
     }
@@ -474,6 +600,7 @@ impl QueryExecutor for DatabaseSession {
             bindings,
             &options,
             TimeoutMode::Session,
+            &self.sql_log,
         )
         .await;
         self.return_connection(connection).await;
@@ -493,6 +620,7 @@ impl QueryExecutor for DatabaseSession {
             bindings,
             &options,
             TimeoutMode::Session,
+            &self.sql_log,
         )
         .await;
         self.return_connection(connection).await;
@@ -510,6 +638,7 @@ impl QueryExecutor for DatabaseSession {
             self.adapters.clone(),
             compiled,
             options,
+            self.sql_log.clone(),
         )
     }
 }
@@ -609,10 +738,20 @@ fn spawn_native_stream(
     adapters: Arc<RwLock<BTreeMap<String, DbType>>>,
     compiled: CompiledSql,
     options: QueryExecutionOptions,
+    sql_log: SqlLogConfig,
 ) -> DbRecordStream<'static> {
     let (sender, receiver) = mpsc::channel(16);
 
     tokio::spawn(async move {
+        if sql_log.log_queries {
+            tracing::debug!(
+                target: "forge.sql",
+                sql = %compiled.sql,
+                label = ?options.label,
+                "stream started"
+            );
+        }
+
         let result = async {
             let mut connection = pool.acquire().await.map_err(Error::other)?;
             let adapter_snapshot = snapshot_adapters(&adapters)?;
@@ -649,10 +788,20 @@ fn spawn_session_stream(
     adapters: Arc<RwLock<BTreeMap<String, DbType>>>,
     compiled: CompiledSql,
     options: QueryExecutionOptions,
+    sql_log: SqlLogConfig,
 ) -> DbRecordStream<'static> {
     let (sender, receiver) = mpsc::channel(16);
 
     tokio::spawn(async move {
+        if sql_log.log_queries {
+            tracing::debug!(
+                target: "forge.sql",
+                sql = %compiled.sql,
+                label = ?options.label,
+                "stream started"
+            );
+        }
+
         let result = async {
             let mut connection = {
                 let mut guard = holder.lock().await;
@@ -705,16 +854,24 @@ async fn query_records_on_connection(
     bindings: &[DbValue],
     options: &QueryExecutionOptions,
     timeout_mode: TimeoutMode,
+    sql_log: &SqlLogConfig,
 ) -> Result<Vec<DbRecord>> {
+    log_sql_start(sql_log, sql, bindings, &options.label, "query");
+    let start = Instant::now();
+
     let adapter_snapshot = snapshot_adapters(adapters)?;
     configure_statement_timeout(connection, options, timeout_mode).await?;
     let query = bind_query(sql, bindings)?;
     let rows =
         apply_outer_timeout(query.fetch_all(&mut *connection), options, "query", sql).await?;
     reset_statement_timeout(connection, timeout_mode).await?;
-    rows.iter()
+    let result: Result<Vec<DbRecord>> = rows
+        .iter()
         .map(|row| decode_row(row, sql, options.label.as_deref(), &adapter_snapshot))
-        .collect()
+        .collect();
+
+    log_sql_complete(sql_log, sql, start.elapsed(), &options.label, rows.len() as u64);
+    result
 }
 
 async fn execute_on_connection(
@@ -723,13 +880,71 @@ async fn execute_on_connection(
     bindings: &[DbValue],
     options: &QueryExecutionOptions,
     timeout_mode: TimeoutMode,
+    sql_log: &SqlLogConfig,
 ) -> Result<u64> {
+    log_sql_start(sql_log, sql, bindings, &options.label, "execute");
+    let start = Instant::now();
+
     configure_statement_timeout(connection, options, timeout_mode).await?;
     let query = bind_query(sql, bindings)?;
     let result =
         apply_outer_timeout(query.execute(&mut *connection), options, "execution", sql).await?;
     reset_statement_timeout(connection, timeout_mode).await?;
-    Ok(result.rows_affected())
+    let rows_affected = result.rows_affected();
+
+    log_sql_complete(sql_log, sql, start.elapsed(), &options.label, rows_affected);
+    Ok(rows_affected)
+}
+
+fn log_sql_start(
+    sql_log: &SqlLogConfig,
+    sql: &str,
+    bindings: &[DbValue],
+    label: &Option<String>,
+    kind: &str,
+) {
+    if sql_log.log_queries {
+        tracing::debug!(
+            target: "forge.sql",
+            sql = %sql,
+            bindings = ?bindings,
+            label = ?label,
+            kind,
+        );
+    }
+}
+
+fn log_sql_complete(
+    sql_log: &SqlLogConfig,
+    sql: &str,
+    elapsed: Duration,
+    label: &Option<String>,
+    rows: u64,
+) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+
+    if sql_log.log_queries {
+        tracing::debug!(
+            target: "forge.sql",
+            duration_ms = elapsed_ms,
+            rows,
+            label = ?label,
+            "completed"
+        );
+    }
+
+    if let Some(threshold) = sql_log.slow_threshold {
+        if elapsed > threshold {
+            tracing::warn!(
+                target: "forge.sql",
+                sql = %sql,
+                duration_ms = elapsed_ms,
+                label = ?label,
+                "slow query detected"
+            );
+            record_slow_query(sql, elapsed_ms, label.as_deref());
+        }
+    }
 }
 
 async fn stream_rows_from_connection(

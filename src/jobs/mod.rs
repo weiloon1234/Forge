@@ -1093,9 +1093,18 @@ impl JobRegistryBuilder {
             queues.insert(registration.queue.clone());
         }
 
+        let mut queues: Vec<QueueId> = queues.into_iter().collect();
+        // Sort by configured priority (lower = higher priority, default = 5)
+        queues.sort_by_key(|q| {
+            config.queue_priorities
+                .get(q.as_ref())
+                .copied()
+                .unwrap_or(5)
+        });
+
         JobRegistrySnapshot {
             jobs,
-            queues: queues.into_iter().collect(),
+            queues,
         }
     }
 }

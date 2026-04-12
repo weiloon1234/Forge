@@ -515,7 +515,7 @@ async fn handler(Validated(input): Validated<UpdateProfile>) -> Json<Value> {
 
 ### Actor → Model Resolution (Authenticatable)
 
-See **[rust_auth_actor_system_blueprint.md](rust_auth_actor_system_blueprint.md)** for the full standalone blueprint covering:
+See **[auth-actor-system](12-auth-actor-system.md)** for the full standalone blueprint covering:
 - Guard registration and multi-guard setup
 - `Authenticatable` trait and model resolution
 - `Auth<M>` / `AuthenticatedModel<M>` extractor DX
@@ -549,7 +549,7 @@ See **[rust_auth_actor_system_blueprint.md](rust_auth_actor_system_blueprint.md)
 
 **Status: ✅ Core done — Improvements planned**
 
-See **[rust_job_system_blueprint.md](rust_job_system_blueprint.md)** for the full standalone blueprint covering planned improvements: worker concurrency, per-job timeout, graceful shutdown, job middleware, batching, chaining, rate limiting, unique jobs, status tracking.
+See **[job-system](13-job-system.md)** for the full standalone blueprint covering planned improvements: worker concurrency, per-job timeout, graceful shutdown, job middleware, batching, chaining, rate limiting, unique jobs, status tracking.
 
 ## What's Done
 - Job trait with typed ID, configurable retries + backoff
@@ -1255,7 +1255,11 @@ These were not in the original blueprint but are necessary for a production fram
 
 ---
 
-# Priority TODO (Next Work)
+# Remaining Gaps
+
+See **[framework-gaps](15-framework-gaps.md)** for the final gap-fill blueprint covering: pagination response format, cursor pagination, API resources, model scopes, named routes, middleware groups, ETag, password reset, email verification, remember me, SQL logging, mail templates, read replicas, job priorities.
+
+# Completed Priority Items
 
 1. ~~**HTTP Middleware System**~~ — ✅ Done (CORS, Security Headers, Rate Limit with Redis, Body Size, Timeout, Trusted Proxy, per-route middleware)
 2. ~~**Redis Rate Limiting**~~ — ✅ Done (automatic when Redis is configured)

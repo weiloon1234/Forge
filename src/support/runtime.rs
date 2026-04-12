@@ -100,19 +100,20 @@ impl RuntimeBackend {
                     .get_multiplexed_async_connection()
                     .await
                     .map_err(Error::other)?;
-                let count: i64 = ::redis::cmd("INCR")
+                // Atomic INCR + conditional EXPIRE via Lua to prevent
+                // leaked keys if the process crashes between the two commands
+                let count: i64 = ::redis::cmd("EVAL")
+                    .arg(
+                        "local c = redis.call('INCR', KEYS[1]); \
+                         if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; \
+                         return c",
+                    )
+                    .arg(1)
                     .arg(&full_key)
+                    .arg(ttl_secs as i64)
                     .query_async(&mut conn)
                     .await
                     .map_err(Error::other)?;
-                if count == 1 {
-                    let _: () = ::redis::cmd("EXPIRE")
-                        .arg(&full_key)
-                        .arg(ttl_secs as i64)
-                        .query_async(&mut conn)
-                        .await
-                        .map_err(Error::other)?;
-                }
                 Ok(count as u64)
             }
             Self::Memory(runtime) => {
@@ -227,11 +228,11 @@ impl RuntimeBackend {
         }
     }
 
-    /// Set a key only if it does not already exist, with a TTL.
+    /// Check whether a key exists.
     ///
-    /// Returns `true` if the key was set (did not exist), `false` if
-    /// it already existed (duplicate).
-    pub async fn set_if_absent(&self, key: &str, ttl_secs: u64) -> Result<bool> {
+    /// Returns `true` if the key exists and has not expired.
+    #[allow(dead_code)]
+    pub async fn key_exists(&self, key: &str) -> Result<bool> {
         match self {
             Self::Redis(runtime) => {
                 let full_key = runtime.namespaced_key(key);
@@ -240,10 +241,107 @@ impl RuntimeBackend {
                     .get_multiplexed_async_connection()
                     .await
                     .map_err(Error::other)?;
-                // SET key 1 NX EX ttl — returns OK if set, nil if already exists
+                let exists: bool = ::redis::cmd("EXISTS")
+                    .arg(&full_key)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(exists)
+            }
+            Self::Memory(runtime) => {
+                let unique_keys = runtime.unique_keys.lock().await;
+                if let Some((_, expires_at)) = unique_keys.get(key) {
+                    Ok(std::time::Instant::now() < *expires_at)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// Unconditionally delete a key.
+    ///
+    /// Returns `true` if the key existed and was removed.
+    pub async fn del_key(&self, key: &str) -> Result<bool> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let deleted: i64 = ::redis::cmd("DEL")
+                    .arg(&full_key)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(deleted > 0)
+            }
+            Self::Memory(runtime) => {
+                let mut unique_keys = runtime.unique_keys.lock().await;
+                Ok(unique_keys.remove(key).is_some())
+            }
+        }
+    }
+
+    /// Get the string value of a key. Returns `None` if the key does not exist
+    /// or has expired.
+    pub async fn get_value(&self, key: &str) -> Result<Option<String>> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let value: Option<String> = ::redis::cmd("GET")
+                    .arg(&full_key)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(value)
+            }
+            Self::Memory(runtime) => {
+                let unique_keys = runtime.unique_keys.lock().await;
+                if let Some((value, expires_at)) = unique_keys.get(key) {
+                    if std::time::Instant::now() < *expires_at {
+                        Ok(Some(value.clone()))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Set a key only if it does not already exist, with a TTL.
+    ///
+    /// Returns `true` if the key was set (did not exist), `false` if
+    /// it already existed (duplicate).
+    pub async fn set_if_absent(&self, key: &str, ttl_secs: u64) -> Result<bool> {
+        self.set_nx_value(key, "1", ttl_secs).await
+    }
+
+    /// Set a key only if it does not already exist, with a TTL and a custom value.
+    ///
+    /// Returns `true` if the key was set (did not exist), `false` if
+    /// it already existed.
+    pub async fn set_nx_value(&self, key: &str, value: &str, ttl_secs: u64) -> Result<bool> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
                 let result: Option<String> = ::redis::cmd("SET")
                     .arg(&full_key)
-                    .arg(1)
+                    .arg(value)
                     .arg("NX")
                     .arg("EX")
                     .arg(ttl_secs as i64)
@@ -257,7 +355,7 @@ impl RuntimeBackend {
                 let ttl = std::time::Duration::from_secs(ttl_secs);
                 let mut unique_keys = runtime.unique_keys.lock().await;
                 // Evict expired entry
-                if let Some(expires_at) = unique_keys.get(key) {
+                if let Some((_, expires_at)) = unique_keys.get(key) {
                     if now >= *expires_at {
                         unique_keys.remove(key);
                     }
@@ -265,9 +363,51 @@ impl RuntimeBackend {
                 if unique_keys.contains_key(key) {
                     Ok(false)
                 } else {
-                    unique_keys.insert(key.to_string(), now + ttl);
+                    unique_keys.insert(key.to_string(), (value.to_string(), now + ttl));
                     Ok(true)
                 }
+            }
+        }
+    }
+
+    /// Delete a key only if its current value matches the expected value.
+    ///
+    /// Returns `true` if the key was deleted.
+    pub async fn del_if_value(&self, key: &str, expected: &str) -> Result<bool> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let deleted: i64 = ::redis::cmd("EVAL")
+                    .arg(
+                        r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"#,
+                    )
+                    .arg(1)
+                    .arg(&full_key)
+                    .arg(expected)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(deleted == 1)
+            }
+            Self::Memory(runtime) => {
+                let mut unique_keys = runtime.unique_keys.lock().await;
+                if let Some((val, _)) = unique_keys.get(key) {
+                    if val == expected {
+                        unique_keys.remove(key);
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
         }
     }
@@ -445,7 +585,7 @@ pub(crate) struct MemoryRuntime {
     pub(crate) scheduler_leader: Mutex<Option<LeadershipLease>>,
     pub(crate) batches: Mutex<HashMap<String, MemoryBatchMeta>>,
     pub(crate) counters: Mutex<HashMap<String, MemoryCounter>>,
-    pub(crate) unique_keys: Mutex<HashMap<String, std::time::Instant>>,
+    pub(crate) unique_keys: Mutex<HashMap<String, (String, std::time::Instant)>>,
     pub(crate) sets: Mutex<HashMap<String, HashSet<String>>>,
     pub(crate) lists: Mutex<HashMap<String, VecDeque<String>>>,
     pub(crate) notify: Notify,

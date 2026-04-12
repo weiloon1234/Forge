@@ -1,5 +1,8 @@
+pub mod email_verification;
+pub mod password_reset;
 pub mod session;
 pub mod token;
+pub(crate) mod token_store;
 
 pub(crate) use token::builtin_cli_registrar;
 

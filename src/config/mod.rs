@@ -20,13 +20,33 @@ pub struct ConfigRepository {
 #[serde(default)]
 pub struct AppConfig {
     pub timezone: Timezone,
+    #[serde(default)]
+    pub signing_key: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             timezone: Timezone::utc(),
+            signing_key: String::new(),
         }
+    }
+}
+
+impl AppConfig {
+    /// Decode the base64-encoded signing key into raw bytes.
+    ///
+    /// Returns an error if the key is not configured or contains invalid base64.
+    pub fn signing_key_bytes(&self) -> crate::foundation::Result<Vec<u8>> {
+        if self.signing_key.is_empty() {
+            return Err(crate::foundation::Error::message(
+                "app.signing_key is not configured — required for signed routes",
+            ));
+        }
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        STANDARD.decode(&self.signing_key).map_err(|e| {
+            crate::foundation::Error::message(format!("invalid app.signing_key: {e}"))
+        })
     }
 }
 
@@ -82,6 +102,7 @@ impl Default for DatabaseModelConfig {
 #[serde(default)]
 pub struct DatabaseConfig {
     pub url: String,
+    pub read_url: Option<String>,
     pub schema: String,
     pub migration_table: String,
     pub migrations_path: String,
@@ -89,6 +110,11 @@ pub struct DatabaseConfig {
     pub min_connections: u32,
     pub max_connections: u32,
     pub acquire_timeout_ms: u64,
+    pub default_per_page: u64,
+    pub log_queries: bool,
+    pub slow_query_threshold_ms: u64,
+    pub idle_timeout_seconds: u64,
+    pub max_lifetime_seconds: u64,
     pub models: DatabaseModelConfig,
 }
 
@@ -96,6 +122,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: String::new(),
+            read_url: None,
             schema: "public".to_string(),
             migration_table: "forge_migrations".to_string(),
             migrations_path: "database/migrations".to_string(),
@@ -103,6 +130,11 @@ impl Default for DatabaseConfig {
             min_connections: 1,
             max_connections: 10,
             acquire_timeout_ms: 5_000,
+            default_per_page: 15,
+            log_queries: false,
+            slow_query_threshold_ms: 500,
+            idle_timeout_seconds: 600,
+            max_lifetime_seconds: 1800,
             models: DatabaseModelConfig::default(),
         }
     }
@@ -145,6 +177,7 @@ pub struct JobsConfig {
     pub workers: usize,
     pub timeout_seconds: u64,
     pub track_history: bool,
+    pub queue_priorities: std::collections::HashMap<String, u32>,
 }
 
 impl Default for JobsConfig {
@@ -158,6 +191,7 @@ impl Default for JobsConfig {
             workers: 4,
             timeout_seconds: 300,
             track_history: true,
+            queue_priorities: std::collections::HashMap::new(),
         }
     }
 }
@@ -229,6 +263,7 @@ pub struct SessionConfig {
     pub cookie_secure: bool,
     pub cookie_path: String,
     pub sliding_expiry: bool,
+    pub remember_ttl_days: u64,
 }
 
 impl Default for SessionConfig {
@@ -239,6 +274,7 @@ impl Default for SessionConfig {
             cookie_secure: true,
             cookie_path: "/".to_string(),
             sliding_expiry: true,
+            remember_ttl_days: 30,
         }
     }
 }

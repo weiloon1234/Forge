@@ -38,6 +38,18 @@ impl SessionManager {
 
     /// Create a new session for the given actor. Returns the session ID.
     pub async fn create<M: Authenticatable>(&self, actor_id: &str) -> Result<String> {
+        self.create_with_remember::<M>(actor_id, false).await
+    }
+
+    /// Create a new session with optional "remember me" extended lifetime.
+    ///
+    /// When `remember` is `true`, the session uses the extended TTL
+    /// (`remember_ttl_days`) instead of the standard `ttl_minutes`.
+    pub async fn create_with_remember<M: Authenticatable>(
+        &self,
+        actor_id: &str,
+        remember: bool,
+    ) -> Result<String> {
         let session_id = Token::base64(32)?;
         let guard = M::guard();
         let data = SessionData {
@@ -45,7 +57,11 @@ impl SessionManager {
             guard: guard.to_string(),
         };
         let json = serde_json::to_string(&data).map_err(Error::other)?;
-        let ttl_secs = self.config.ttl_minutes * 60;
+        let ttl_secs = if remember {
+            self.config.remember_ttl_days * 24 * 60 * 60
+        } else {
+            self.config.ttl_minutes * 60
+        };
 
         let mut conn = self.redis.connection().await?;
         let session_key = self.redis.key(format!("session:{session_id}"));

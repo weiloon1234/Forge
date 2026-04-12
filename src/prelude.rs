@@ -1,4 +1,6 @@
 pub use crate::auth::{
+    email_verification::EmailVerificationManager,
+    password_reset::PasswordResetManager,
     session::SessionManager,
     token::{TokenAuthenticator, TokenManager, TokenPair},
     AccessScope, Actor, Auth, AuthError, AuthManager, Authenticatable, AuthenticatableRegistry,
@@ -23,14 +25,19 @@ pub use crate::database::{
     ModelHookContext, ModelInstanceWriteExt, ModelLifecycle, ModelLifecycleSnapshot,
     ModelPrimaryKeyStrategy, ModelQuery, ModelUpdatedEvent, ModelUpdatingEvent, ModelWriteExecutor,
     NoModelLifecycle, Numeric, OnConflictAction, OnConflictNode, OnConflictTarget, OrderBy,
-    OrderDirection, Paginated, Pagination, PersistedModel, Projection, ProjectionField,
+    OrderDirection, CursorInfo, CursorMeta, CursorPaginated, CursorPagination, Paginated,
+    PaginatedResponse, PaginationLinks, PaginationMeta, Pagination, PersistedModel, Projection,
+    ProjectionField,
     ProjectionFieldInfo, ProjectionMeta, ProjectionQuery, Query, QueryAst, QueryBody,
     QueryExecutionOptions, QueryExecutor, RelationAggregateDef, RelationDef, RelationKind,
     RelationNode, RestoreModel, SeederContext, SeederFile, SelectItem, SelectNode, SetOperator,
     Sql, TableMeta, TableRef, ToDbValue, UnaryExpr, UnaryOperator, UpdateDraft, UpdateModel,
     Window, WindowBuilder, WindowExpr, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
 };
-pub use crate::email::{EmailAddress, EmailAttachment, EmailMailer, EmailManager, EmailMessage};
+pub use crate::email::{
+    EmailAddress, EmailAttachment, EmailMailer, EmailManager, EmailMessage, RenderedTemplate,
+    TemplateRenderer,
+};
 pub use crate::events::{
     dispatch_job, publish_websocket, Event, EventBus, EventContext, EventListener,
 };
@@ -40,10 +47,12 @@ pub use crate::foundation::{
 };
 pub use crate::http::cookie::{Cookie, CookieJar, SessionCookie};
 pub use crate::http::middleware::{
-    Cors, MaxBodySize, MiddlewareConfig, RateLimit, RateLimitWindow, RealIp, RequestTimeout,
-    SecurityHeaders, TrustedProxy,
+    Cors, ETag, MaintenanceMode, MaxBodySize, MiddlewareConfig, MiddlewareGroups, RateLimit,
+    RateLimitWindow, RealIp, RequestTimeout, SecurityHeaders, TrustedProxy,
 };
+pub use crate::http::routes::RouteRegistry;
 pub use crate::http::{HttpRegistrar, HttpRouteOptions, Validated};
+pub use crate::http::resource::ApiResource;
 pub use crate::openapi::{ApiSchema, RouteDoc, SchemaRef};
 pub use crate::i18n::{I18n, I18nManager, Locale};
 pub use crate::jobs::{
@@ -66,6 +75,7 @@ pub use crate::scheduler::{CronExpression, ScheduleInvocation, ScheduleRegistry}
 pub use crate::storage::{
     MultipartForm, StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadedFile,
 };
+pub use crate::support::lock::{DistributedLock, LockGuard};
 pub use crate::support::{
     sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock, Collection, CommandId,
     CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId, LocalDateTime, MigrationId,

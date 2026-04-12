@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, future::Future, marker::PhantomData, pin::Pin};
 
+use serde::Serialize;
+
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::{Collection, ModelId};
 use futures_util::stream::{self, BoxStream, StreamExt};
@@ -53,6 +55,140 @@ pub struct Paginated<T> {
     pub data: Collection<T>,
     pub pagination: Pagination,
     pub total: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PaginatedResponse<T: Serialize> {
+    pub data: Vec<T>,
+    pub meta: PaginationMeta,
+    pub links: PaginationLinks,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PaginationMeta {
+    pub current_page: u64,
+    pub per_page: u64,
+    pub total: u64,
+    pub last_page: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PaginationLinks {
+    pub next: Option<String>,
+    pub prev: Option<String>,
+}
+
+impl<T: Serialize> Paginated<T> {
+    pub fn to_response(&self, base_url: &str) -> PaginatedResponse<&T> {
+        let per_page = self.pagination.per_page;
+        let current_page = self.pagination.page;
+        let last_page = if self.total == 0 {
+            1
+        } else {
+            (self.total + per_page - 1) / per_page
+        };
+
+        let next = if current_page < last_page {
+            Some(format!(
+                "{base_url}?page={}&per_page={per_page}",
+                current_page + 1
+            ))
+        } else {
+            None
+        };
+
+        let prev = if current_page > 1 {
+            Some(format!(
+                "{base_url}?page={}&per_page={per_page}",
+                current_page - 1
+            ))
+        } else {
+            None
+        };
+
+        PaginatedResponse {
+            data: self.data.iter().collect(),
+            meta: PaginationMeta {
+                current_page,
+                per_page,
+                total: self.total,
+                last_page,
+            },
+            links: PaginationLinks { next, prev },
+        }
+    }
+}
+
+// --- Cursor-based pagination ---
+
+#[derive(Clone, Debug)]
+pub struct CursorPagination {
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub per_page: u64,
+}
+
+impl CursorPagination {
+    pub fn new(per_page: u64) -> Self {
+        Self {
+            after: None,
+            before: None,
+            per_page: per_page.max(1),
+        }
+    }
+
+    pub fn after(mut self, cursor: impl Into<String>) -> Self {
+        self.after = Some(cursor.into());
+        self
+    }
+
+    pub fn before(mut self, cursor: impl Into<String>) -> Self {
+        self.before = Some(cursor.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CursorPaginated<T: Serialize> {
+    pub data: Vec<T>,
+    pub meta: CursorMeta,
+    pub cursors: CursorInfo,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CursorMeta {
+    pub has_next: bool,
+    pub has_prev: bool,
+    pub per_page: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CursorInfo {
+    pub next: Option<String>,
+    pub prev: Option<String>,
+}
+
+impl<T: Serialize> CursorPaginated<T> {
+    /// Encode a value as a cursor string (base64url).
+    pub fn encode_cursor(value: &impl std::fmt::Display) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        URL_SAFE_NO_PAD.encode(value.to_string().as_bytes())
+    }
+
+    /// Set cursor values from the first and last items in the result.
+    pub fn with_cursors(
+        mut self,
+        first_value: Option<&impl std::fmt::Display>,
+        last_value: Option<&impl std::fmt::Display>,
+    ) -> Self {
+        if self.meta.has_prev {
+            self.cursors.prev = first_value.map(|v| Self::encode_cursor(v));
+        }
+        if self.meta.has_next {
+            self.cursors.next = last_value.map(|v| Self::encode_cursor(v));
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1236,6 +1372,11 @@ where
         self
     }
 
+    /// Apply a reusable query scope.
+    pub fn scope(self, f: impl FnOnce(Self) -> Self) -> Self {
+        f(self)
+    }
+
     pub fn union(self, other: Self) -> Self {
         Self {
             query: self.query.union(other.query),
@@ -1518,6 +1659,15 @@ where
         self
     }
 
+    /// Force this query to use the write (primary) pool instead of the read replica.
+    ///
+    /// Useful when you need to read data that was just written and may not
+    /// have replicated yet.
+    pub fn use_write_pool(mut self) -> Self {
+        self.options.use_write_pool = true;
+        self
+    }
+
     pub fn with_stream_batch_size(mut self, batch_size: usize) -> Self {
         self.stream_batch_size = batch_size.max(1);
         self
@@ -1588,6 +1738,21 @@ where
     pub fn order_by(mut self, order: OrderBy) -> Self {
         self.select.order_by.push(order);
         self
+    }
+
+    /// Apply a reusable query scope.
+    ///
+    /// Scopes are functions that modify the query, e.g.:
+    /// ```ignore
+    /// impl User {
+    ///     pub fn active(query: ModelQuery<Self>) -> ModelQuery<Self> {
+    ///         query.where_(User::ACTIVE.eq(true))
+    ///     }
+    /// }
+    /// User::query().scope(User::active).get(&app).await?;
+    /// ```
+    pub fn scope(self, f: impl FnOnce(Self) -> Self) -> Self {
+        f(self)
     }
 
     pub fn with<To>(mut self, relation: RelationDef<M, To>) -> Self
@@ -1798,6 +1963,77 @@ where
             data,
             pagination,
             total,
+        })
+    }
+
+    /// Cursor-based pagination for large datasets.
+    ///
+    /// Uses the given column as cursor. The cursor value is the base64url-encoded
+    /// string representation of the column value for the boundary item.
+    ///
+    /// Returns `CursorPaginated` with `has_next`/`has_prev` metadata. Use
+    /// `CursorPaginated::with_cursors` to attach encoded cursor values from
+    /// the first/last items in the result.
+    pub async fn cursor_paginate<E, V>(
+        self,
+        executor: &E,
+        column: Column<M, V>,
+        cursor: CursorPagination,
+    ) -> Result<CursorPaginated<M>>
+    where
+        E: QueryExecutor,
+        V: ToDbValue + FromDbValue + std::fmt::Display + std::str::FromStr,
+        M: Serialize,
+    {
+        let per_page = cursor.per_page;
+        let mut query = self;
+        let is_forward = cursor.before.is_none();
+
+        if let Some(ref after_cursor) = cursor.after {
+            let value: V = decode_cursor(after_cursor)?;
+            query = query.where_(column.gt(value));
+            query = query.order_by(column.asc());
+        } else if let Some(ref before_cursor) = cursor.before {
+            let value: V = decode_cursor(before_cursor)?;
+            query = query.where_(column.lt(value));
+            query = query.order_by(column.desc());
+        } else {
+            query = query.order_by(column.asc());
+        }
+
+        let mut items: Vec<M> = query
+            .limit(per_page + 1)
+            .get(executor)
+            .await?
+            .into_iter()
+            .collect();
+        let has_more = items.len() as u64 > per_page;
+        if has_more {
+            items.pop();
+        }
+
+        // If we queried backwards, reverse to restore natural order
+        if !is_forward {
+            items.reverse();
+        }
+
+        let (has_next, has_prev) = if is_forward {
+            (has_more, cursor.after.is_some())
+        } else {
+            (cursor.before.is_some(), has_more)
+        };
+
+        Ok(CursorPaginated {
+            data: items,
+            meta: CursorMeta {
+                has_next,
+                has_prev,
+                per_page,
+            },
+            cursors: CursorInfo {
+                next: None,
+                prev: None,
+            },
         })
     }
 
@@ -3837,6 +4073,18 @@ fn wrap_model_stream_error(options: &QueryExecutionOptions, action: &str, error:
     Error::message(format!(
         "model query stream failed to {action}{label}: {error}"
     ))
+}
+
+fn decode_cursor<V: std::str::FromStr>(raw: &str) -> Result<V> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let decoded = URL_SAFE_NO_PAD
+        .decode(raw.as_bytes())
+        .map_err(|e| Error::message(format!("invalid cursor: {e}")))?;
+    let value_str = String::from_utf8(decoded)
+        .map_err(|e| Error::message(format!("invalid cursor encoding: {e}")))?;
+    value_str
+        .parse()
+        .map_err(|_| Error::message("invalid cursor value"))
 }
 
 #[cfg(test)]

@@ -37,12 +37,14 @@ pub struct RealIp(pub IpAddr);
 #[derive(Clone, Debug)]
 pub enum MiddlewareConfig {
     TrustedProxy(TrustedProxy),
+    MaintenanceMode(MaintenanceMode),
     Cors(Cors),
     SecurityHeaders(SecurityHeaders),
     Csrf(Csrf),
     RateLimit(RateLimit),
     MaxBodySize(MaxBodySize),
     RequestTimeout(RequestTimeout),
+    ETag(ETag),
     Compression(Compression),
 }
 
@@ -51,12 +53,14 @@ impl MiddlewareConfig {
     pub(crate) fn priority(&self) -> u8 {
         match self {
             Self::TrustedProxy(_) => 0,
+            Self::MaintenanceMode(_) => 1,
             Self::Cors(_) => 10,
             Self::SecurityHeaders(_) => 20,
             Self::Csrf(_) => 25,
             Self::RateLimit(_) => 30,
             Self::MaxBodySize(_) => 40,
             Self::RequestTimeout(_) => 50,
+            Self::ETag(_) => 55,
             Self::Compression(_) => 60,
         }
     }
@@ -69,12 +73,14 @@ impl MiddlewareConfig {
     ) -> axum::Router<AppContext> {
         match self {
             Self::TrustedProxy(config) => config.apply(router),
+            Self::MaintenanceMode(config) => config.apply(router, app),
             Self::Cors(config) => config.apply(router),
             Self::SecurityHeaders(config) => config.apply(router),
             Self::Csrf(config) => config.apply(router),
             Self::RateLimit(config) => config.apply(router, app),
             Self::MaxBodySize(config) => config.apply(router),
             Self::RequestTimeout(config) => config.apply(router),
+            Self::ETag(config) => config.apply(router),
             Self::Compression(config) => config.apply(router),
         }
     }
@@ -600,7 +606,7 @@ async fn csrf_middleware(
             return csrf_forbidden("CSRF token missing from request header");
         };
 
-        if !constant_time_eq(cookie_token.as_bytes(), request_token.as_bytes()) {
+        if !crate::support::hmac::constant_time_eq(cookie_token.as_bytes(), request_token.as_bytes()) {
             return csrf_forbidden("CSRF token mismatch");
         }
 
@@ -629,17 +635,6 @@ fn csrf_forbidden(message: &str) -> Response {
         })),
     )
         .into_response()
-}
-
-/// Constant-time comparison to prevent timing attacks on CSRF tokens.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
 }
 
 // extract_cookie_value is in crate::http::cookie (shared with session auth)
@@ -1093,6 +1088,136 @@ impl Default for Compression {
 }
 
 // ---------------------------------------------------------------------------
+// MaintenanceMode
+// ---------------------------------------------------------------------------
+
+/// Maintenance mode middleware.
+///
+/// When active, returns `503 Service Unavailable` for all requests unless
+/// a valid bypass secret is supplied via the `X-Maintenance-Bypass` header
+/// or a `bypass` query parameter.
+///
+/// Maintenance state is stored in the runtime backend (`maintenance:active` key),
+/// so it works across multiple instances in a distributed setup.
+///
+/// ```
+/// use forge::http::middleware::MaintenanceMode;
+///
+/// let mw = MaintenanceMode::new()
+///     .bypass_secret("my-secret-token")
+///     .build();
+/// ```
+#[derive(Clone, Debug)]
+pub struct MaintenanceMode {
+    bypass_secret: Option<String>,
+}
+
+impl MaintenanceMode {
+    pub fn new() -> Self {
+        Self {
+            bypass_secret: None,
+        }
+    }
+
+    /// Set a secret that allows bypassing maintenance mode.
+    ///
+    /// Requests can bypass maintenance by providing the secret via:
+    /// - `X-Maintenance-Bypass` header
+    /// - `bypass` query parameter
+    pub fn bypass_secret(mut self, secret: impl Into<String>) -> Self {
+        self.bypass_secret = Some(secret.into());
+        self
+    }
+
+    /// Convert into a `MiddlewareConfig`.
+    pub fn build(self) -> MiddlewareConfig {
+        MiddlewareConfig::MaintenanceMode(self)
+    }
+
+    fn apply(self, router: axum::Router<AppContext>, app: &AppContext) -> axum::Router<AppContext> {
+        router.layer(middleware::from_fn_with_state(
+            MaintenanceState {
+                app: app.clone(),
+                bypass_secret: self.bypass_secret,
+            },
+            maintenance_middleware,
+        ))
+    }
+}
+
+impl Default for MaintenanceMode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+struct MaintenanceState {
+    app: AppContext,
+    bypass_secret: Option<String>,
+}
+
+async fn maintenance_middleware(
+    State(state): State<MaintenanceState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Check if maintenance mode is active and get the stored bypass secret
+    let stored_secret = match state.app.resolve::<crate::support::runtime::RuntimeBackend>() {
+        Ok(backend) => backend
+            .get_value("maintenance:active")
+            .await
+            .unwrap_or(None),
+        Err(_) => None,
+    };
+
+    // Not in maintenance mode
+    if stored_secret.is_none() {
+        return next.run(request).await;
+    }
+
+    // Resolve bypass secret: prefer the value stored by `forge down --secret=...`,
+    // fall back to the middleware-configured secret
+    let bypass_secret = stored_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(state.bypass_secret.as_deref());
+
+    if let Some(secret) = bypass_secret {
+        // Check X-Maintenance-Bypass header
+        if let Some(header_value) = request.headers().get("x-maintenance-bypass") {
+            if let Ok(value) = header_value.to_str() {
+                if crate::support::hmac::constant_time_eq(value.as_bytes(), secret.as_bytes()) {
+                    return next.run(request).await;
+                }
+            }
+        }
+
+        // Check bypass query parameter
+        if let Some(query) = request.uri().query() {
+            for param in query.split('&') {
+                if let Some(value) = param.strip_prefix("bypass=") {
+                    if crate::support::hmac::constant_time_eq(value.as_bytes(), secret.as_bytes())
+                    {
+                        return next.run(request).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // Return 503 Service Unavailable
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({
+            "message": "Service is undergoing maintenance",
+            "status": 503,
+        })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // TrustedProxy
 // ---------------------------------------------------------------------------
 
@@ -1205,6 +1330,104 @@ pub(crate) fn resolve_real_ip(headers: &HeaderMap, custom_headers: &[HeaderName]
     }
 
     IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+}
+
+// ---------------------------------------------------------------------------
+// ETag — Conditional response middleware
+// ---------------------------------------------------------------------------
+
+/// ETag / conditional response middleware.
+///
+/// Computes a SHA-256 based ETag for successful responses and returns
+/// `304 Not Modified` when the client sends a matching `If-None-Match` header.
+///
+/// ```
+/// use forge::http::middleware::ETag;
+///
+/// let etag = ETag::new().build();
+/// ```
+#[derive(Clone, Debug)]
+pub struct ETag;
+
+impl ETag {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Convert into a `MiddlewareConfig`.
+    pub fn build(self) -> MiddlewareConfig {
+        MiddlewareConfig::ETag(self)
+    }
+
+    fn apply(self, router: axum::Router<AppContext>) -> axum::Router<AppContext> {
+        router.layer(middleware::from_fn(etag_middleware))
+    }
+}
+
+impl Default for ETag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn etag_middleware(request: Request, next: Next) -> Response {
+    let if_none_match = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let response = next.run(request).await;
+
+    // Only compute ETag for successful responses
+    if !response.status().is_success() {
+        return response;
+    }
+
+    // Skip ETag for large responses (> 10 MB) to avoid excessive memory use
+    const ETAG_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, ETAG_MAX_BODY_SIZE).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Response::from_parts(parts, axum::body::Body::empty()),
+    };
+
+    // Compute ETag from body hash (truncated to 32 hex chars for compactness)
+    let hash = crate::support::sha256_hex(&bytes);
+    let etag = format!("\"{}\"", &hash[..32]);
+
+    // Check If-None-Match
+    if let Some(ref client_etag) = if_none_match {
+        let trimmed = client_etag.trim();
+        if trimmed == etag || trimmed.trim_matches('"') == &hash[..32] {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, &etag)
+                .body(axum::body::Body::empty())
+                .unwrap();
+        }
+    }
+
+    // Build response with ETag header
+    let mut response = Response::from_parts(parts, axum::body::Body::from(bytes));
+    if let Ok(etag_value) = HeaderValue::from_str(&etag) {
+        response.headers_mut().insert(header::ETAG, etag_value);
+    }
+    response
+}
+
+// ---------------------------------------------------------------------------
+// MiddlewareGroups — named groups for reuse on routes
+// ---------------------------------------------------------------------------
+
+/// Named middleware groups registered on `AppBuilder`.
+#[derive(Clone, Debug, Default)]
+pub struct MiddlewareGroups(pub std::collections::HashMap<String, Vec<MiddlewareConfig>>);
+
+impl MiddlewareGroups {
+    pub fn get(&self, name: &str) -> Option<&Vec<MiddlewareConfig>> {
+        self.0.get(name)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1488,9 +1711,11 @@ mod tests {
             MiddlewareConfig::MaxBodySize(MaxBodySize::mb(1)),
             MiddlewareConfig::Cors(Cors::new()),
             MiddlewareConfig::TrustedProxy(TrustedProxy::new()),
+            MiddlewareConfig::MaintenanceMode(MaintenanceMode::new()),
             MiddlewareConfig::Csrf(Csrf::new()),
             MiddlewareConfig::RateLimit(RateLimit::new(100)),
             MiddlewareConfig::RequestTimeout(RequestTimeout::secs(30)),
+            MiddlewareConfig::ETag(ETag::new()),
             MiddlewareConfig::SecurityHeaders(SecurityHeaders::new()),
             MiddlewareConfig::Compression(Compression::new()),
         ];
@@ -1500,12 +1725,14 @@ mod tests {
             .map(|c| {
                 let name = match c {
                     MiddlewareConfig::TrustedProxy(_) => "TrustedProxy",
+                    MiddlewareConfig::MaintenanceMode(_) => "MaintenanceMode",
                     MiddlewareConfig::Cors(_) => "Cors",
                     MiddlewareConfig::SecurityHeaders(_) => "SecurityHeaders",
                     MiddlewareConfig::Csrf(_) => "Csrf",
                     MiddlewareConfig::RateLimit(_) => "RateLimit",
                     MiddlewareConfig::MaxBodySize(_) => "MaxBodySize",
                     MiddlewareConfig::RequestTimeout(_) => "RequestTimeout",
+                    MiddlewareConfig::ETag(_) => "ETag",
                     MiddlewareConfig::Compression(_) => "Compression",
                 };
                 (c.priority(), name)
@@ -1519,12 +1746,14 @@ mod tests {
             names,
             vec![
                 "TrustedProxy",
+                "MaintenanceMode",
                 "Cors",
                 "SecurityHeaders",
                 "Csrf",
                 "RateLimit",
                 "MaxBodySize",
                 "RequestTimeout",
+                "ETag",
                 "Compression",
             ]
         );

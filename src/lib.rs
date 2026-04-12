@@ -84,6 +84,8 @@ pub mod websocket;
 pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, Validate};
 
 pub use auth::{
+    email_verification::EmailVerificationManager,
+    password_reset::PasswordResetManager,
     session::SessionManager,
     token::{TokenAuthenticator, TokenManager, TokenPair},
     AccessScope, Actor, Auth, AuthError, AuthManager, Authenticatable, AuthenticatableRegistry,
@@ -109,7 +111,9 @@ pub use database::{
     ModelDeletingEvent, ModelFeatureSetting, ModelHookContext, ModelInstanceWriteExt,
     ModelLifecycle, ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelQuery, ModelUpdatedEvent,
     ModelUpdatingEvent, ModelWriteExecutor, NoModelLifecycle, Numeric, OnConflictAction,
-    OnConflictNode, OnConflictTarget, OrderBy, OrderDirection, Paginated, Pagination,
+    OnConflictNode, OnConflictTarget, OrderBy, OrderDirection, CursorInfo, CursorMeta,
+    CursorPaginated, CursorPagination, Paginated, PaginatedResponse, PaginationLinks,
+    PaginationMeta, Pagination,
     PersistedModel, Projection, ProjectionField, ProjectionFieldInfo, ProjectionMeta,
     ProjectionQuery, Query, QueryAst, QueryBody, QueryExecutionOptions, QueryExecutor,
     RelationAggregateDef, RelationDef, RelationKind, RelationLoader, RelationNode, RestoreModel,
@@ -119,19 +123,21 @@ pub use database::{
 };
 pub use email::{
     EmailAddress, EmailAttachment, EmailDriver, EmailMailer, EmailManager, EmailMessage,
-    LogEmailDriver, MailgunEmailDriver, PostmarkEmailDriver, ResendEmailDriver, SesEmailDriver,
-    SmtpEmailDriver,
+    LogEmailDriver, MailgunEmailDriver, PostmarkEmailDriver, RenderedTemplate, ResendEmailDriver,
+    SesEmailDriver, SmtpEmailDriver, TemplateRenderer,
 };
 pub use foundation::{
     App, AppBuilder, AppContext, AppTransaction, Container, Error, Result, ServiceProvider,
     ServiceRegistrar,
 };
 pub use http::cookie::{Cookie, CookieJar, SessionCookie};
+pub use http::routes::RouteRegistry;
 pub use http::middleware::{
-    Compression, Cors, Csrf, CsrfToken, MaxBodySize, MiddlewareConfig, RateLimit, RateLimitBy,
-    RateLimitWindow,
-    RealIp, RequestTimeout, SecurityHeaders, TrustedProxy,
+    Compression, Cors, Csrf, CsrfToken, ETag, MaintenanceMode, MaxBodySize, MiddlewareConfig,
+    MiddlewareGroups, RateLimit, RateLimitBy, RateLimitWindow, RealIp, RequestTimeout,
+    SecurityHeaders, TrustedProxy,
 };
+pub use http::resource::ApiResource;
 pub use i18n::{I18n, I18nManager, Locale};
 pub use jobs::{spawn_worker, JobMiddleware};
 pub use kernel::worker::WorkerKernel;
@@ -153,6 +159,7 @@ pub use storage::{
     LocalStorageAdapter, MultipartForm, S3StorageAdapter, StorageAdapter, StorageConfig,
     StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadedFile,
 };
+pub use support::lock::{DistributedLock, LockGuard};
 pub use support::{
     sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock, Collection, CommandId,
     CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId, LocalDateTime, MigrationId,

@@ -385,6 +385,8 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
                 channel: app::ids::SECURE_CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -409,6 +411,8 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
                 channel: app::ids::SECURE_CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -431,6 +435,8 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
                 channel: app::ids::SECURE_CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -448,6 +454,8 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
                 channel: app::ids::SECURE_CHAT_CHANNEL,
                 room: None,
                 payload: Some(serde_json::json!({ "body": "hello" })),
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),

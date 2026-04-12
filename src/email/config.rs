@@ -9,6 +9,7 @@ use crate::foundation::{Error, Result};
 pub struct EmailConfig {
     pub default: String,
     pub queue: String,
+    pub template_path: String,
     #[serde(default)]
     pub from: EmailFromConfig,
     #[serde(default)]
@@ -20,6 +21,7 @@ impl Default for EmailConfig {
         Self {
             default: "smtp".to_string(),
             queue: "default".to_string(),
+            template_path: "templates/emails".to_string(),
             from: EmailFromConfig::default(),
             mailers: BTreeMap::new(),
         }

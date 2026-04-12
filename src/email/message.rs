@@ -78,6 +78,37 @@ impl EmailMessage {
         self
     }
 
+    /// Render an email template and set the body.
+    ///
+    /// Loads `{template_name}.html` and `{template_name}.txt` from the template
+    /// directory, replaces `{{variable}}` placeholders with the provided values.
+    ///
+    /// ```ignore
+    /// let msg = EmailMessage::new("Welcome!")
+    ///     .to(&user.email)
+    ///     .template("welcome", "templates/emails", json!({
+    ///         "name": user.name,
+    ///         "app_name": "MyApp",
+    ///     }))?;
+    /// ```
+    pub fn template(
+        self,
+        template_name: &str,
+        template_path: &str,
+        variables: serde_json::Value,
+    ) -> crate::foundation::Result<Self> {
+        let renderer = crate::email::template::TemplateRenderer::new(template_path);
+        let rendered = renderer.render(template_name, &variables)?;
+        let mut msg = self;
+        if let Some(html) = rendered.html {
+            msg = msg.html_body(html);
+        }
+        if let Some(text) = rendered.text {
+            msg = msg.text_body(text);
+        }
+        Ok(msg)
+    }
+
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
         self

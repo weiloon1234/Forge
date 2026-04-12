@@ -501,6 +501,8 @@ async fn plugin_contributed_runtime_features_work_across_kernels() {
                 channel: PLUGIN_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -518,6 +520,8 @@ async fn plugin_contributed_runtime_features_work_across_kernels() {
                 channel: PLUGIN_CHANNEL,
                 room: None,
                 payload: Some(serde_json::json!({ "body": "hi" })),
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),

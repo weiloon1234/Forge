@@ -182,8 +182,20 @@ impl AppContext {
         self.resolve::<crate::auth::session::SessionManager>()
     }
 
+    pub fn password_resets(&self) -> Result<Arc<crate::auth::password_reset::PasswordResetManager>> {
+        self.resolve::<crate::auth::password_reset::PasswordResetManager>()
+    }
+
+    pub fn email_verification(&self) -> Result<Arc<crate::auth::email_verification::EmailVerificationManager>> {
+        self.resolve::<crate::auth::email_verification::EmailVerificationManager>()
+    }
+
     pub fn cache(&self) -> Result<Arc<crate::cache::CacheManager>> {
         self.resolve::<crate::cache::CacheManager>()
+    }
+
+    pub fn lock(&self) -> Result<Arc<crate::support::lock::DistributedLock>> {
+        self.resolve::<crate::support::lock::DistributedLock>()
     }
 
     pub async fn notify(
@@ -201,6 +213,34 @@ impl AppContext {
         notification: &dyn crate::notifications::Notification,
     ) -> Result<()> {
         crate::notifications::notify_queued(self, notifiable, notification).await
+    }
+
+    /// Generate a URL from a named route.
+    ///
+    /// ```ignore
+    /// let url = app.route_url("users.show", &[("id", "123")])?;
+    /// ```
+    pub fn route_url(&self, name: &str, params: &[(&str, &str)]) -> Result<String> {
+        let registry = self.resolve::<crate::http::routes::RouteRegistry>()?;
+        registry.url(name, params)
+    }
+
+    /// Generate a signed URL from a named route.
+    pub fn signed_route_url(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+        expires_at: crate::support::DateTime,
+    ) -> Result<String> {
+        let registry = self.resolve::<crate::http::routes::RouteRegistry>()?;
+        let signing_key = self.config().app()?.signing_key_bytes()?;
+        registry.signed_url(name, params, &signing_key, expires_at)
+    }
+
+    /// Verify a signed URL.
+    pub fn verify_signed_url(&self, url: &str) -> Result<()> {
+        let signing_key = self.config().app()?.signing_key_bytes()?;
+        crate::http::routes::RouteRegistry::verify_signature(url, &signing_key)
     }
 
     pub(crate) fn job_runtime(&self) -> Result<Arc<JobRuntime>> {
@@ -375,6 +415,7 @@ pub struct AppBuilder {
     websocket_routes: Vec<WebSocketRouteRegistrar>,
     validation_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
     middlewares: Vec<MiddlewareConfig>,
+    middleware_groups: std::collections::HashMap<String, Vec<MiddlewareConfig>>,
     observability: Option<ObservabilityOptions>,
     spa_dir: Option<PathBuf>,
 }
@@ -398,6 +439,7 @@ impl AppBuilder {
             websocket_routes: Vec::new(),
             validation_rules: Vec::new(),
             middlewares: Vec::new(),
+            middleware_groups: std::collections::HashMap::new(),
             observability: None,
             spa_dir: None,
         }
@@ -502,6 +544,24 @@ impl AppBuilder {
         self
     }
 
+    /// Register a named middleware group for reuse on routes.
+    ///
+    /// ```ignore
+    /// App::builder()
+    ///     .middleware_group("api", vec![
+    ///         RateLimit::new(100).per_minute().build(),
+    ///         Compression::new().build(),
+    ///     ])
+    /// ```
+    pub fn middleware_group(
+        mut self,
+        name: impl Into<String>,
+        middlewares: Vec<MiddlewareConfig>,
+    ) -> Self {
+        self.middleware_groups.insert(name.into(), middlewares);
+        self
+    }
+
     pub fn enable_observability(mut self) -> Self {
         self.observability = Some(ObservabilityOptions::default());
         self
@@ -599,6 +659,7 @@ impl AppBuilder {
             websocket_routes,
             validation_rules,
             middlewares,
+            middleware_groups,
             observability,
             spa_dir,
         } = self;
@@ -676,6 +737,11 @@ impl AppBuilder {
         let jobs_config = app.config().jobs()?;
         let redis = Arc::new(RedisManager::from_config(app.config())?);
         app.container().singleton_arc(Arc::new(backend.clone()))?;
+        // Create distributed lock from the same backend
+        let distributed_lock = Arc::new(crate::support::lock::DistributedLock::new(
+            app.resolve::<RuntimeBackend>()?,
+        ));
+        app.container().singleton_arc(distributed_lock)?;
 
         // Auto-register guard authenticators from config before freezing
         let token_manager = Arc::new(crate::auth::token::TokenManager::new(
@@ -785,6 +851,18 @@ impl AppBuilder {
         };
         let cache_manager = Arc::new(crate::cache::CacheManager::new(cache_store));
 
+        let password_reset_manager = Arc::new(crate::auth::password_reset::PasswordResetManager::new(
+            database.clone(),
+            60, // 60 minutes expiry
+        ));
+
+        let email_verification_manager = Arc::new(
+            crate::auth::email_verification::EmailVerificationManager::new(
+                database.clone(),
+                1440, // 24 hours expiry for email verification
+            ),
+        );
+
         app.container()
             .singleton_arc(prepared_plugins.registry.clone())?;
         app.container().singleton_arc(database)?;
@@ -794,6 +872,8 @@ impl AppBuilder {
         app.container().singleton_arc(authenticatable_registry)?;
         app.container().singleton_arc(token_manager)?;
         app.container().singleton_arc(session_manager)?;
+        app.container().singleton_arc(password_reset_manager)?;
+        app.container().singleton_arc(email_verification_manager)?;
         app.container().singleton_arc(cache_manager)?;
 
         app.container().singleton_arc(diagnostics.clone())?;
@@ -807,6 +887,10 @@ impl AppBuilder {
         app.container().singleton_arc(datatable_registry)?;
         app.container()
             .singleton_arc(notification_channel_registry)?;
+
+        // Register middleware groups for route-level resolution
+        let groups = Arc::new(crate::http::middleware::MiddlewareGroups(middleware_groups));
+        app.container().singleton_arc(groups)?;
 
         // Register i18n if configured
         if let Ok(i18n_config) = app.config().i18n() {
@@ -860,6 +944,7 @@ impl AppBuilder {
         boot_routes.extend(routes);
 
         let mut boot_commands = Vec::new();
+        boot_commands.push(crate::http::maintenance_cli_registrar());
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());
             boot_commands.push(crate::auth::builtin_cli_registrar());

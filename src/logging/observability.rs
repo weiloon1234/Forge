@@ -95,6 +95,11 @@ pub(crate) fn register_observability_routes(
     registrar.route_with_options(
         &join_route(&config.base_path, "jobs/failed"),
         get(jobs_failed),
+        route_options.clone(),
+    );
+    registrar.route_with_options(
+        &join_route(&config.base_path, "sql"),
+        get(slow_queries),
         route_options,
     );
     Ok(())
@@ -219,6 +224,15 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
         }
         Err(error) => internal_error_response(error),
     }
+}
+
+async fn slow_queries(State(_app): State<AppContext>) -> Response {
+    let queries = crate::database::recent_slow_queries();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "slow_queries": queries })),
+    )
+        .into_response()
 }
 
 fn db_value_to_json(value: &DbValue) -> serde_json::Value {

@@ -11,6 +11,7 @@ pub mod postmark;
 pub mod resend;
 pub mod ses;
 pub mod smtp;
+pub mod template;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,7 @@ pub use postmark::PostmarkEmailDriver;
 pub use resend::ResendEmailDriver;
 pub use ses::SesEmailDriver;
 pub use smtp::SmtpEmailDriver;
+pub use template::{RenderedTemplate, TemplateRenderer};
 
 // --- Driver Registry (mirrors StorageDriverRegistryBuilder) ---
 

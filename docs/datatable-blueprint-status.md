@@ -1,6 +1,6 @@
 # Datatable Blueprint Status
 
-The datatable-system blueprint in [rust_datatable_system_blueprint_framework_level.md](../rust_datatable_system_blueprint_framework_level.md) is implemented in Forge.
+The datatable-system blueprint in [datatable-system](../blueprints/06-datatable-system.md) is implemented in Forge.
 
 This status note maps the blueprint's goals to the concrete surfaces already in the repo. It exists so the blueprint can remain a stable design record while contributors can quickly see what implements it today.
 

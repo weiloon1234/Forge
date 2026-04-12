@@ -1,5 +1,7 @@
 pub mod cookie;
 pub mod middleware;
+pub mod resource;
+pub mod routes;
 pub(crate) mod spa;
 
 use std::collections::BTreeSet;
@@ -25,6 +27,7 @@ pub type HttpRouter = Router<AppContext>;
 pub struct HttpRouteOptions {
     pub access: AccessScope,
     middlewares: Vec<MiddlewareConfig>,
+    middleware_group_name: Option<String>,
     pub(crate) post_auth_rate_limit: Option<middleware::RateLimit>,
     pub(crate) doc: Option<crate::openapi::RouteDoc>,
 }
@@ -65,6 +68,15 @@ impl HttpRouteOptions {
     /// Multiple calls append middleware in order.
     pub fn middleware(mut self, config: MiddlewareConfig) -> Self {
         self.middlewares.push(config);
+        self
+    }
+
+    /// Apply a named middleware group to this route.
+    ///
+    /// The group must have been registered via `AppBuilder::middleware_group()`.
+    /// Group middlewares are prepended before any per-route middlewares.
+    pub fn middleware_group(mut self, name: impl Into<String>) -> Self {
+        self.middleware_group_name = Some(name.into());
         self
     }
 
@@ -121,6 +133,7 @@ enum HttpRegistration {
 
 pub struct HttpRegistrar {
     registrations: Vec<HttpRegistration>,
+    pub(crate) named_routes: routes::RouteRegistry,
 }
 
 impl Default for HttpRegistrar {
@@ -133,6 +146,7 @@ impl HttpRegistrar {
     pub fn new() -> Self {
         Self {
             registrations: Vec::new(),
+            named_routes: routes::RouteRegistry::new(),
         }
     }
 
@@ -152,6 +166,29 @@ impl HttpRegistrar {
             options,
         });
         self
+    }
+
+    /// Register a named route for URL generation.
+    pub fn route_named(
+        &mut self,
+        name: &str,
+        path: &str,
+        method_router: MethodRouter<AppContext>,
+    ) -> &mut Self {
+        self.named_routes.register(name, path);
+        self.route(path, method_router)
+    }
+
+    /// Register a named route with options.
+    pub fn route_named_with_options(
+        &mut self,
+        name: &str,
+        path: &str,
+        method_router: MethodRouter<AppContext>,
+        options: HttpRouteOptions,
+    ) -> &mut Self {
+        self.named_routes.register(name, path);
+        self.route_with_options(path, method_router, options)
     }
 
     pub fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self {
@@ -213,6 +250,10 @@ impl HttpRegistrar {
                 }
             }
         }
+        // Merge named routes from sub-registrar with prefix applied
+        for (name, pattern) in sub.named_routes.iter() {
+            self.named_routes.register(name, format!("{prefix}{pattern}"));
+        }
         Ok(self)
     }
 
@@ -273,7 +314,16 @@ impl HttpRegistrar {
                     options,
                 } => {
                     let method_router = *method_router;
-                    let route_middlewares = options.middlewares.clone();
+                    let mut route_middlewares = Vec::new();
+                    // Expand middleware group if specified
+                    if let Some(ref group_name) = options.middleware_group_name {
+                        if let Ok(groups) = app.resolve::<middleware::MiddlewareGroups>() {
+                            if let Some(group_mws) = groups.get(group_name) {
+                                route_middlewares.extend(group_mws.clone());
+                            }
+                        }
+                    }
+                    route_middlewares.extend(options.middlewares.clone());
                     let method_router = if options.requires_auth() {
                         let post_auth_rl = options.post_auth_rate_limit.as_ref().map(|rl| {
                             middleware::RateLimitState {
@@ -401,4 +451,70 @@ fn record_auth_outcome(app: &AppContext, outcome: AuthOutcome) {
     if let Ok(diagnostics) = app.diagnostics() {
         diagnostics.record_auth_outcome(outcome);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance mode CLI commands (down / up)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
+    use clap::{Arg, Command};
+
+    use crate::cli::CommandRegistrar;
+    use crate::support::runtime::RuntimeBackend;
+    use crate::support::CommandId;
+
+    const DOWN_COMMAND: CommandId = CommandId::new("down");
+    const UP_COMMAND: CommandId = CommandId::new("up");
+
+    let registrar: CommandRegistrar = Arc::new(|registry| {
+        registry.command(
+            DOWN_COMMAND,
+            Command::new(DOWN_COMMAND.as_str().to_string())
+                .about("Put the application into maintenance mode")
+                .arg(
+                    Arg::new("secret")
+                        .long("secret")
+                        .value_name("SECRET")
+                        .help("Bypass secret for maintenance mode"),
+                ),
+            |invocation| async move {
+                let app = invocation.app();
+                let backend = app.resolve::<RuntimeBackend>()?;
+                let secret = invocation
+                    .matches()
+                    .get_one::<String>("secret")
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Clear any existing key and set fresh
+                let _ = backend.del_key("maintenance:active").await;
+                backend
+                    .set_nx_value("maintenance:active", &secret, 31_536_000)
+                    .await?;
+
+                println!("Application is now in maintenance mode.");
+                if !secret.is_empty() {
+                    println!("Bypass secret: {secret}");
+                }
+                Ok(())
+            },
+        )?;
+
+        registry.command(
+            UP_COMMAND,
+            Command::new(UP_COMMAND.as_str().to_string())
+                .about("Bring the application out of maintenance mode"),
+            |invocation| async move {
+                let app = invocation.app();
+                let backend = app.resolve::<RuntimeBackend>()?;
+                backend.del_key("maintenance:active").await?;
+                println!("Application is now live.");
+                Ok(())
+            },
+        )?;
+
+        Ok(())
+    });
+    registrar
 }

@@ -1,6 +1,6 @@
 # Query Blueprint Status
 
-The query-system blueprint in [rust_query_system_blueprint_v_1_v_3.md](../rust_query_system_blueprint_v_1_v_3.md) is complete in Forge.
+The query-system blueprint in [query-system-v1-v3](../blueprints/01-query-system-v1-v3.md) is complete in Forge.
 
 This status note maps the blueprint's v1-v3 goals to the concrete surfaces, examples, and acceptance coverage already in the repo. It exists so the blueprint can remain a stable design record while contributors can quickly see what implements it today.
 

@@ -275,6 +275,8 @@ async fn websocket_kernel_handles_subscribe_message_and_unsubscribe() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -293,6 +295,8 @@ async fn websocket_kernel_handles_subscribe_message_and_unsubscribe() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: Some(serde_json::json!({ "body": "hello" })),
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -312,6 +316,8 @@ async fn websocket_kernel_handles_subscribe_message_and_unsubscribe() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -331,6 +337,8 @@ async fn websocket_kernel_handles_subscribe_message_and_unsubscribe() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: Some(serde_json::json!({ "body": "ignored" })),
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -377,6 +385,8 @@ async fn http_handler_dispatches_job_and_publishes_to_websocket() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),

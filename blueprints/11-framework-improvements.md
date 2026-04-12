@@ -545,7 +545,7 @@ App::builder()
 
 # Job System Improvements
 
-**Status: Blueprint complete — see [rust_job_system_blueprint.md](rust_job_system_blueprint.md)**
+**Status: Blueprint complete — see [job-system](13-job-system.md)**
 
 4 phases planned:
 1. **Critical:** Worker concurrency, per-job timeout, graceful shutdown — ✅ Done

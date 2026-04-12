@@ -459,6 +459,8 @@ async fn diagnostics_track_websocket_job_and_scheduler_activity() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -474,6 +476,8 @@ async fn diagnostics_track_websocket_job_and_scheduler_activity() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: Some(serde_json::json!({ "body": "hello" })),
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),
@@ -489,6 +493,8 @@ async fn diagnostics_track_websocket_job_and_scheduler_activity() {
                 channel: app::ids::CHAT_CHANNEL,
                 room: None,
                 payload: None,
+                event: None,
+                ack_id: None,
             })
             .unwrap()
             .into(),

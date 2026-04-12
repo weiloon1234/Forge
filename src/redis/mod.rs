@@ -94,15 +94,25 @@ pub struct RedisManager {
 impl RedisManager {
     pub fn from_config(config: &ConfigRepository) -> Result<Self> {
         let redis = config.redis()?;
+        let app = config.app()?;
         let client = if redis.url.trim().is_empty() {
             None
         } else {
             Some(::redis::Client::open(redis.url.as_str()).map_err(Error::other)?)
         };
 
+        // Auto-derive namespace from app.name:app.environment when using the
+        // default value. This ensures multi-project safety on shared Redis
+        // instances without explicit configuration.
+        let namespace = if redis.namespace == "forge" {
+            format!("{}:{}", slugify(&app.name), app.environment)
+        } else {
+            redis.namespace
+        };
+
         Ok(Self {
             client,
-            namespace: Arc::<str>::from(redis.namespace),
+            namespace: Arc::<str>::from(namespace),
             cached_connection: Arc::new(OnceCell::new()),
         })
     }
@@ -400,4 +410,21 @@ mod tests {
         let error = manager.connection().await.unwrap_err();
         assert_eq!(error.to_string(), "redis is not configured");
     }
+}
+
+/// Convert an app name to a Redis-safe key prefix.
+/// "Super AI" → "super_ai", "My App" → "my_app"
+fn slugify(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut prev_underscore = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch.to_ascii_lowercase());
+            prev_underscore = false;
+        } else if !prev_underscore && !result.is_empty() {
+            result.push('_');
+            prev_underscore = true;
+        }
+    }
+    result.trim_end_matches('_').to_string()
 }

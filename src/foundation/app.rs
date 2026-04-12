@@ -944,6 +944,7 @@ impl AppBuilder {
         boot_routes.extend(routes);
 
         let mut boot_commands = Vec::new();
+        boot_commands.push(crate::config::publish::config_publish_cli_registrar());
         boot_commands.push(crate::http::maintenance_cli_registrar());
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());
@@ -1116,6 +1117,6 @@ mod tests {
         let kernel = App::builder().build_cli_kernel().await.unwrap();
         let redis = kernel.app().redis().unwrap();
 
-        assert_eq!(redis.namespace(), "forge");
+        assert_eq!(redis.namespace(), "forge:development");
     }
 }

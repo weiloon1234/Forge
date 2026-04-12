@@ -487,11 +487,16 @@ impl Worker {
         &self.app
     }
 
-    /// Run the worker. Spawns a tokio task per claimed job, bounded by
-    /// a semaphore (`workers` config = max concurrency). No fixed worker
-    /// threads — tasks are created on demand and released when done.
+    /// Run the worker. Spawns a tokio task per claimed job (goroutine-style).
+    /// When `max_concurrent_jobs` is set (> 0), a semaphore bounds concurrency.
+    /// When 0 (default), jobs spawn without limit — true goroutine behavior.
     pub async fn run(self) -> Result<()> {
-        let max_concurrent = self.runtime.config.workers.max(1) as u32;
+        // 0 = unlimited (use a large semaphore that never blocks in practice)
+        let max_concurrent = if self.runtime.config.max_concurrent_jobs == 0 {
+            u32::MAX >> 1 // ~1 billion — effectively unlimited
+        } else {
+            self.runtime.config.max_concurrent_jobs as u32
+        };
         let worker = Arc::new(self);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent as usize));
 

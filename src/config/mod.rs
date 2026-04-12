@@ -1,3 +1,5 @@
+pub(crate) mod publish;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -16,9 +18,49 @@ pub struct ConfigRepository {
     root: Arc<Value>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Environment {
+    Development,
+    Production,
+    Testing,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::Development
+    }
+}
+
+impl Environment {
+    pub fn is_production(self) -> bool {
+        matches!(self, Self::Production)
+    }
+
+    pub fn is_development(self) -> bool {
+        matches!(self, Self::Development)
+    }
+
+    pub fn is_testing(self) -> bool {
+        matches!(self, Self::Testing)
+    }
+}
+
+impl std::fmt::Display for Environment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Development => write!(f, "development"),
+            Self::Production => write!(f, "production"),
+            Self::Testing => write!(f, "testing"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub name: String,
+    pub environment: Environment,
     pub timezone: Timezone,
     #[serde(default)]
     pub signing_key: String,
@@ -27,6 +69,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            name: "forge".to_string(),
+            environment: Environment::default(),
             timezone: Timezone::utc(),
             signing_key: String::new(),
         }
@@ -174,7 +218,7 @@ pub struct JobsConfig {
     pub poll_interval_ms: u64,
     pub lease_ttl_ms: u64,
     pub requeue_batch_size: usize,
-    pub workers: usize,
+    pub max_concurrent_jobs: usize,
     pub timeout_seconds: u64,
     pub track_history: bool,
     pub queue_priorities: std::collections::HashMap<String, u32>,
@@ -188,7 +232,7 @@ impl Default for JobsConfig {
             poll_interval_ms: 100,
             lease_ttl_ms: 30_000,
             requeue_batch_size: 64,
-            workers: 4,
+            max_concurrent_jobs: 0,
             timeout_seconds: 300,
             track_history: true,
             queue_priorities: std::collections::HashMap::new(),

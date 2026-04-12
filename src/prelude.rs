@@ -1,8 +1,10 @@
+pub use crate::attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
+pub use crate::countries::Country;
 pub use crate::auth::{
     email_verification::EmailVerificationManager,
     password_reset::PasswordResetManager,
     session::SessionManager,
-    token::{TokenAuthenticator, TokenManager, TokenPair},
+    token::{HasToken, TokenAuthenticator, TokenManager, TokenPair},
     AccessScope, Actor, Auth, AuthError, AuthManager, Authenticatable, AuthenticatableRegistry,
     AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor, GuardedAccess,
     OptionalActor, Policy, StaticBearerAuthenticator,
@@ -55,6 +57,9 @@ pub use crate::http::{HttpRegistrar, HttpRouteOptions, Validated};
 pub use crate::http::resource::ApiResource;
 pub use crate::openapi::{ApiSchema, RouteDoc, SchemaRef};
 pub use crate::i18n::{I18n, I18nManager, Locale};
+pub use crate::imaging::{ImageFormat, ImageProcessor, Rotation};
+pub use crate::metadata::{HasMetadata, ModelMeta};
+pub use crate::translations::{HasTranslations, ModelTranslation, TranslatedFields};
 pub use crate::jobs::{
     spawn_worker, Job, JobBatchBuilder, JobChainBuilder, JobContext, JobDispatcher, JobMiddleware,
     Worker,
@@ -71,7 +76,7 @@ pub use crate::plugin::{
     PluginRegistrar, PluginRegistry, PluginScaffold, PluginScaffoldOptions, PluginScaffoldVar,
 };
 pub use crate::redis::{RedisChannel, RedisConnection, RedisKey, RedisManager};
-pub use crate::scheduler::{CronExpression, ScheduleInvocation, ScheduleRegistry};
+pub use crate::scheduler::{CronExpression, ScheduleInvocation, ScheduleOptions, ScheduleRegistry};
 pub use crate::storage::{
     MultipartForm, StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadedFile,
 };

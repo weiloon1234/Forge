@@ -8,7 +8,7 @@ use clap::{Arg, Command};
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::TokenConfig;
 use crate::database::{DatabaseManager, DbValue, FromDbValue};
-use crate::foundation::{Error, Result};
+use crate::foundation::{AppContext, Error, Result};
 use crate::support::{sha256_hex_str, CommandId, GuardId, PermissionId, Token};
 
 use super::{Actor, Authenticatable, BearerAuthenticator};
@@ -343,4 +343,61 @@ async fn token_prune_command(invocation: CommandInvocation) -> Result<()> {
     let deleted = tokens.prune(days).await?;
     println!("pruned {deleted} token(s) older than {days} day(s)");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// HasToken trait — Laravel-style HasApiTokens for Authenticatable models
+// ---------------------------------------------------------------------------
+
+/// Trait for models that can issue and manage personal access tokens.
+///
+/// Provides convenient instance methods for token CRUD, similar to
+/// Laravel's `HasApiTokens` trait.
+///
+/// ```ignore
+/// impl HasToken for User {}  // uses Authenticatable::guard() automatically
+///
+/// let pair = user.create_token(&app).await?;
+/// let pair = user.create_token_named(&app, "My iPhone").await?;
+/// let pair = user.create_token_with_abilities(&app, "ci", vec!["deploy:read".into()]).await?;
+/// user.revoke_all_tokens(&app).await?;
+/// ```
+#[async_trait::async_trait]
+pub trait HasToken: super::Authenticatable {
+    /// Issue a new access + refresh token pair.
+    async fn create_token(&self, app: &AppContext) -> Result<TokenPair> {
+        let tokens = app.tokens()?;
+        let id = self.token_actor_id();
+        tokens.issue::<Self>(&id).await
+    }
+
+    /// Issue a named token pair (e.g., "My iPhone", "CLI").
+    async fn create_token_named(&self, app: &AppContext, name: &str) -> Result<TokenPair> {
+        let tokens = app.tokens()?;
+        let id = self.token_actor_id();
+        tokens.issue_named::<Self>(&id, name).await
+    }
+
+    /// Issue a token pair with scoped abilities.
+    async fn create_token_with_abilities(
+        &self,
+        app: &AppContext,
+        name: &str,
+        abilities: Vec<String>,
+    ) -> Result<TokenPair> {
+        let tokens = app.tokens()?;
+        let id = self.token_actor_id();
+        tokens.issue_with_abilities::<Self>(&id, name, abilities).await
+    }
+
+    /// Revoke all tokens for this model instance.
+    async fn revoke_all_tokens(&self, app: &AppContext) -> Result<u64> {
+        let tokens = app.tokens()?;
+        let id = self.token_actor_id();
+        tokens.revoke_all::<Self>(&id).await
+    }
+
+    /// The actor ID used for token operations. Override if your model's
+    /// primary key field is not named `id` or needs special formatting.
+    fn token_actor_id(&self) -> String;
 }

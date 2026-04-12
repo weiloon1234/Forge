@@ -168,6 +168,31 @@ impl DbRecord {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &DbValue)> {
         self.values.iter()
     }
+
+    /// Extract a text value, returning empty string if missing or wrong type.
+    pub fn text(&self, field: &str) -> String {
+        match self.get(field) {
+            Some(DbValue::Text(s)) => s.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Extract a text or UUID value as string.
+    pub fn text_or_uuid(&self, field: &str) -> String {
+        match self.get(field) {
+            Some(DbValue::Text(s)) => s.clone(),
+            Some(DbValue::Uuid(u)) => u.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Extract an optional text value.
+    pub fn optional_text(&self, field: &str) -> Option<String> {
+        match self.get(field) {
+            Some(DbValue::Text(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub struct DatabaseTransaction {

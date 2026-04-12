@@ -342,6 +342,7 @@ pub struct LoggingConfig {
     pub level: LogLevel,
     pub format: LogFormat,
     pub log_dir: String,
+    pub retention_days: u32,
 }
 
 impl Default for LoggingConfig {
@@ -350,6 +351,7 @@ impl Default for LoggingConfig {
             level: LogLevel::Info,
             format: LogFormat::default(),
             log_dir: "logs".to_string(),
+            retention_days: 30,
         }
     }
 }

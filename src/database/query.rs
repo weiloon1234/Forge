@@ -1616,6 +1616,7 @@ pub struct ModelQuery<M: 'static> {
     soft_delete_scope: SoftDeleteScope,
     stream_batch_size: usize,
     options: QueryExecutionOptions,
+    skip_defaults: bool,
 }
 
 impl<M> ModelQuery<M>
@@ -1646,7 +1647,14 @@ where
             soft_delete_scope: SoftDeleteScope::ActiveOnly,
             stream_batch_size: 256,
             options: QueryExecutionOptions::default(),
+            skip_defaults: false,
         }
+    }
+
+    /// Skip auto-eager-loading of default relations (set via `always_with` derive attribute).
+    pub fn without_defaults(mut self) -> Self {
+        self.skip_defaults = true;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {

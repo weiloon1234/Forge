@@ -55,10 +55,12 @@ macro_rules! register_generated_database {
 }
 
 pub mod app_enum;
+pub mod attachments;
 pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod countries;
 pub mod datatable;
 pub mod database;
 pub mod email;
@@ -66,7 +68,10 @@ pub mod events;
 pub mod foundation;
 pub mod http;
 pub mod i18n;
+pub mod imaging;
 pub mod jobs;
+pub mod metadata;
+pub mod translations;
 pub mod kernel;
 pub mod logging;
 pub mod openapi;
@@ -83,11 +88,13 @@ pub mod websocket;
 
 pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, Validate};
 
+pub use attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
+pub use countries::Country;
 pub use auth::{
     email_verification::EmailVerificationManager,
     password_reset::PasswordResetManager,
     session::SessionManager,
-    token::{TokenAuthenticator, TokenManager, TokenPair},
+    token::{HasToken, TokenAuthenticator, TokenManager, TokenPair},
     AccessScope, Actor, Auth, AuthError, AuthManager, Authenticatable, AuthenticatableRegistry,
     AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor, GuardedAccess,
     OptionalActor, Policy, StaticBearerAuthenticator,
@@ -139,7 +146,12 @@ pub use http::middleware::{
 };
 pub use http::resource::ApiResource;
 pub use i18n::{I18n, I18nManager, Locale};
+pub use imaging::{ImageFormat, ImageProcessor, Rotation};
 pub use jobs::{spawn_worker, JobMiddleware};
+pub use metadata::{HasMetadata, ModelMeta};
+pub use translations::{
+    current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,
+};
 pub use kernel::worker::WorkerKernel;
 pub use openapi::{ApiSchema, RouteDoc, SchemaRef};
 pub use openapi::spec::{generate_openapi_spec, DocumentedRoute};
@@ -154,7 +166,7 @@ pub use plugin::{
     PluginRegistrar, PluginRegistry, PluginScaffold, PluginScaffoldOptions, PluginScaffoldVar,
 };
 pub use redis::{RedisChannel, RedisConnection, RedisKey, RedisManager};
-pub use scheduler::CronExpression;
+pub use scheduler::{CronExpression, ScheduleOptions};
 pub use storage::{
     LocalStorageAdapter, MultipartForm, S3StorageAdapter, StorageAdapter, StorageConfig,
     StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadedFile,

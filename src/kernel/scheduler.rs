@@ -72,41 +72,146 @@ impl SchedulerKernel {
             previous
         };
 
+        // Check current environment for per-task environment filtering
+        let current_env = self
+            .app
+            .config()
+            .app()
+            .map(|c| c.environment.to_string())
+            .unwrap_or_else(|_| "development".to_string());
+
         let mut executed = Vec::new();
         for task in &self.tasks {
-            match &task.kind {
-                ScheduleKind::Cron { expression } => {
-                    if cron_due(expression, previous, now) {
-                        (task.handler)(self.app.clone()).await?;
-                        tracing::info!(
-                            target: "forge.scheduler",
-                            schedule = %task.id,
-                            kind = "cron",
-                            "Schedule executed"
-                        );
-                        if let Ok(diagnostics) = self.app.diagnostics() {
-                            diagnostics.record_schedule_executed();
-                        }
-                        executed.push(task.id.clone());
-                    }
-                }
+            let is_due = match &task.kind {
+                ScheduleKind::Cron { expression } => cron_due(expression, previous, now),
                 ScheduleKind::Interval { every } => {
-                    if interval_due(&self.last_interval_run, &task.id, *every, now) {
-                        (task.handler)(self.app.clone()).await?;
-                        tracing::info!(
-                            target: "forge.scheduler",
-                            schedule = %task.id,
-                            kind = "interval",
-                            interval_ms = every.as_millis() as u64,
-                            "Schedule executed"
-                        );
-                        if let Ok(diagnostics) = self.app.diagnostics() {
-                            diagnostics.record_schedule_executed();
+                    interval_due(&self.last_interval_run, &task.id, *every, now)
+                }
+            };
+
+            if !is_due {
+                continue;
+            }
+
+            // Environment filter
+            if !task.options.environments.is_empty()
+                && !task.options.environments.iter().any(|e| e == &current_env)
+            {
+                continue;
+            }
+
+            let task_id = task.id.clone();
+            let app = self.app.clone();
+            let handler = task.handler.clone();
+            let options = task.options.clone();
+            let backend = self.backend.clone();
+            let kind_label = match &task.kind {
+                ScheduleKind::Cron { .. } => "cron",
+                ScheduleKind::Interval { .. } => "interval",
+            };
+
+            // Spawn each task independently — no blocking the tick loop
+            let diagnostics = self.app.diagnostics().ok();
+            let spawned_id = task_id.clone();
+            tokio::spawn(async move {
+                let task_id = spawned_id;
+                // Overlap prevention via distributed lock (Drop guard releases on panic too)
+                let _lock_guard = if options.without_overlapping {
+                    let lock_key = format!("schedule:{task_id}");
+                    match backend.set_nx_value(&lock_key, "1", 3600).await {
+                        Ok(true) => Some(ScheduleLockGuard {
+                            backend: backend.clone(),
+                            key: lock_key,
+                        }),
+                        Ok(false) => {
+                            tracing::debug!(
+                                target: "forge.scheduler",
+                                schedule = %task_id,
+                                "Skipped (previous invocation still running)"
+                            );
+                            return;
                         }
-                        executed.push(task.id.clone());
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "forge.scheduler",
+                                schedule = %task_id,
+                                error = %e,
+                                "Failed to acquire overlap lock, running anyway"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Before hook
+                if let Some(ref before) = options.before_hook {
+                    if let Err(e) = before(app.clone()).await {
+                        tracing::warn!(
+                            target: "forge.scheduler",
+                            schedule = %task_id,
+                            error = %e,
+                            "Before hook failed"
+                        );
                     }
                 }
-            }
+
+                // Execute the task with error isolation
+                let result = handler(app.clone()).await;
+
+                match &result {
+                    Ok(()) => {
+                        tracing::info!(
+                            target: "forge.scheduler",
+                            schedule = %task_id,
+                            kind = kind_label,
+                            "Schedule executed"
+                        );
+                        if let Some(ref diagnostics) = diagnostics {
+                            diagnostics.record_schedule_executed();
+                        }
+
+                        // After hook (success)
+                        if let Some(ref after) = options.after_hook {
+                            if let Err(e) = after(app.clone()).await {
+                                tracing::warn!(
+                                    target: "forge.scheduler",
+                                    schedule = %task_id,
+                                    error = %e,
+                                    "After hook failed"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            target: "forge.scheduler",
+                            schedule = %task_id,
+                            kind = kind_label,
+                            error = %error,
+                            "Schedule failed"
+                        );
+
+                        // On failure hook
+                        if let Some(ref on_failure) = options.on_failure {
+                            if let Err(e) = on_failure(app.clone()).await {
+                                tracing::warn!(
+                                    target: "forge.scheduler",
+                                    schedule = %task_id,
+                                    error = %e,
+                                    "On-failure hook failed"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // _lock_guard releases via Drop (safe on panic too)
+                drop(_lock_guard);
+            });
+
+            executed.push(task_id);
         }
 
         Ok(executed)
@@ -116,7 +221,15 @@ impl SchedulerKernel {
         let mut interval = tokio::time::interval(self.tick_interval);
         loop {
             interval.tick().await;
-            let _ = self.run_once().await?;
+            // Error from run_once is only from leadership — not from tasks
+            // (tasks are spawned and isolated). Leadership errors are recoverable.
+            if let Err(e) = self.run_once().await {
+                tracing::warn!(
+                    target: "forge.scheduler",
+                    error = %e,
+                    "Scheduler tick error (leadership), will retry"
+                );
+            }
         }
     }
 
@@ -220,4 +333,24 @@ fn next_owner_id() -> String {
         DateTime::now().timestamp_micros(),
         NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// Drop guard that releases a schedule overlap lock, even on panic.
+struct ScheduleLockGuard {
+    backend: RuntimeBackend,
+    key: String,
+}
+
+impl Drop for ScheduleLockGuard {
+    fn drop(&mut self) {
+        let backend = self.backend.clone();
+        let key = std::mem::take(&mut self.key);
+        if !key.is_empty() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = backend.del_key(&key).await;
+                });
+            }
+        }
+    }
 }

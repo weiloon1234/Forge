@@ -35,8 +35,11 @@ pub(crate) async fn request_context_middleware(
         request_id = %request_id
     );
 
+    let locale = resolve_request_locale(&request, &app);
     let start = std::time::Instant::now();
-    let mut response = next.run(request).instrument(span).await;
+    let mut response = crate::translations::CURRENT_LOCALE
+        .scope(locale, next.run(request).instrument(span))
+        .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
@@ -59,4 +62,19 @@ pub(crate) async fn request_context_middleware(
     );
 
     response
+}
+
+fn resolve_request_locale(request: &Request, app: &AppContext) -> String {
+    if let Some(locale) = request.extensions().get::<crate::i18n::Locale>() {
+        return locale.0.clone();
+    }
+    match app.i18n() {
+        Ok(manager) => request
+            .headers()
+            .get("accept-language")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| manager.resolve_locale(s))
+            .unwrap_or_else(|| manager.default_locale().to_string()),
+        Err(_) => "en".to_string(),
+    }
 }

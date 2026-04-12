@@ -37,7 +37,11 @@ impl CliKernel {
         T: Into<OsString> + Clone,
     {
         let registry = self.build_registry()?;
-        let mut root = Command::new("forge");
+        let mut root = Command::new("forge")
+            .version(env!("CARGO_PKG_VERSION"))
+            .about("Forge — a Laravel-inspired Rust web framework")
+            .subcommand_required(true)
+            .arg_required_else_help(true);
         for registered in registry.commands() {
             root = root.subcommand(registered.command.clone());
         }

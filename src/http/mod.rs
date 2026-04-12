@@ -466,6 +466,7 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
 
     const DOWN_COMMAND: CommandId = CommandId::new("down");
     const UP_COMMAND: CommandId = CommandId::new("up");
+    const ROUTES_LIST_COMMAND: CommandId = CommandId::new("routes:list");
 
     let registrar: CommandRegistrar = Arc::new(|registry| {
         registry.command(
@@ -510,6 +511,35 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
                 let backend = app.resolve::<RuntimeBackend>()?;
                 backend.del_key("maintenance:active").await?;
                 println!("Application is now live.");
+                Ok(())
+            },
+        )?;
+
+        registry.command(
+            ROUTES_LIST_COMMAND,
+            Command::new(ROUTES_LIST_COMMAND.as_str().to_string())
+                .about("List all registered named routes"),
+            |invocation| async move {
+                let app = invocation.app();
+                match app.resolve::<routes::RouteRegistry>() {
+                    Ok(registry) => {
+                        let mut routes: Vec<_> = registry.iter().collect();
+                        routes.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        if routes.is_empty() {
+                            println!("No named routes registered.");
+                        } else {
+                            println!("{:<30} {}", "NAME", "PATH");
+                            println!("{}", "-".repeat(60));
+                            for (name, pattern) in routes {
+                                println!("{:<30} {}", name, pattern);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        println!("Route registry not available (routes are built during HTTP kernel startup).");
+                        println!("Named routes registered via route_named() will appear here after HTTP boot.");
+                    }
+                }
                 Ok(())
             },
         )?;

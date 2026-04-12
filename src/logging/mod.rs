@@ -77,7 +77,7 @@ pub fn init(config: &ConfigRepository) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     match logging_config.format {
-        LogFormat::Json => init_json(filter, &logging_config.log_dir, &timezone, &observability_config)?,
+        LogFormat::Json => init_json(filter, &logging_config.log_dir, logging_config.retention_days, &timezone, &observability_config)?,
         LogFormat::Text => init_text(filter, &observability_config)?,
     }
 
@@ -108,6 +108,7 @@ pub fn init(config: &ConfigRepository) -> Result<()> {
 fn init_json(
     filter: EnvFilter,
     log_dir: &str,
+    retention_days: u32,
     timezone: &Timezone,
     _otel_config: &ObservabilityConfig,
 ) -> Result<()> {
@@ -134,7 +135,7 @@ fn init_json(
         let _ = registry.try_init();
     } else {
         // stdout + date-rotating file
-        let file_writer = file_writer::DateRotatingFileWriter::open(log_dir, &clock)
+        let file_writer = file_writer::DateRotatingFileWriter::open(log_dir, &clock, retention_days)
             .map_err(|e| Error::message(format!("failed to open log dir '{log_dir}': {e}")))?;
 
         let stdout_layer = tracing_subscriber::fmt::layer()

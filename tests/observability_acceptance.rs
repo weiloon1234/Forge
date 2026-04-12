@@ -4,7 +4,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::TimeZone;
 use forge::prelude::*;
 use futures_util::{SinkExt, StreamExt};
 use tempfile::tempdir;
@@ -535,7 +534,7 @@ async fn diagnostics_track_websocket_job_and_scheduler_activity() {
         .await
         .unwrap());
 
-    let now = chrono::Utc.with_ymd_and_hms(2026, 4, 8, 12, 0, 0).unwrap();
+    let now = DateTime::parse("2026-04-08T12:00:00Z").unwrap();
     let executed = scheduler.tick_at(now).await.unwrap();
     assert_eq!(executed, vec![app::ids::HEARTBEAT_SCHEDULE]);
 

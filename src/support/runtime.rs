@@ -1,13 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
+use ::redis::AsyncCommands;
 use futures_util::StreamExt;
-use redis::AsyncCommands;
 use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 
 use crate::config::ConfigRepository;
 use crate::foundation::{Error, Result};
 use crate::logging::RuntimeBackendKind;
+use crate::redis::namespaced_value;
 use crate::support::QueueId;
 
 #[derive(Clone, Debug)]
@@ -50,7 +51,7 @@ impl RuntimeBackend {
         }
 
         Ok(Self::Redis(RedisRuntime {
-            client: redis::Client::open(redis.url.as_str()).map_err(Error::other)?,
+            client: ::redis::Client::open(redis.url.as_str()).map_err(Error::other)?,
             namespace: redis.namespace,
         }))
     }
@@ -82,17 +83,59 @@ impl RuntimeBackend {
             Self::Memory(runtime) => runtime.subscribe_ws(topics).await,
         }
     }
+
+    /// Atomically increment a counter and set TTL on first creation.
+    ///
+    /// The key is automatically prefixed with the app's Redis namespace:
+    /// `{namespace}:{key}`.
+    ///
+    /// Returns the current count after increment. If the key didn't exist
+    /// before this call, it is created with value `1` and the given TTL.
+    pub async fn incr_with_ttl(&self, key: &str, ttl_secs: u64) -> Result<u64> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let count: i64 = ::redis::cmd("INCR")
+                    .arg(&full_key)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                if count == 1 {
+                    let _: () = ::redis::cmd("EXPIRE")
+                        .arg(&full_key)
+                        .arg(ttl_secs as i64)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(Error::other)?;
+                }
+                Ok(count as u64)
+            }
+            Self::Memory(_) => Err(Error::other(anyhow::anyhow!(
+                "memory backend does not support incr_with_ttl"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct RedisRuntime {
-    pub(crate) client: redis::Client,
+    pub(crate) client: ::redis::Client,
     pub(crate) namespace: String,
 }
 
 impl RedisRuntime {
     fn websocket_topic(&self, topic: &str) -> String {
-        format!("{}:ws:{topic}", self.namespace)
+        namespaced_value(&self.namespace, &format!("ws:{topic}"))
+    }
+
+    /// Build a namespaced key: `{namespace}:{suffix}`.
+    fn namespaced_key(&self, suffix: &str) -> String {
+        namespaced_value(&self.namespace, suffix)
     }
 
     async fn ping(&self) -> Result<()> {
@@ -101,7 +144,7 @@ impl RedisRuntime {
             .get_multiplexed_async_connection()
             .await
             .map_err(Error::other)?;
-        let _: String = redis::cmd("PING")
+        let _: String = ::redis::cmd("PING")
             .query_async(&mut conn)
             .await
             .map_err(Error::other)?;

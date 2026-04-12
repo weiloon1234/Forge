@@ -2,7 +2,7 @@
 
 use forge::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "users")]
 struct User {
     sale_id: i64,

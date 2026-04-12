@@ -1061,12 +1061,12 @@ fn ensure_writable(path: &Path, force: bool) -> Result<()> {
 }
 
 fn render_migration_template() -> String {
-    "use async_trait::async_trait;\nuse forge::prelude::*;\n\npub struct Entry;\n\n#[async_trait]\nimpl MigrationFile for Entry {\n    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"CREATE TABLE your_table (id BIGSERIAL PRIMARY KEY);\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n\n    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"DROP TABLE IF EXISTS your_table;\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n}\n"
+    "use async_trait::async_trait;\nuse forge::prelude::*;\n\npub struct Entry;\n\n#[async_trait]\nimpl MigrationFile for Entry {\n    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"CREATE TABLE your_table (id UUID PRIMARY KEY DEFAULT uuidv7());\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n\n    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"DROP TABLE IF EXISTS your_table;\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n}\n"
         .to_string()
 }
 
 fn render_seeder_template() -> String {
-    "use async_trait::async_trait;\nuse forge::prelude::*;\n\npub struct Entry;\n\n#[async_trait]\nimpl SeederFile for Entry {\n    async fn run(ctx: &SeederContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"INSERT INTO your_table (id) VALUES (1);\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n}\n"
+    "use async_trait::async_trait;\nuse forge::prelude::*;\n\npub struct Entry;\n\n#[async_trait]\nimpl SeederFile for Entry {\n    async fn run(ctx: &SeederContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"INSERT INTO your_table (id) VALUES (uuidv7());\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n}\n"
         .to_string()
 }
 

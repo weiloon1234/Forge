@@ -1,0 +1,13 @@
+error[E0308]: `?` operator has incompatible types
+ --> tests/ui/derive/fail_write_mutator_wrong_type.rs:3:10
+  |
+3 | #[derive(forge::Model)]
+  |          ^^^^^^^^^^^^ expected `String`, found `bool`
+  |
+  = note: `?` operator cannot convert from `bool` to `String`
+note: return type inferred to be `String` here
+ --> tests/ui/derive/fail_write_mutator_wrong_type.rs:3:10
+  |
+3 | #[derive(forge::Model)]
+  |          ^^^^^^^^^^^^
+  = note: this error originates in the derive macro `forge::Model` (in Nightly builds, run with -Z macro-backtrace for more info)

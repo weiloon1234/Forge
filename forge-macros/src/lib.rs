@@ -1,8 +1,10 @@
 use proc_macro::TokenStream;
 
+mod app_enum;
 mod common;
 mod model;
 mod projection;
+mod validate;
 
 #[proc_macro_derive(Model, attributes(forge))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -12,6 +14,16 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Projection, attributes(forge))]
 pub fn derive_projection(input: TokenStream) -> TokenStream {
     expand(input, projection::expand)
+}
+
+#[proc_macro_derive(AppEnum, attributes(forge))]
+pub fn derive_app_enum(input: TokenStream) -> TokenStream {
+    expand(input, app_enum::expand)
+}
+
+#[proc_macro_derive(Validate, attributes(validate))]
+pub fn derive_validate(input: TokenStream) -> TokenStream {
+    expand(input, validate::expand)
 }
 
 fn expand(

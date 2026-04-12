@@ -2,14 +2,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::auth::{BearerAuthenticator, GuardRegistryHandle, Policy, PolicyRegistryHandle};
+use crate::auth::{
+    Authenticatable, AuthenticatableRegistryHandle, BearerAuthenticator, GuardRegistryHandle,
+    Policy, PolicyRegistryHandle,
+};
 use crate::config::ConfigRepository;
 use crate::database::{MigrationFile, MigrationRegistryHandle, SeederFile, SeederRegistryHandle};
+use crate::email::{EmailDriverFactory, EmailDriverRegistryHandle};
 use crate::events::{Event, EventListener, EventRegistryHandle};
 use crate::foundation::{Container, Result};
 use crate::jobs::{Job, JobRegistryHandle};
 use crate::logging::{ReadinessCheck, ReadinessRegistryHandle};
+use crate::storage::{StorageDriverFactory, StorageDriverRegistryHandle};
 use crate::support::{GuardId, MigrationId, PolicyId, ProbeId, SeederId};
+use crate::datatable::registry::{DatatableRegistryHandle, DatatableRegistryBuilder};
 
 #[derive(Clone)]
 pub struct ServiceRegistrar {
@@ -21,7 +27,11 @@ pub struct ServiceRegistrar {
     seeder_registry: SeederRegistryHandle,
     guard_registry: GuardRegistryHandle,
     policy_registry: PolicyRegistryHandle,
+    authenticatable_registry: AuthenticatableRegistryHandle,
     readiness_registry: ReadinessRegistryHandle,
+    storage_driver_registry: StorageDriverRegistryHandle,
+    email_driver_registry: EmailDriverRegistryHandle,
+    datatable_registry: DatatableRegistryHandle,
 }
 
 impl ServiceRegistrar {
@@ -35,7 +45,10 @@ impl ServiceRegistrar {
         seeder_registry: SeederRegistryHandle,
         guard_registry: GuardRegistryHandle,
         policy_registry: PolicyRegistryHandle,
+        authenticatable_registry: AuthenticatableRegistryHandle,
         readiness_registry: ReadinessRegistryHandle,
+        storage_driver_registry: StorageDriverRegistryHandle,
+        email_driver_registry: EmailDriverRegistryHandle,
     ) -> Self {
         Self {
             container,
@@ -46,7 +59,11 @@ impl ServiceRegistrar {
             seeder_registry,
             guard_registry,
             policy_registry,
+            authenticatable_registry,
             readiness_registry,
+            storage_driver_registry,
+            email_driver_registry,
+            datatable_registry: DatatableRegistryBuilder::shared(),
         }
     }
 
@@ -154,6 +171,20 @@ impl ServiceRegistrar {
             .register_arc(id, Arc::new(policy))
     }
 
+    pub fn register_authenticatable<M>(&self) -> Result<()>
+    where
+        M: Authenticatable,
+    {
+        self.authenticatable_registry
+            .lock()
+            .expect("authenticatable registry lock poisoned")
+            .register::<M>()
+    }
+
+    pub(crate) fn authenticatable_registry(&self) -> AuthenticatableRegistryHandle {
+        self.authenticatable_registry.clone()
+    }
+
     pub fn register_readiness_check<I, C>(&self, id: I, check: C) -> Result<()>
     where
         I: Into<ProbeId>,
@@ -163,6 +194,34 @@ impl ServiceRegistrar {
             .lock()
             .expect("readiness registry lock poisoned")
             .register_arc(id, Arc::new(check))
+    }
+
+    pub fn register_storage_driver(&self, name: &str, factory: StorageDriverFactory) -> Result<()> {
+        self.storage_driver_registry
+            .lock()
+            .expect("storage driver registry lock poisoned")
+            .register(name.to_string(), factory)
+    }
+
+    pub fn register_email_driver(&self, name: &str, factory: EmailDriverFactory) -> Result<()> {
+        self.email_driver_registry
+            .lock()
+            .expect("email driver registry lock poisoned")
+            .register(name.to_string(), factory)
+    }
+
+    pub fn register_datatable<D>(&self) -> Result<()>
+    where
+        D: crate::datatable::ModelDatatable,
+    {
+        self.datatable_registry
+            .lock()
+            .expect("datatable registry lock poisoned")
+            .register::<D>()
+    }
+
+    pub(crate) fn datatable_registry(&self) -> DatatableRegistryHandle {
+        self.datatable_registry.clone()
     }
 }
 

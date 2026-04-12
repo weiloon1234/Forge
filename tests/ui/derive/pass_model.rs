@@ -1,23 +1,45 @@
 use async_trait::async_trait;
 use forge::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "users", lifecycle = UserLifecycle)]
 struct User {
-    id: i64,
+    id: ModelId<User>,
     #[forge(column = "user_email")]
+    #[forge(write_mutator = "normalize_email")]
+    #[forge(read_accessor = "normalized_email")]
     email: String,
     active: bool,
     metadata: serde_json::Value,
-    created_at: chrono::DateTime<chrono::Utc>,
+    created_at: DateTime,
     nickname: Option<String>,
     merchants: Loaded<Vec<Merchant>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "merchants")]
 struct Merchant {
+    id: ModelId<Merchant>,
+}
+
+#[derive(forge::Model)]
+#[forge(model = "external_accounts", primary_key = "public_id")]
+struct ExternalAccount {
+    public_id: ModelId<ExternalAccount>,
+    email: String,
+}
+
+#[derive(forge::Model)]
+#[forge(model = "legacy_users", primary_key_strategy = "manual")]
+struct LegacyUser {
     id: i64,
+    email: String,
+}
+
+#[derive(forge::Model)]
+#[forge(model = "api_tokens", primary_key_strategy = "manual")]
+struct ApiToken {
+    id: String,
 }
 
 struct UserLifecycle;
@@ -25,9 +47,32 @@ struct UserLifecycle;
 #[async_trait]
 impl ModelLifecycle<User> for UserLifecycle {}
 
+impl User {
+    async fn normalize_email(_ctx: &ModelHookContext<'_>, value: String) -> Result<String> {
+        Ok(value.trim().to_lowercase())
+    }
+
+    fn normalized_email(&self) -> String {
+        self.email.trim().to_lowercase()
+    }
+}
+
 fn main() {
     let _ = User::ID;
     let _ = User::EMAIL;
     let _ = User::table_meta();
     let _ = User::create();
+    let user = User {
+        id: ModelId::generate(),
+        email: " USER@EXAMPLE.COM ".to_string(),
+        active: true,
+        metadata: serde_json::json!({}),
+        created_at: DateTime::parse("2026-01-01T00:00:00Z").unwrap(),
+        nickname: None,
+        merchants: Loaded::Unloaded,
+    };
+    let _ = user.email_accessed();
+    let _ = ExternalAccount::PUBLIC_ID;
+    let _ = LegacyUser::ID;
+    let _ = ApiToken::ID;
 }

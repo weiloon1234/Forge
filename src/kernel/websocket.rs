@@ -424,6 +424,11 @@ impl ConnectionHub {
         if let Some(diagnostics) = &self.diagnostics {
             diagnostics.record_websocket_connection(WebSocketConnectionState::Opened);
         }
+        tracing::info!(
+            target: "forge.websocket",
+            connection_id = connection_id,
+            "WebSocket connection opened"
+        );
         (connection_id, rx)
     }
 
@@ -435,6 +440,11 @@ impl ConnectionHub {
                 }
                 diagnostics.record_websocket_connection(WebSocketConnectionState::Closed);
             }
+            tracing::info!(
+                target: "forge.websocket",
+                connection_id = connection_id,
+                "WebSocket connection closed"
+            );
         }
     }
 

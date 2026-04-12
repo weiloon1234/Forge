@@ -3,15 +3,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::auth::{AuthManager, Authorizer, GuardRegistryBuilder, PolicyRegistryBuilder};
+use crate::auth::{
+    AuthManager, AuthenticatableRegistry, AuthenticatableRegistryBuilder, Authorizer,
+    GuardRegistryBuilder, PolicyRegistryBuilder,
+};
 use crate::cli::CommandRegistrar;
 use crate::config::ConfigRepository;
 use crate::database::{
-    DatabaseManager, DatabaseTransaction, MigrationRegistryBuilder, ModelWriteExecutor,
-    QueryExecutionOptions, QueryExecutor, SeederRegistryBuilder,
+    set_runtime_model_defaults, DatabaseManager, DatabaseTransaction, MigrationRegistryBuilder,
+    ModelWriteExecutor, QueryExecutionOptions, QueryExecutor, SeederRegistryBuilder,
 };
+use crate::email::{job::SendQueuedEmailJob, EmailDriverRegistryBuilder, EmailManager};
 use crate::events::{EventBus, EventRegistryBuilder};
 use crate::foundation::{Container, Error, Result, ServiceProvider, ServiceRegistrar};
+use crate::http::middleware::MiddlewareConfig;
 use crate::http::RouteRegistrar;
 use crate::jobs::{JobDispatcher, JobRegistryBuilder, JobRuntime};
 use crate::kernel::{
@@ -24,9 +29,11 @@ use crate::logging::{
     RUNTIME_BACKEND_PROBE,
 };
 use crate::plugin::{Plugin, PluginRegistry};
+use crate::redis::RedisManager;
 use crate::scheduler::ScheduleRegistrar;
+use crate::storage::{StorageDriverRegistryBuilder, StorageManager};
 use crate::support::runtime::RuntimeBackend;
-use crate::support::ValidationRuleId;
+use crate::support::{Clock, CryptManager, GuardId, HashManager, Timezone, ValidationRuleId};
 use crate::validation::{RuleRegistry, ValidationRule};
 use crate::websocket::{WebSocketPublisher, WebSocketRouteRegistrar};
 
@@ -34,6 +41,7 @@ use crate::websocket::{WebSocketPublisher, WebSocketRouteRegistrar};
 pub struct AppContext {
     container: Container,
     config: ConfigRepository,
+    timezone: Timezone,
     rules: RuleRegistry,
 }
 
@@ -43,12 +51,18 @@ pub struct AppTransaction {
 }
 
 impl AppContext {
-    pub fn new(container: Container, config: ConfigRepository, rules: RuleRegistry) -> Self {
-        Self {
+    pub fn new(
+        container: Container,
+        config: ConfigRepository,
+        rules: RuleRegistry,
+    ) -> Result<Self> {
+        let timezone = config.app()?.timezone;
+        Ok(Self {
             container,
             config,
+            timezone,
             rules,
-        }
+        })
     }
 
     pub fn container(&self) -> &Container {
@@ -57,6 +71,14 @@ impl AppContext {
 
     pub fn config(&self) -> &ConfigRepository {
         &self.config
+    }
+
+    pub fn timezone(&self) -> Result<Timezone> {
+        Ok(self.timezone.clone())
+    }
+
+    pub fn clock(&self) -> Clock {
+        Clock::new(self.timezone.clone())
     }
 
     pub fn rules(&self) -> &RuleRegistry {
@@ -94,6 +116,26 @@ impl AppContext {
         self.resolve::<DatabaseManager>()
     }
 
+    pub fn redis(&self) -> Result<Arc<RedisManager>> {
+        self.resolve::<RedisManager>()
+    }
+
+    pub fn storage(&self) -> Result<Arc<StorageManager>> {
+        self.resolve::<StorageManager>()
+    }
+
+    pub fn email(&self) -> Result<Arc<EmailManager>> {
+        self.resolve::<EmailManager>()
+    }
+
+    pub fn hash(&self) -> Result<Arc<HashManager>> {
+        self.resolve::<HashManager>()
+    }
+
+    pub fn crypt(&self) -> Result<Arc<CryptManager>> {
+        self.resolve::<CryptManager>()
+    }
+
     pub async fn begin_transaction(&self) -> Result<AppTransaction> {
         let database = self.database()?;
         let transaction = database.begin().await?;
@@ -107,8 +149,28 @@ impl AppContext {
         self.resolve::<RuntimeDiagnostics>()
     }
 
+    pub fn i18n(&self) -> Result<Arc<crate::i18n::I18nManager>> {
+        self.resolve::<crate::i18n::I18nManager>()
+    }
+
     pub fn plugins(&self) -> Result<Arc<PluginRegistry>> {
         self.resolve::<PluginRegistry>()
+    }
+
+    pub fn datatables(&self) -> Result<Arc<crate::datatable::DatatableRegistry>> {
+        self.resolve::<crate::datatable::DatatableRegistry>()
+    }
+
+    pub fn authenticatables(&self) -> Result<Arc<AuthenticatableRegistry>> {
+        self.resolve::<AuthenticatableRegistry>()
+    }
+
+    pub fn tokens(&self) -> Result<Arc<crate::auth::token::TokenManager>> {
+        self.resolve::<crate::auth::token::TokenManager>()
+    }
+
+    pub fn sessions(&self) -> Result<Arc<crate::auth::session::SessionManager>> {
+        self.resolve::<crate::auth::session::SessionManager>()
     }
 
     pub(crate) fn job_runtime(&self) -> Result<Arc<JobRuntime>> {
@@ -218,6 +280,7 @@ pub struct AppBuilder {
     schedules: Vec<ScheduleRegistrar>,
     websocket_routes: Vec<WebSocketRouteRegistrar>,
     validation_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
+    middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
 }
 
@@ -239,6 +302,7 @@ impl AppBuilder {
             schedules: Vec::new(),
             websocket_routes: Vec::new(),
             validation_rules: Vec::new(),
+            middlewares: Vec::new(),
             observability: None,
         }
     }
@@ -323,6 +387,11 @@ impl AppBuilder {
         self
     }
 
+    pub fn register_middleware(mut self, config: MiddlewareConfig) -> Self {
+        self.middlewares.push(config);
+        self
+    }
+
     pub fn enable_observability(mut self) -> Self {
         self.observability = Some(ObservabilityOptions::default());
         self
@@ -375,7 +444,12 @@ impl AppBuilder {
 
     pub async fn build_http_kernel(self) -> Result<HttpKernel> {
         let boot = self.bootstrap().await?;
-        Ok(HttpKernel::new(boot.app, boot.routes, boot.observability))
+        Ok(HttpKernel::new(
+            boot.app,
+            boot.routes,
+            boot.middlewares,
+            boot.observability,
+        ))
     }
 
     pub async fn build_cli_kernel(self) -> Result<CliKernel> {
@@ -413,6 +487,7 @@ impl AppBuilder {
             schedules,
             websocket_routes,
             validation_rules,
+            middlewares,
             observability,
         } = self;
 
@@ -430,6 +505,7 @@ impl AppBuilder {
                 prepared_plugins.config_defaults.clone(),
             )?,
         };
+        set_runtime_model_defaults(config.database()?.models.clone());
         crate::logging::init(&config)?;
 
         let container = Container::new();
@@ -447,7 +523,10 @@ impl AppBuilder {
         let seeder_registry = SeederRegistryBuilder::shared();
         let guard_registry = GuardRegistryBuilder::shared();
         let policy_registry = PolicyRegistryBuilder::shared();
+        let authenticatable_registry = AuthenticatableRegistryBuilder::shared();
         let readiness_registry = ReadinessRegistryBuilder::shared();
+        let storage_driver_registry = StorageDriverRegistryBuilder::shared();
+        let email_driver_registry = EmailDriverRegistryBuilder::shared();
         let mut registrar = ServiceRegistrar::new(
             container.clone(),
             config.clone(),
@@ -457,7 +536,10 @@ impl AppBuilder {
             seeder_registry.clone(),
             guard_registry.clone(),
             policy_registry.clone(),
+            authenticatable_registry.clone(),
             readiness_registry.clone(),
+            storage_driver_registry.clone(),
+            email_driver_registry.clone(),
         );
         for provider in &prepared_plugins.providers {
             provider.register(&mut registrar).await?;
@@ -466,20 +548,66 @@ impl AppBuilder {
             provider.register(&mut registrar).await?;
         }
 
-        let app = AppContext::new(container, config, rules);
+        // Register framework-internal jobs
+        registrar.register_job::<SendQueuedEmailJob>()?;
+        registrar.register_job::<crate::datatable::export_job::DatatableExportJob>()?;
+
+        let app = AppContext::new(container, config, rules)?;
         let database = Arc::new(DatabaseManager::from_config(&app.config().database()?).await?);
+
+        let auth_config = app.config().auth()?;
+        let backend = RuntimeBackend::from_config(app.config())?;
+        let backend_kind = backend.kind();
+        let jobs_config = app.config().jobs()?;
+        let redis = Arc::new(RedisManager::from_config(app.config())?);
+        app.container().singleton_arc(Arc::new(backend.clone()))?;
+
+        // Auto-register guard authenticators from config before freezing
+        let token_manager = Arc::new(crate::auth::token::TokenManager::new(
+            database.clone(),
+            auth_config.tokens.clone(),
+        ));
+        let session_manager = Arc::new(crate::auth::session::SessionManager::new(
+            redis.clone(),
+            auth_config.sessions.clone(),
+        ));
+        {
+            let mut guards = guard_registry.lock().expect("guard registry lock poisoned");
+            for (guard_name, driver_config) in &auth_config.guards {
+                if guards.contains(guard_name) {
+                    continue; // consumer-registered guard takes precedence
+                }
+                match driver_config.driver {
+                    crate::config::GuardDriver::Token => {
+                        guards.register_arc(
+                            GuardId::owned(guard_name.clone()),
+                            Arc::new(crate::auth::token::TokenAuthenticator::new(
+                                token_manager.clone(),
+                            )),
+                        )?;
+                    }
+                    crate::config::GuardDriver::Session => {
+                        guards.register_session(
+                            GuardId::owned(guard_name.clone()),
+                            session_manager.clone(),
+                        )?;
+                    }
+                    crate::config::GuardDriver::Custom => {}
+                }
+            }
+        }
+
         let auth_manager = Arc::new(AuthManager::new(
-            app.config().auth()?,
+            auth_config,
             GuardRegistryBuilder::freeze_shared(guard_registry),
         ));
         let authorizer = Arc::new(Authorizer::new(
             app.clone(),
             PolicyRegistryBuilder::freeze_shared(policy_registry),
         ));
-        let backend = RuntimeBackend::from_config(app.config())?;
-        let backend_kind = backend.kind();
-        let jobs_config = app.config().jobs()?;
-        app.container().singleton_arc(Arc::new(backend.clone()))?;
+        let authenticatable_registry = Arc::new(AuthenticatableRegistryBuilder::freeze_shared(
+            authenticatable_registry,
+        ));
         register_builtin_readiness_checks(&readiness_registry, backend_kind)?;
         let diagnostics = Arc::new(RuntimeDiagnostics::new(
             backend_kind,
@@ -502,12 +630,21 @@ impl AppBuilder {
         let migration_registry =
             Arc::new(MigrationRegistryBuilder::freeze_shared(migration_registry)?);
         let seeder_registry = Arc::new(SeederRegistryBuilder::freeze_shared(seeder_registry)?);
+        let datatable_registry = Arc::new(
+            crate::datatable::registry::DatatableRegistryBuilder::freeze_shared(
+                registrar.datatable_registry(),
+            ),
+        );
 
         app.container()
             .singleton_arc(prepared_plugins.registry.clone())?;
         app.container().singleton_arc(database)?;
+        app.container().singleton_arc(redis)?;
         app.container().singleton_arc(auth_manager)?;
         app.container().singleton_arc(authorizer)?;
+        app.container().singleton_arc(authenticatable_registry)?;
+        app.container().singleton_arc(token_manager)?;
+        app.container().singleton_arc(session_manager)?;
         app.container().singleton_arc(diagnostics.clone())?;
         app.container().singleton_arc(websocket_publisher)?;
         app.container().singleton_arc(event_bus)?;
@@ -515,6 +652,15 @@ impl AppBuilder {
         app.container().singleton_arc(job_dispatcher)?;
         app.container().singleton_arc(migration_registry)?;
         app.container().singleton_arc(seeder_registry)?;
+        app.container().singleton_arc(datatable_registry)?;
+
+        // Register i18n if configured
+        if let Ok(i18n_config) = app.config().i18n() {
+            if !i18n_config.resource_path.is_empty() {
+                let i18n_manager = crate::i18n::I18nManager::load(&i18n_config)?;
+                app.container().singleton_arc(Arc::new(i18n_manager))?;
+            }
+        }
 
         for provider in &prepared_plugins.providers {
             provider.boot(&app).await?;
@@ -525,6 +671,35 @@ impl AppBuilder {
         for provider in &providers {
             provider.boot(&app).await?;
         }
+
+        // Freeze storage driver registry and construct StorageManager
+        let custom_storage_drivers =
+            StorageDriverRegistryBuilder::freeze_shared(storage_driver_registry);
+        let storage =
+            Arc::new(StorageManager::from_config(app.config(), custom_storage_drivers).await?);
+        app.container().singleton_arc(storage)?;
+
+        // Freeze email driver registry and construct EmailManager
+        let custom_email_drivers = EmailDriverRegistryBuilder::freeze_shared(email_driver_registry);
+        let email = Arc::new(EmailManager::from_config(
+            app.config(),
+            custom_email_drivers,
+            app.clone(),
+        )?);
+        app.container().singleton_arc(email)?;
+
+        // Hash manager (argon2 password hashing)
+        let hashing_config = app.config().hashing()?;
+        let hash = Arc::new(HashManager::from_config(&hashing_config)?);
+        app.container().singleton_arc(hash)?;
+
+        // Crypt manager (AES-256-GCM encryption, optional)
+        let crypt_config = app.config().crypt()?;
+        if !crypt_config.key.is_empty() {
+            let crypt = Arc::new(CryptManager::from_config(&crypt_config)?);
+            app.container().singleton_arc(crypt)?;
+        }
+
         diagnostics.mark_bootstrap_complete();
 
         let mut boot_routes = prepared_plugins.routes;
@@ -552,6 +727,7 @@ impl AppBuilder {
             commands: boot_commands,
             schedules: boot_schedules,
             websocket_routes: boot_websocket_routes,
+            middlewares,
             observability,
         })
     }
@@ -575,6 +751,7 @@ struct BootArtifacts {
     commands: Vec<CommandRegistrar>,
     schedules: Vec<ScheduleRegistrar>,
     websocket_routes: Vec<WebSocketRouteRegistrar>,
+    middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
 }
 
@@ -690,5 +867,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(order.lock().unwrap().as_slice(), ["register", "boot"]);
+    }
+
+    #[tokio::test]
+    async fn app_context_resolves_redis_manager() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let redis = kernel.app().redis().unwrap();
+
+        assert_eq!(redis.namespace(), "forge");
     }
 }

@@ -4,12 +4,14 @@ use tokio::net::TcpListener;
 
 use crate::config::ServerConfig;
 use crate::foundation::{AppContext, Error, Result};
+use crate::http::middleware::MiddlewareConfig;
 use crate::http::{HttpRegistrar, RouteRegistrar};
 use crate::logging::ObservabilityOptions;
 
 pub struct HttpKernel {
     app: AppContext,
     routes: Vec<RouteRegistrar>,
+    middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
 }
 
@@ -17,11 +19,13 @@ impl HttpKernel {
     pub fn new(
         app: AppContext,
         routes: Vec<RouteRegistrar>,
+        middlewares: Vec<MiddlewareConfig>,
         observability: Option<ObservabilityOptions>,
     ) -> Self {
         Self {
             app,
             routes,
+            middlewares,
             observability,
         }
     }
@@ -42,7 +46,7 @@ impl HttpKernel {
                 options,
             )?;
         }
-        Ok(registrar.into_router(self.app.clone()))
+        Ok(registrar.into_router_with_middlewares(self.app.clone(), self.middlewares.clone()))
     }
 
     pub async fn bind(self) -> Result<BoundHttpServer> {

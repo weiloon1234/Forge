@@ -1,0 +1,10 @@
+error[E0308]: mismatched types
+ --> tests/ui/derive/fail_read_accessor_wrong_type.rs:1:10
+  |
+1 | #[derive(forge::Model)]
+  |          ^^^^^^^^^^^^ expected `String`, found `usize`
+...
+6 |     email: String,
+  |            ------ expected `String` because of return type
+  |
+  = note: this error originates in the derive macro `forge::Model` (in Nightly builds, run with -Z macro-backtrace for more info)

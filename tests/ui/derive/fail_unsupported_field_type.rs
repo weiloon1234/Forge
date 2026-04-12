@@ -5,8 +5,8 @@ use forge::prelude::*;
 #[derive(Clone, Debug, PartialEq)]
 struct CustomType;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = "users")]
+#[derive(forge::Model)]
+#[forge(model = "users", primary_key_strategy = "manual")]
 struct User {
     id: i64,
     custom: CustomType,

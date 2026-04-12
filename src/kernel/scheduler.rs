@@ -3,13 +3,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-
 use crate::foundation::{AppContext, Result};
 use crate::logging::SchedulerLeadershipState;
 use crate::scheduler::{cron_due, ScheduleKind, ScheduleRegistry, ScheduledTask};
 use crate::support::runtime::RuntimeBackend;
-use crate::support::ScheduleId;
+use crate::support::{DateTime, ScheduleId};
 
 pub struct SchedulerKernel {
     app: AppContext,
@@ -19,8 +17,8 @@ pub struct SchedulerKernel {
     leader_lease_ttl: Duration,
     owner_id: String,
     leader_active: AtomicBool,
-    last_tick: Mutex<Option<DateTime<Utc>>>,
-    last_interval_run: Mutex<HashMap<ScheduleId, DateTime<Utc>>>,
+    last_tick: Mutex<Option<DateTime>>,
+    last_interval_run: Mutex<HashMap<ScheduleId, DateTime>>,
 }
 
 impl SchedulerKernel {
@@ -45,14 +43,14 @@ impl SchedulerKernel {
     }
 
     pub async fn tick(&self) -> Result<Vec<ScheduleId>> {
-        self.tick_at(Utc::now()).await
+        self.tick_at(self.app.clock().now()).await
     }
 
     pub async fn run_once(&self) -> Result<Vec<ScheduleId>> {
-        self.run_once_at(Utc::now()).await
+        self.run_once_at(self.app.clock().now()).await
     }
 
-    pub async fn run_once_at(&self, now: DateTime<Utc>) -> Result<Vec<ScheduleId>> {
+    pub async fn run_once_at(&self, now: DateTime) -> Result<Vec<ScheduleId>> {
         if self.ensure_leadership().await? {
             return self.tick_at(now).await;
         }
@@ -60,7 +58,7 @@ impl SchedulerKernel {
         Ok(Vec::new())
     }
 
-    pub async fn tick_at(&self, now: DateTime<Utc>) -> Result<Vec<ScheduleId>> {
+    pub async fn tick_at(&self, now: DateTime) -> Result<Vec<ScheduleId>> {
         if let Ok(diagnostics) = self.app.diagnostics() {
             diagnostics.record_scheduler_tick();
         }
@@ -69,7 +67,7 @@ impl SchedulerKernel {
                 .last_tick
                 .lock()
                 .expect("scheduler tick mutex poisoned");
-            let previous = last_tick.unwrap_or_else(|| now - chrono::Duration::seconds(1));
+            let previous = last_tick.unwrap_or_else(|| now.sub_seconds(1));
             *last_tick = Some(now);
             previous
         };
@@ -80,6 +78,12 @@ impl SchedulerKernel {
                 ScheduleKind::Cron { expression } => {
                     if cron_due(expression, previous, now) {
                         (task.handler)(self.app.clone()).await?;
+                        tracing::info!(
+                            target: "forge.scheduler",
+                            schedule = %task.id,
+                            kind = "cron",
+                            "Schedule executed"
+                        );
                         if let Ok(diagnostics) = self.app.diagnostics() {
                             diagnostics.record_schedule_executed();
                         }
@@ -89,6 +93,13 @@ impl SchedulerKernel {
                 ScheduleKind::Interval { every } => {
                     if interval_due(&self.last_interval_run, &task.id, *every, now) {
                         (task.handler)(self.app.clone()).await?;
+                        tracing::info!(
+                            target: "forge.scheduler",
+                            schedule = %task.id,
+                            kind = "interval",
+                            interval_ms = every.as_millis() as u64,
+                            "Schedule executed"
+                        );
                         if let Ok(diagnostics) = self.app.diagnostics() {
                             diagnostics.record_schedule_executed();
                         }
@@ -125,6 +136,12 @@ impl SchedulerKernel {
             }
 
             self.leader_active.store(false, Ordering::Relaxed);
+            tracing::warn!(
+                target: "forge.scheduler",
+                state = "lost",
+                owner = %self.owner_id,
+                "Scheduler leadership lost"
+            );
             if let Ok(diagnostics) = self.app.diagnostics() {
                 diagnostics.record_scheduler_leadership(SchedulerLeadershipState::Lost);
             }
@@ -137,6 +154,12 @@ impl SchedulerKernel {
             .await?
         {
             self.leader_active.store(true, Ordering::Relaxed);
+            tracing::info!(
+                target: "forge.scheduler",
+                state = "acquired",
+                owner = %self.owner_id,
+                "Scheduler leadership acquired"
+            );
             if let Ok(diagnostics) = self.app.diagnostics() {
                 diagnostics.record_scheduler_leadership(SchedulerLeadershipState::Acquired);
             }
@@ -164,15 +187,15 @@ impl Drop for SchedulerKernel {
 }
 
 fn interval_due(
-    state: &Mutex<HashMap<ScheduleId, DateTime<Utc>>>,
+    state: &Mutex<HashMap<ScheduleId, DateTime>>,
     id: &ScheduleId,
     every: Duration,
-    now: DateTime<Utc>,
+    now: DateTime,
 ) -> bool {
     let mut state = state.lock().expect("scheduler interval mutex poisoned");
     match state.get(id).cloned() {
         Some(last_run) => {
-            if (now - last_run)
+            if (now.as_chrono() - last_run.as_chrono())
                 .to_std()
                 .map(|elapsed| elapsed >= every)
                 .unwrap_or(false)
@@ -194,7 +217,7 @@ fn next_owner_id() -> String {
     static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
     format!(
         "scheduler-{:x}-{:x}",
-        Utc::now().timestamp_micros(),
+        DateTime::now().timestamp_micros(),
         NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
     )
 }

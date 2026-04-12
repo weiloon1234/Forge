@@ -3,8 +3,8 @@ use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, Field, Fields, FieldsNamed, GenericArgument, Ident, LitStr,
-    Path, PathArguments, Type,
+    Attribute, Data, DeriveInput, Expr, Field, Fields, FieldsNamed, GenericArgument, Ident,
+    LitBool, LitStr, Path, PathArguments, Type,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +121,10 @@ impl DbTypeSpec {
 pub struct ModelArgs {
     pub model: Option<Expr>,
     pub primary_key: Option<LitStr>,
+    pub primary_key_strategy: Option<LitStr>,
     pub lifecycle: Option<Path>,
+    pub timestamps: Option<LitBool>,
+    pub soft_deletes: Option<LitBool>,
 }
 
 #[derive(Default, Clone)]
@@ -130,6 +133,8 @@ pub struct FieldArgs {
     pub alias: Option<LitStr>,
     pub source: Option<LitStr>,
     pub db_type: Option<DbTypeSpec>,
+    pub write_mutator: Option<LitStr>,
+    pub read_accessor: Option<LitStr>,
 }
 
 pub fn ensure_named_struct(input: &DeriveInput) -> syn::Result<&FieldsNamed> {
@@ -164,8 +169,18 @@ pub fn parse_model_args(attrs: &[Attribute]) -> syn::Result<ModelArgs> {
                 set_once_expr(&mut args.model, "model", meta.value()?)?;
             } else if meta.path.is_ident("primary_key") {
                 set_once_parse(&mut args.primary_key, "primary_key", meta.value()?)?;
+            } else if meta.path.is_ident("primary_key_strategy") {
+                set_once_parse(
+                    &mut args.primary_key_strategy,
+                    "primary_key_strategy",
+                    meta.value()?,
+                )?;
             } else if meta.path.is_ident("lifecycle") {
                 set_once_parse(&mut args.lifecycle, "lifecycle", meta.value()?)?;
+            } else if meta.path.is_ident("timestamps") {
+                set_once_parse(&mut args.timestamps, "timestamps", meta.value()?)?;
+            } else if meta.path.is_ident("soft_deletes") {
+                set_once_parse(&mut args.soft_deletes, "soft_deletes", meta.value()?)?;
             } else {
                 return Err(meta.error("unsupported forge attribute for Model derive"));
             }
@@ -195,6 +210,10 @@ pub fn parse_field_args(field: &Field) -> syn::Result<FieldArgs> {
                 set_once_parse(&mut lit, "db_type", meta.value()?)?;
                 let lit = lit.ok_or_else(|| meta.error("db_type requires a string value"))?;
                 args.db_type = Some(DbTypeSpec::from_lit(&lit)?);
+            } else if meta.path.is_ident("write_mutator") {
+                set_once_parse(&mut args.write_mutator, "write_mutator", meta.value()?)?;
+            } else if meta.path.is_ident("read_accessor") {
+                set_once_parse(&mut args.read_accessor, "read_accessor", meta.value()?)?;
             } else {
                 return Err(meta.error("unsupported forge field attribute"));
             }
@@ -266,23 +285,22 @@ pub fn infer_db_type(ty: &Type) -> Option<DbTypeSpec> {
     if type_path_ends_with(ty, &["serde_json", "Value"]) {
         return Some(DbTypeSpec::Json);
     }
+    if type_argument_if_last_segment_ident(ty, "ModelId").is_some() {
+        return Some(DbTypeSpec::Uuid);
+    }
     if type_path_ends_with(ty, &["uuid", "Uuid"]) || type_path_ends_with(ty, &["Uuid"]) {
         return Some(DbTypeSpec::Uuid);
     }
-    if type_path_ends_with(ty, &["chrono", "DateTime"]) || type_path_ends_with(ty, &["DateTime"]) {
+    if type_path_non_generic_ends_with(ty, &["DateTime"]) {
         return Some(DbTypeSpec::TimestampTz);
     }
-    if type_path_ends_with(ty, &["chrono", "NaiveDateTime"])
-        || type_path_ends_with(ty, &["NaiveDateTime"])
-    {
+    if type_path_non_generic_ends_with(ty, &["LocalDateTime"]) {
         return Some(DbTypeSpec::Timestamp);
     }
-    if type_path_ends_with(ty, &["chrono", "NaiveDate"]) || type_path_ends_with(ty, &["NaiveDate"])
-    {
+    if type_path_non_generic_ends_with(ty, &["Date"]) {
         return Some(DbTypeSpec::Date);
     }
-    if type_path_ends_with(ty, &["chrono", "NaiveTime"]) || type_path_ends_with(ty, &["NaiveTime"])
-    {
+    if type_path_non_generic_ends_with(ty, &["Time"]) {
         return Some(DbTypeSpec::Time);
     }
 
@@ -431,7 +449,7 @@ fn set_once_expr(slot: &mut Option<Expr>, name: &str, value: ParseStream<'_>) ->
     Ok(())
 }
 
-fn type_argument_if_last_segment_ident<'a>(ty: &'a Type, ident: &str) -> Option<&'a Type> {
+pub fn type_argument_if_last_segment_ident<'a>(ty: &'a Type, ident: &str) -> Option<&'a Type> {
     let Type::Path(type_path) = ty else {
         return None;
     };
@@ -446,6 +464,18 @@ fn type_argument_if_last_segment_ident<'a>(ty: &'a Type, ident: &str) -> Option<
         return None;
     };
     Some(inner)
+}
+
+pub fn type_path_last_segment_matches(ty: &Type, expected: &str) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident == expected)
+        .unwrap_or(false)
 }
 
 fn type_path_matches(ty: &Type, expected: &[&str]) -> bool {
@@ -482,4 +512,17 @@ fn type_path_ends_with(ty: &Type, expected_tail: &[&str]) -> bool {
         .iter()
         .map(String::as_str)
         .eq(expected_tail.iter().copied())
+}
+
+fn type_path_non_generic_ends_with(ty: &Type, expected_tail: &[&str]) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(last) = type_path.path.segments.last() else {
+        return false;
+    };
+    if !matches!(last.arguments, PathArguments::None) {
+        return false;
+    }
+    type_path_ends_with(ty, expected_tail)
 }

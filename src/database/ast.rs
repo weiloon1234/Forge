@@ -1,10 +1,10 @@
 use std::fmt;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::foundation::{Error, Result};
+use crate::support::{Date, DateTime, LocalDateTime, ModelId, Time};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Numeric(String);
@@ -199,10 +199,10 @@ pub enum DbValue {
     Text(String),
     Json(serde_json::Value),
     Uuid(Uuid),
-    TimestampTz(DateTime<Utc>),
-    Timestamp(NaiveDateTime),
-    Date(NaiveDate),
-    Time(NaiveTime),
+    TimestampTz(DateTime),
+    Timestamp(LocalDateTime),
+    Date(Date),
+    Time(Time),
     Bytea(Vec<u8>),
     Int16Array(Vec<i16>),
     Int32Array(Vec<i32>),
@@ -214,10 +214,10 @@ pub enum DbValue {
     TextArray(Vec<String>),
     JsonArray(Vec<serde_json::Value>),
     UuidArray(Vec<Uuid>),
-    TimestampTzArray(Vec<DateTime<Utc>>),
-    TimestampArray(Vec<NaiveDateTime>),
-    DateArray(Vec<NaiveDate>),
-    TimeArray(Vec<NaiveTime>),
+    TimestampTzArray(Vec<DateTime>),
+    TimestampArray(Vec<LocalDateTime>),
+    DateArray(Vec<Date>),
+    TimeArray(Vec<Time>),
     ByteaArray(Vec<Vec<u8>>),
 }
 
@@ -365,26 +365,32 @@ impl From<Uuid> for DbValue {
     }
 }
 
-impl From<DateTime<Utc>> for DbValue {
-    fn from(value: DateTime<Utc>) -> Self {
+impl<M> From<ModelId<M>> for DbValue {
+    fn from(value: ModelId<M>) -> Self {
+        Self::Uuid(value.into_uuid())
+    }
+}
+
+impl From<DateTime> for DbValue {
+    fn from(value: DateTime) -> Self {
         Self::TimestampTz(value)
     }
 }
 
-impl From<NaiveDateTime> for DbValue {
-    fn from(value: NaiveDateTime) -> Self {
+impl From<LocalDateTime> for DbValue {
+    fn from(value: LocalDateTime) -> Self {
         Self::Timestamp(value)
     }
 }
 
-impl From<NaiveDate> for DbValue {
-    fn from(value: NaiveDate) -> Self {
+impl From<Date> for DbValue {
+    fn from(value: Date) -> Self {
         Self::Date(value)
     }
 }
 
-impl From<NaiveTime> for DbValue {
-    fn from(value: NaiveTime) -> Self {
+impl From<Time> for DbValue {
+    fn from(value: Time) -> Self {
         Self::Time(value)
     }
 }
@@ -455,26 +461,32 @@ impl From<Vec<Uuid>> for DbValue {
     }
 }
 
-impl From<Vec<DateTime<Utc>>> for DbValue {
-    fn from(value: Vec<DateTime<Utc>>) -> Self {
+impl<M> From<Vec<ModelId<M>>> for DbValue {
+    fn from(value: Vec<ModelId<M>>) -> Self {
+        Self::UuidArray(value.into_iter().map(ModelId::into_uuid).collect())
+    }
+}
+
+impl From<Vec<DateTime>> for DbValue {
+    fn from(value: Vec<DateTime>) -> Self {
         Self::TimestampTzArray(value)
     }
 }
 
-impl From<Vec<NaiveDateTime>> for DbValue {
-    fn from(value: Vec<NaiveDateTime>) -> Self {
+impl From<Vec<LocalDateTime>> for DbValue {
+    fn from(value: Vec<LocalDateTime>) -> Self {
         Self::TimestampArray(value)
     }
 }
 
-impl From<Vec<NaiveDate>> for DbValue {
-    fn from(value: Vec<NaiveDate>) -> Self {
+impl From<Vec<Date>> for DbValue {
+    fn from(value: Vec<Date>) -> Self {
         Self::DateArray(value)
     }
 }
 
-impl From<Vec<NaiveTime>> for DbValue {
-    fn from(value: Vec<NaiveTime>) -> Self {
+impl From<Vec<Time>> for DbValue {
+    fn from(value: Vec<Time>) -> Self {
         Self::TimeArray(value)
     }
 }
@@ -995,6 +1007,8 @@ pub enum ComparisonOp {
     Gte,
     Lt,
     Lte,
+    Like,
+    NotLike,
 }
 
 impl fmt::Display for ComparisonOp {
@@ -1006,6 +1020,8 @@ impl fmt::Display for ComparisonOp {
             Self::Gte => ">=",
             Self::Lt => "<",
             Self::Lte => "<=",
+            Self::Like => "LIKE",
+            Self::NotLike => "NOT LIKE",
         })
     }
 }

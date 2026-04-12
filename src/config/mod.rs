@@ -8,12 +8,26 @@ use serde::Deserialize;
 use toml::Value;
 
 use crate::foundation::{Error, Result};
-use crate::logging::LogLevel;
-use crate::support::{GuardId, QueueId};
+use crate::logging::{LogFormat, LogLevel};
+use crate::support::{GuardId, QueueId, Timezone};
 
 #[derive(Clone, Debug)]
 pub struct ConfigRepository {
     root: Arc<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct AppConfig {
+    pub timezone: Timezone,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            timezone: Timezone::utc(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -50,6 +64,22 @@ impl Default for RedisConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+pub struct DatabaseModelConfig {
+    pub timestamps_default: bool,
+    pub soft_deletes_default: bool,
+}
+
+impl Default for DatabaseModelConfig {
+    fn default() -> Self {
+        Self {
+            timestamps_default: true,
+            soft_deletes_default: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct DatabaseConfig {
     pub url: String,
     pub schema: String,
@@ -59,6 +89,7 @@ pub struct DatabaseConfig {
     pub min_connections: u32,
     pub max_connections: u32,
     pub acquire_timeout_ms: u64,
+    pub models: DatabaseModelConfig,
 }
 
 impl Default for DatabaseConfig {
@@ -72,6 +103,7 @@ impl Default for DatabaseConfig {
             min_connections: 1,
             max_connections: 10,
             acquire_timeout_ms: 5_000,
+            models: DatabaseModelConfig::default(),
         }
     }
 }
@@ -137,6 +169,10 @@ impl Default for SchedulerConfig {
 pub struct AuthConfig {
     pub default_guard: GuardId,
     pub bearer_prefix: String,
+    pub tokens: TokenConfig,
+    pub sessions: SessionConfig,
+    #[serde(default)]
+    pub guards: std::collections::HashMap<String, GuardDriverConfig>,
 }
 
 impl Default for AuthConfig {
@@ -144,20 +180,100 @@ impl Default for AuthConfig {
         Self {
             default_guard: GuardId::new("api"),
             bearer_prefix: "Bearer".to_string(),
+            tokens: TokenConfig::default(),
+            sessions: SessionConfig::default(),
+            guards: std::collections::HashMap::new(),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+pub struct TokenConfig {
+    pub access_token_ttl_minutes: u64,
+    pub refresh_token_ttl_days: u64,
+    pub token_length: usize,
+    pub rotate_refresh_tokens: bool,
+}
+
+impl Default for TokenConfig {
+    fn default() -> Self {
+        Self {
+            access_token_ttl_minutes: 15,
+            refresh_token_ttl_days: 30,
+            token_length: 32,
+            rotate_refresh_tokens: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    pub ttl_minutes: u64,
+    pub cookie_name: String,
+    pub cookie_secure: bool,
+    pub cookie_path: String,
+    pub sliding_expiry: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            ttl_minutes: 120,
+            cookie_name: "forge_session".to_string(),
+            cookie_secure: true,
+            cookie_path: "/".to_string(),
+            sliding_expiry: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GuardDriverConfig {
+    pub driver: GuardDriver,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuardDriver {
+    Token,
+    Session,
+    Custom,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     pub level: LogLevel,
+    pub format: LogFormat,
+    pub log_dir: String,
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: LogLevel::Info,
+            format: LogFormat::default(),
+            log_dir: "logs".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct I18nConfig {
+    pub default_locale: String,
+    pub fallback_locale: String,
+    pub resource_path: String,
+}
+
+impl Default for I18nConfig {
+    fn default() -> Self {
+        Self {
+            default_locale: "en".to_string(),
+            fallback_locale: "en".to_string(),
+            resource_path: "locales".to_string(),
         }
     }
 }
@@ -174,6 +290,45 @@ impl Default for ObservabilityConfig {
             base_path: "/_forge".to_string(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HashingConfig {
+    pub driver: String,
+    #[serde(default = "default_memory_cost")]
+    pub memory_cost: u32,
+    #[serde(default = "default_time_cost")]
+    pub time_cost: u32,
+    #[serde(default = "default_parallelism")]
+    pub parallelism: u32,
+}
+
+fn default_memory_cost() -> u32 {
+    19456
+}
+fn default_time_cost() -> u32 {
+    2
+}
+fn default_parallelism() -> u32 {
+    1
+}
+
+impl Default for HashingConfig {
+    fn default() -> Self {
+        Self {
+            driver: "argon2".to_string(),
+            memory_cost: default_memory_cost(),
+            time_cost: default_time_cost(),
+            parallelism: default_parallelism(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct CryptConfig {
+    pub key: String,
 }
 
 impl Default for ConfigRepository {
@@ -278,6 +433,10 @@ impl ConfigRepository {
         self.section("server")
     }
 
+    pub fn app(&self) -> Result<AppConfig> {
+        self.section("app")
+    }
+
     pub fn redis(&self) -> Result<RedisConfig> {
         self.section("redis")
     }
@@ -306,8 +465,28 @@ impl ConfigRepository {
         self.section("logging")
     }
 
+    pub fn i18n(&self) -> Result<I18nConfig> {
+        self.section("i18n")
+    }
+
     pub fn observability(&self) -> Result<ObservabilityConfig> {
         self.section("observability")
+    }
+
+    pub fn storage(&self) -> Result<crate::storage::StorageConfig> {
+        self.section("storage")
+    }
+
+    pub fn email(&self) -> Result<crate::email::config::EmailConfig> {
+        self.section("email")
+    }
+
+    pub fn hashing(&self) -> Result<HashingConfig> {
+        self.section("hashing")
+    }
+
+    pub fn crypt(&self) -> Result<CryptConfig> {
+        self.section("crypt")
     }
 }
 
@@ -410,10 +589,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig, LoggingConfig,
+        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig, LoggingConfig,
         ObservabilityConfig, RedisConfig, SchedulerConfig, WebSocketConfig,
     };
-    use crate::logging::LogLevel;
+    use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -449,6 +628,57 @@ mod tests {
 
         assert_eq!(server.host, "127.0.0.1");
         assert_eq!(server.port, 4001);
+    }
+
+    #[test]
+    fn parses_app_timezone_config_section() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-app.toml"),
+            r#"
+                [app]
+                timezone = "Asia/Kuala_Lumpur"
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let app: AppConfig = config.app().unwrap();
+
+        assert_eq!(app.timezone.to_string(), "Asia/Kuala_Lumpur");
+    }
+
+    #[test]
+    fn overlays_app_timezone_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("APP__TIMEZONE", "Asia/Tokyo");
+
+        let config = ConfigRepository::with_env_overlay_only().unwrap();
+        let app = config.app().unwrap();
+
+        std::env::remove_var("APP__TIMEZONE");
+
+        assert_eq!(app.timezone.to_string(), "Asia/Tokyo");
+    }
+
+    #[test]
+    fn rejects_invalid_app_timezone() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-app.toml"),
+            r#"
+                [app]
+                timezone = "Mars/Olympus"
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let error = config.app().unwrap_err();
+
+        assert!(error.to_string().contains("invalid timezone"));
     }
 
     #[test]
@@ -523,6 +753,8 @@ mod tests {
         assert_eq!(database.migrations_path, "database/migrations");
         assert_eq!(database.seeders_path, "database/seeders");
         assert_eq!(database.max_connections, 2);
+        assert!(database.models.timestamps_default);
+        assert!(!database.models.soft_deletes_default);
         assert_eq!(redis.url, "redis://127.0.0.1/");
         assert_eq!(redis.namespace, "forge-tests");
         assert_eq!(websocket.path, "/realtime");
@@ -592,6 +824,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_database_model_defaults() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-database.toml"),
+            r#"
+                [database.models]
+                timestamps_default = false
+                soft_deletes_default = true
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let database: DatabaseConfig = config.database().unwrap();
+
+        assert!(!database.models.timestamps_default);
+        assert!(database.models.soft_deletes_default);
+    }
+
+    #[test]
     fn parses_logging_config_section() {
         let _guard = env_lock().lock().unwrap();
         let directory = tempdir().unwrap();
@@ -627,5 +880,40 @@ mod tests {
         let observability: ObservabilityConfig = config.observability().unwrap();
 
         assert_eq!(observability.base_path, "/_ops");
+    }
+
+    #[test]
+    fn parses_logging_config_with_format_and_log_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-logging.toml"),
+            r#"
+                [logging]
+                level = "debug"
+                format = "json"
+                log_dir = "var/log"
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let logging: LoggingConfig = config.logging().unwrap();
+
+        assert_eq!(logging.level, LogLevel::Debug);
+        assert_eq!(logging.format, LogFormat::Json);
+        assert_eq!(logging.log_dir, "var/log");
+    }
+
+    #[test]
+    fn logging_config_defaults_to_json_with_logs_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let logging: LoggingConfig = config.logging().unwrap();
+
+        assert_eq!(logging.level, LogLevel::Info);
+        assert_eq!(logging.format, LogFormat::Json);
+        assert_eq!(logging.log_dir, "logs");
     }
 }

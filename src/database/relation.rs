@@ -21,12 +21,21 @@ const RELATION_AGGREGATE_ALIAS: &str = "__forge_relation_aggregate";
 const PIVOT_ALIAS_PREFIX: &str = "__forge_pivot_";
 
 #[async_trait]
-pub(crate) trait RelationLoader<From>: Send + Sync {
+pub trait RelationLoader<From: Send>: Send + Sync {
+    /// Returns the relation node metadata.
     fn node(&self) -> RelationNode;
+    /// Batch-loads related models onto the given parent slice in-place.
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()>;
+
+    /// Like `load`, but skips parents where the relation is already loaded.
+    /// Falls back to `load` if no `is_loaded` checker is configured.
+    async fn load_missing(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
+        self.load(executor, parents).await
+    }
 }
 
-pub(crate) type AnyRelation<M> = Arc<dyn RelationLoader<M>>;
+/// Type-erased relation loader: `Arc<dyn RelationLoader<M>>`.
+pub type AnyRelation<M> = Arc<dyn RelationLoader<M>>;
 
 #[async_trait]
 pub(crate) trait RelationAggregateLoader<From>: Send + Sync {
@@ -37,6 +46,7 @@ pub(crate) trait RelationAggregateLoader<From>: Send + Sync {
 pub(crate) type AnyRelationAggregate<M> = Arc<dyn RelationAggregateLoader<M>>;
 
 type ParentKeyFn<From> = dyn Fn(&From) -> Option<DbValue> + Send + Sync;
+type IsLoadedFn<From> = dyn Fn(&From) -> bool + Send + Sync;
 type AttachManyFn<From, To> = dyn Fn(&mut From, Vec<To>) + Send + Sync;
 type AttachOneFn<From, To> = dyn Fn(&mut From, Option<To>) + Send + Sync;
 type AttachAggregateFn<From, Value> = dyn Fn(&mut From, Value) + Send + Sync;
@@ -51,13 +61,14 @@ type AnyPivotAttacher<To> = Arc<dyn PivotAttacher<To>>;
 
 #[derive(Clone)]
 pub struct RelationDef<From, To: 'static> {
-    name: &'static str,
+    name: String,
     kind: RelationKind,
     parent_column: ColumnRef,
     target_column: ColumnRef,
     target_table: &'static super::model::TableMeta<To>,
     parent_key: Arc<ParentKeyFn<From>>,
     attach: RelationAttach<From, To>,
+    is_loaded: Option<Arc<IsLoadedFn<From>>>,
     filter: Option<Condition>,
     children: Vec<AnyRelation<To>>,
     child_aggregates: Vec<AnyRelationAggregate<To>>,
@@ -71,7 +82,7 @@ enum RelationAttach<From, To> {
 
 #[derive(Clone)]
 pub struct ManyToManyDef<From, To: 'static, Pivot: 'static = ()> {
-    name: &'static str,
+    name: String,
     parent_column: ColumnRef,
     pivot_table: TableRef,
     pivot_parent_column: ColumnRef,
@@ -80,6 +91,7 @@ pub struct ManyToManyDef<From, To: 'static, Pivot: 'static = ()> {
     target_table: &'static super::model::TableMeta<To>,
     parent_key: Arc<ParentKeyFn<From>>,
     attach: Arc<AttachManyFn<From, To>>,
+    is_loaded: Option<Arc<IsLoadedFn<From>>>,
     filter: Option<Condition>,
     children: Vec<AnyRelation<To>>,
     child_aggregates: Vec<AnyRelationAggregate<To>>,
@@ -182,6 +194,11 @@ where
     From: Model,
     To: Model,
 {
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
     pub fn with<Child>(mut self, child: RelationDef<To, Child>) -> Self
     where
         Child: Model,
@@ -206,6 +223,11 @@ where
 
     pub fn where_(mut self, condition: Condition) -> Self {
         self.filter = merge_condition(self.filter.take(), condition);
+        self
+    }
+
+    pub fn is_loaded(mut self, f: impl Fn(&From) -> bool + Send + Sync + 'static) -> Self {
+        self.is_loaded = Some(Arc::new(f));
         self
     }
 
@@ -297,7 +319,7 @@ where
 
     pub fn node(&self) -> RelationNode {
         RelationNode {
-            name: self.name.to_string(),
+            name: self.name.clone(),
             kind: self.kind,
             target: self.target_table.table_ref(),
             local_key: self.parent_column.clone(),
@@ -347,6 +369,11 @@ where
     To: Model,
     Pivot: Clone + Send + Sync + 'static,
 {
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
     pub fn with<Child>(mut self, child: RelationDef<To, Child>) -> Self
     where
         Child: Model,
@@ -377,6 +404,11 @@ where
         self
     }
 
+    pub fn is_loaded(mut self, f: impl Fn(&From) -> bool + Send + Sync + 'static) -> Self {
+        self.is_loaded = Some(Arc::new(f));
+        self
+    }
+
     pub fn with_pivot<NewPivot>(
         self,
         meta: &'static ProjectionMeta<NewPivot>,
@@ -395,6 +427,7 @@ where
             target_table: self.target_table,
             parent_key: self.parent_key,
             attach: self.attach,
+            is_loaded: self.is_loaded,
             filter: self.filter,
             children: self.children,
             child_aggregates: self.child_aggregates,
@@ -494,7 +527,7 @@ where
 
     pub fn node(&self) -> RelationNode {
         RelationNode {
-            name: self.name.to_string(),
+            name: self.name.clone(),
             kind: RelationKind::ManyToMany,
             target: self.target_table.table_ref(),
             local_key: self.parent_column.clone(),
@@ -614,6 +647,90 @@ where
 
         Ok(())
     }
+
+    async fn load_missing(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
+        let is_loaded_fn = match &self.is_loaded {
+            Some(f) => f,
+            None => return self.load(executor, parents).await,
+        };
+
+        // Find indices of parents that need loading
+        let unloaded_indices: Vec<usize> = parents
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !is_loaded_fn(p))
+            .map(|(i, _)| i)
+            .collect();
+
+        if unloaded_indices.is_empty() {
+            return Ok(());
+        }
+
+        // Collect keys only from unloaded parents (with dedup)
+        let mut keys = Vec::new();
+        let mut seen = BTreeSet::new();
+        for &i in &unloaded_indices {
+            if let Some(key) = (self.parent_key)(&parents[i]) {
+                if seen.insert(key.relation_key()) {
+                    keys.push(key);
+                }
+            }
+        }
+
+        // Query (same logic as load)
+        let child_entries = if keys.is_empty() {
+            Vec::new()
+        } else {
+            let mut query = ModelQuery::new(self.target_table).where_(Condition::InList {
+                expr: Expr::column(self.target_column.clone()),
+                values: keys,
+            });
+            if let Some(filter) = self.filter.clone() {
+                query = query.where_(filter);
+            }
+            for child in &self.children {
+                query = query.with_boxed(child.clone());
+            }
+            for aggregate in &self.child_aggregates {
+                query = query.with_aggregate_boxed(aggregate.clone());
+            }
+            query.fetch_entries_dyn(executor).await?
+        };
+
+        // Group (same logic as load)
+        let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
+        for (record, model) in child_entries {
+            let key = record
+                .get(&self.target_column.name)
+                .ok_or_else(|| {
+                    Error::message(format!(
+                        "missing target relation key `{}` in eager-loaded record",
+                        self.target_column.name
+                    ))
+                })?
+                .relation_key();
+            grouped.entry(key).or_default().push(model);
+        }
+
+        // Attach only to unloaded parents
+        for &i in &unloaded_indices {
+            let parent = &mut parents[i];
+            let values = (self.parent_key)(parent)
+                .map(|key| {
+                    grouped
+                        .get(&key.relation_key())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            match &self.attach {
+                RelationAttach::Many(attach) => attach(parent, values),
+                RelationAttach::One(attach) => attach(parent, values.into_iter().next()),
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -697,6 +814,119 @@ where
         }
 
         for parent in parents.iter_mut() {
+            let children = (self.parent_key)(parent)
+                .map(|key| {
+                    grouped
+                        .get(&key.relation_key())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            (self.attach)(parent, children);
+        }
+
+        Ok(())
+    }
+
+    async fn load_missing(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
+        let is_loaded_fn = match &self.is_loaded {
+            Some(f) => f,
+            None => return self.load(executor, parents).await,
+        };
+
+        let unloaded_indices: Vec<usize> = parents
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !is_loaded_fn(p))
+            .map(|(i, _)| i)
+            .collect();
+
+        if unloaded_indices.is_empty() {
+            return Ok(());
+        }
+
+        // Collect keys only from unloaded parents
+        let mut keys = Vec::new();
+        let mut seen = BTreeSet::new();
+        for &i in &unloaded_indices {
+            if let Some(key) = (self.parent_key)(&parents[i]) {
+                if seen.insert(key.relation_key()) {
+                    keys.push(key);
+                }
+            }
+        }
+
+        if keys.is_empty() {
+            for &i in &unloaded_indices {
+                let parent = &mut parents[i];
+                (self.attach)(parent, Vec::new());
+            }
+            return Ok(());
+        }
+
+        // Same query logic as load
+        let mut select = SelectNode::from(self.target_table.table_ref());
+        select.columns = self.target_table.all_select_items();
+        select.columns.push(
+            SelectItem::new(Expr::column(self.pivot_parent_column.clone()))
+                .aliased(RELATION_GROUP_KEY_ALIAS),
+        );
+        if let Some(pivot_attacher) = &self.pivot_attacher {
+            select
+                .columns
+                .extend(pivot_attacher.select_items(&self.pivot_table.name)?);
+        }
+        select.joins.push(JoinNode {
+            kind: JoinKind::Inner,
+            table: self.pivot_table.clone().into(),
+            lateral: false,
+            on: Some(Condition::compare(
+                Expr::column(self.target_column.clone()),
+                ComparisonOp::Eq,
+                Expr::column(self.pivot_target_column.clone()),
+            )),
+        });
+        let condition = Condition::InList {
+            expr: Expr::column(self.pivot_parent_column.clone()),
+            values: keys,
+        };
+        select.condition = Some(match self.filter.clone() {
+            Some(filter) => Condition::and([filter, condition]),
+            None => condition,
+        });
+
+        let compiled = PostgresCompiler::compile(&QueryAst::select(select))?;
+        let records = executor.query_records(&compiled).await?;
+        let mut models = records
+            .iter()
+            .map(|record| self.target_table.hydrate_record(record))
+            .collect::<Result<Vec<_>>>()?;
+
+        if let Some(pivot_attacher) = &self.pivot_attacher {
+            for (record, model) in records.iter().zip(models.iter_mut()) {
+                pivot_attacher.attach(record, model)?;
+            }
+        }
+
+        for child in &self.children {
+            child.load(executor, &mut models).await?;
+        }
+        for aggregate in &self.child_aggregates {
+            aggregate.load(executor, &mut models).await?;
+        }
+
+        let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
+        for (record, model) in records.into_iter().zip(models.into_iter()) {
+            let key = record
+                .get(RELATION_GROUP_KEY_ALIAS)
+                .ok_or_else(|| Error::message("missing many-to-many group key in record"))?
+                .relation_key();
+            grouped.entry(key).or_default().push(model);
+        }
+
+        // Attach only to unloaded parents
+        for &i in &unloaded_indices {
+            let parent = &mut parents[i];
             let children = (self.parent_key)(parent)
                 .map(|key| {
                     grouped
@@ -849,7 +1079,6 @@ where
 }
 
 pub fn has_many<From, To, Key>(
-    name: &'static str,
     local_key: Column<From, Key>,
     foreign_key: Column<To, Key>,
     parent_key: fn(&From) -> Key,
@@ -861,13 +1090,14 @@ where
     Key: ToDbValue + 'static,
 {
     RelationDef {
-        name,
+        name: infer_collection_relation_name(To::table_meta().name()),
         kind: RelationKind::HasMany,
         parent_column: local_key.column_ref(),
         target_column: foreign_key.column_ref(),
         target_table: To::table_meta(),
         parent_key: Arc::new(move |parent| Some(parent_key(parent).to_db_value())),
         attach: RelationAttach::Many(Arc::new(attach)),
+        is_loaded: None,
         filter: None,
         children: Vec::new(),
         child_aggregates: Vec::new(),
@@ -875,7 +1105,6 @@ where
 }
 
 pub fn has_one<From, To, Key>(
-    name: &'static str,
     local_key: Column<From, Key>,
     foreign_key: Column<To, Key>,
     parent_key: fn(&From) -> Key,
@@ -887,13 +1116,14 @@ where
     Key: ToDbValue + 'static,
 {
     RelationDef {
-        name,
+        name: infer_singular_relation_name(To::table_meta().name()),
         kind: RelationKind::HasOne,
         parent_column: local_key.column_ref(),
         target_column: foreign_key.column_ref(),
         target_table: To::table_meta(),
         parent_key: Arc::new(move |parent| Some(parent_key(parent).to_db_value())),
         attach: RelationAttach::One(Arc::new(attach)),
+        is_loaded: None,
         filter: None,
         children: Vec::new(),
         child_aggregates: Vec::new(),
@@ -901,7 +1131,6 @@ where
 }
 
 pub fn belongs_to<From, To, Key>(
-    name: &'static str,
     foreign_key: Column<From, Key>,
     owner_key: Column<To, Key>,
     parent_key: fn(&From) -> Option<Key>,
@@ -913,13 +1142,14 @@ where
     Key: ToDbValue + 'static,
 {
     RelationDef {
-        name,
+        name: infer_singular_relation_name(To::table_meta().name()),
         kind: RelationKind::BelongsTo,
         parent_column: foreign_key.column_ref(),
         target_column: owner_key.column_ref(),
         target_table: To::table_meta(),
         parent_key: Arc::new(move |parent| parent_key(parent).map(ToDbValue::to_db_value)),
         attach: RelationAttach::One(Arc::new(attach)),
+        is_loaded: None,
         filter: None,
         children: Vec::new(),
         child_aggregates: Vec::new(),
@@ -927,24 +1157,24 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn many_to_many<From, To, Pivot, Key>(
-    name: &'static str,
-    local_key: Column<From, Key>,
+pub fn many_to_many<From, To, Pivot, LocalKey, TargetKey>(
+    local_key: Column<From, LocalKey>,
     pivot_table: &'static str,
     pivot_local_key: &'static str,
     pivot_related_key: &'static str,
-    target_key: Column<To, Key>,
-    parent_key: fn(&From) -> Key,
+    target_key: Column<To, TargetKey>,
+    parent_key: fn(&From) -> LocalKey,
     attach: fn(&mut From, Vec<To>),
 ) -> ManyToManyDef<From, To, Pivot>
 where
     From: Model,
     To: Model,
-    Key: ToDbValue + 'static,
+    LocalKey: ToDbValue + 'static,
+    TargetKey: 'static,
     Pivot: Clone + Send + Sync + 'static,
 {
     ManyToManyDef {
-        name,
+        name: infer_collection_relation_name(To::table_meta().name()),
         parent_column: local_key.column_ref(),
         pivot_table: TableRef::new(pivot_table),
         pivot_parent_column: ColumnRef::new(pivot_table, pivot_local_key)
@@ -955,12 +1185,45 @@ where
         target_table: To::table_meta(),
         parent_key: Arc::new(move |parent| Some(parent_key(parent).to_db_value())),
         attach: Arc::new(attach),
+        is_loaded: None,
         filter: None,
         children: Vec::new(),
         child_aggregates: Vec::new(),
         pivot_attacher: None,
         _pivot: PhantomData,
     }
+}
+
+fn infer_collection_relation_name(table_name: &str) -> String {
+    relation_basename(table_name).to_string()
+}
+
+fn infer_singular_relation_name(table_name: &str) -> String {
+    singularize_relation_name(relation_basename(table_name))
+}
+
+fn relation_basename(table_name: &str) -> &str {
+    table_name.rsplit('.').next().unwrap_or(table_name)
+}
+
+fn singularize_relation_name(name: &str) -> String {
+    if let Some(stem) = name.strip_suffix("ies") {
+        return format!("{stem}y");
+    }
+
+    for suffix in ["sses", "shes", "ches", "xes", "zes"] {
+        if let Some(stem) = name.strip_suffix(suffix) {
+            return format!("{stem}{}", &suffix[..suffix.len() - 2]);
+        }
+    }
+
+    if let Some(stem) = name.strip_suffix('s') {
+        if !stem.ends_with('s') {
+            return stem.to_string();
+        }
+    }
+
+    name.to_string()
 }
 
 fn collect_relation_keys<From>(
@@ -1084,4 +1347,28 @@ fn merge_condition(existing: Option<Condition>, next: Condition) -> Option<Condi
         Some(existing) => Condition::and([existing, next]),
         None => next,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_collection_relation_name, infer_singular_relation_name};
+
+    #[test]
+    fn infers_collection_relation_names_from_table_names() {
+        assert_eq!(infer_collection_relation_name("merchants"), "merchants");
+        assert_eq!(
+            infer_collection_relation_name("public.order_items"),
+            "order_items"
+        );
+    }
+
+    #[test]
+    fn infers_singular_relation_names_from_plural_table_names() {
+        assert_eq!(infer_singular_relation_name("countries"), "country");
+        assert_eq!(
+            infer_singular_relation_name("public.categories"),
+            "category"
+        );
+        assert_eq!(infer_singular_relation_name("products"), "product");
+    }
 }

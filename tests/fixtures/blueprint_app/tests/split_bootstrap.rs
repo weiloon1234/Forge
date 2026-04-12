@@ -1,4 +1,3 @@
-use chrono::TimeZone;
 use forge_blueprint_fixture::{app, bootstrap};
 
 #[tokio::test]
@@ -21,7 +20,7 @@ async fn split_bootstrap_builds_public_kernels() {
         .await
         .unwrap();
 
-    let now = chrono::Utc.with_ymd_and_hms(2026, 4, 9, 12, 0, 0).unwrap();
+    let now = forge::DateTime::parse("2026-04-09T12:00:00Z").unwrap();
     let executed = scheduler.run_once_at(now).await.unwrap();
 
     assert_eq!(executed, vec![app::ids::HEARTBEAT_SCHEDULE]);

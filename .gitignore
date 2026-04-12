@@ -25,6 +25,9 @@ Thumbs.db
 .env
 .env.*
 
+# Logs
+logs/
+
 # Claude Code session data (keep skills/)
 .claude/*
 !.claude/skills/

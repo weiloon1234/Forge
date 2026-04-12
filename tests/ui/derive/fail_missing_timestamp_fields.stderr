@@ -1,0 +1,5 @@
+error: #[forge(timestamps = true)] requires `created_at: forge::DateTime` and `updated_at: forge::DateTime`
+ --> tests/ui/derive/fail_missing_timestamp_fields.rs:5:8
+  |
+5 | struct Post {
+  |        ^^^^

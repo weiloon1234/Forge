@@ -1,11 +1,12 @@
 mod aggregate;
 pub mod ast;
+mod collection_ext;
 pub mod compiler;
 pub(crate) mod lifecycle;
 mod model;
 mod projection;
 mod query;
-mod relation;
+pub mod relation;
 mod runtime;
 
 pub use aggregate::AggregateProjection;
@@ -19,22 +20,25 @@ pub use ast::{
     SetOperationNode, SetOperator, TableRef, UnaryExpr, UnaryOperator, UpdateNode, WindowExpr,
     WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
 };
+pub use collection_ext::{IntoLoadableRelation, ModelCollectionExt};
 pub use compiler::{CompiledSql, PostgresCompiler};
 pub use lifecycle::{MigrationContext, MigrationFile, SeederContext, SeederFile};
 pub use model::{
     Column, ColumnInfo, CreateDraft, FromDbValue, IntoColumnValue, IntoFieldValue, Loaded, Model,
-    ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent, ModelHookContext,
-    ModelInstanceWriteExt, ModelLifecycle, ModelLifecycleSnapshot, ModelUpdatedEvent,
-    ModelUpdatingEvent, ModelWriteExecutor, NoModelLifecycle, PersistedModel, TableMeta, ToDbValue,
-    UpdateDraft,
+    ModelBehavior, ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent,
+    ModelFeatureSetting, ModelHookContext, ModelInstanceWriteExt, ModelLifecycle,
+    ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent,
+    ModelWriteExecutor, NoModelLifecycle, PersistedModel, TableMeta, ToDbValue, UpdateDraft,
 };
 pub use projection::{Projection, ProjectionField, ProjectionFieldInfo, ProjectionMeta};
 pub use query::{
     Case, CreateManyModel, CreateModel, CreateRow, Cte, DeleteModel, JsonExprBuilder, ModelQuery,
-    Paginated, Pagination, ProjectionQuery, Query, Sql, UpdateModel, Window, WindowBuilder,
+    Paginated, Pagination, ProjectionQuery, Query, RestoreModel, Sql, UpdateModel, Window,
+    WindowBuilder,
 };
 pub use relation::{
-    belongs_to, has_many, has_one, many_to_many, ManyToManyDef, RelationAggregateDef, RelationDef,
+    belongs_to, has_many, has_one, many_to_many, AnyRelation, ManyToManyDef, RelationAggregateDef,
+    RelationDef, RelationLoader,
 };
 pub use runtime::{
     DatabaseManager, DatabaseTransaction, DbRecord, DbRecordStream, QueryExecutionOptions,
@@ -45,3 +49,4 @@ pub(crate) use lifecycle::{
     builtin_cli_registrar, MigrationRegistryBuilder, MigrationRegistryHandle,
     SeederRegistryBuilder, SeederRegistryHandle,
 };
+pub(crate) use model::set_runtime_model_defaults;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AccessScope, Actor};
+use crate::auth::{AccessScope, Actor, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::RuntimeDiagnostics;
 use crate::support::runtime::RuntimeBackend;
@@ -80,6 +80,16 @@ impl WebSocketContext {
 
     pub fn actor(&self) -> Option<&Actor> {
         self.actor.as_ref()
+    }
+
+    /// Resolve the authenticated actor to its backing model.
+    ///
+    /// Returns `Ok(None)` if no actor is present on this connection.
+    pub async fn resolve_actor<M: Authenticatable>(&self) -> Result<Option<M>> {
+        match &self.actor {
+            Some(actor) => actor.resolve::<M>(&self.app).await,
+            None => Ok(None),
+        }
     }
 
     pub fn channel(&self) -> &ChannelId {

@@ -209,12 +209,20 @@ impl Worker {
             JobExecutionOutcome::Success => {
                 if !self.runtime.ack_job(&lease.queue, &lease.token).await? {
                     tracing::warn!(
+                        target: "forge.worker",
                         queue = %lease.queue,
                         token = %lease.token,
-                        "forge worker lost job lease before ack"
+                        "Lost job lease before ack"
                     );
                     return Ok(());
                 }
+                tracing::info!(
+                    target: "forge.worker",
+                    job = %envelope.job,
+                    queue = %envelope.queue,
+                    attempt = envelope.attempts + 1,
+                    "Job succeeded"
+                );
                 self.diagnostics
                     .record_job_outcome(RecordedJobOutcome::Succeeded);
                 Ok(())
@@ -242,9 +250,10 @@ impl Worker {
                     .await?
                 {
                     tracing::warn!(
+                        target: "forge.worker",
                         queue = %lease.queue,
                         token = %lease.token,
-                        "forge worker lost job lease before retry scheduling"
+                        "Lost job lease before retry scheduling"
                     );
                     return Ok(());
                 }
@@ -253,9 +262,11 @@ impl Worker {
                 Ok(())
             }
             JobExecutionOutcome::DeadLetter { error, attempts } => {
+                let job_name = envelope.job.clone();
+                let queue_name = envelope.queue.clone();
                 let dead_letter = FailedJobEnvelope {
                     failed_at: Utc::now().timestamp_millis(),
-                    error,
+                    error: error.clone(),
                     envelope: JobEnvelope {
                         attempts,
                         ..envelope
@@ -268,12 +279,21 @@ impl Worker {
                     .await?
                 {
                     tracing::warn!(
+                        target: "forge.worker",
                         queue = %lease.queue,
                         token = %lease.token,
-                        "forge worker lost job lease before dead-letter transition"
+                        "Lost job lease before dead-letter transition"
                     );
                     return Ok(());
                 }
+                tracing::error!(
+                    target: "forge.worker",
+                    job = %job_name,
+                    queue = %queue_name,
+                    attempts = attempts,
+                    error = %error,
+                    "Job dead-lettered"
+                );
                 self.diagnostics
                     .record_job_outcome(RecordedJobOutcome::DeadLettered);
                 Ok(())
@@ -303,9 +323,11 @@ impl Worker {
                             Ok(false) => break,
                             Err(error) => {
                                 tracing::warn!(
+                                    target: "forge.worker",
                                     queue = %queue,
                                     token = %token,
-                                    "forge worker failed to renew lease: {error}"
+                                    error = %error,
+                                    "Failed to renew lease"
                                 );
                                 break;
                             }
@@ -627,7 +649,8 @@ mod tests {
             container,
             crate::config::ConfigRepository::empty(),
             RuleRegistry::new(),
-        );
+        )
+        .unwrap();
         app.container().singleton_arc(runtime).unwrap();
         app.container().singleton_arc(diagnostics).unwrap();
         app

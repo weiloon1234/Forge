@@ -1,8 +1,13 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::ops::Deref;
+use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
 
 macro_rules! typed_identifier {
     ($name:ident) => {
@@ -65,12 +70,131 @@ typed_identifier!(PluginScaffoldId);
 typed_identifier!(MigrationId);
 typed_identifier!(SeederId);
 
+pub struct ModelId<M> {
+    value: Uuid,
+    _marker: PhantomData<fn() -> M>,
+}
+
+impl<M> ModelId<M> {
+    pub fn generate() -> Self {
+        Self::from_uuid(Uuid::now_v7())
+    }
+
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self {
+            value,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn parse_str(value: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(value).map(Self::from_uuid)
+    }
+
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.value
+    }
+
+    pub const fn into_uuid(self) -> Uuid {
+        self.value
+    }
+}
+
+impl<M> Clone for ModelId<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for ModelId<M> {}
+
+impl<M> PartialEq for ModelId<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<M> Eq for ModelId<M> {}
+
+impl<M> PartialOrd for ModelId<M> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<M> Ord for ModelId<M> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+
+impl<M> Hash for ModelId<M> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl<M> fmt::Debug for ModelId<M> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("ModelId").field(&self.value).finish()
+    }
+}
+
+impl<M> fmt::Display for ModelId<M> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.value, formatter)
+    }
+}
+
+impl<M> FromStr for ModelId<M> {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(value)
+    }
+}
+
+impl<M> Serialize for ModelId<M> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.value.to_string())
+    }
+}
+
+impl<'de, M> Deserialize<'de> for ModelId<M> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<M> From<Uuid> for ModelId<M> {
+    fn from(value: Uuid) -> Self {
+        Self::from_uuid(value)
+    }
+}
+
+impl<M> From<ModelId<M>> for Uuid {
+    fn from(value: ModelId<M>) -> Self {
+        value.into_uuid()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelId, GuardId, MigrationId, PluginAssetId, PluginId, PluginScaffoldId, ProbeId,
-        QueueId, SeederId,
+        ChannelId, GuardId, MigrationId, ModelId, PluginAssetId, PluginId, PluginScaffoldId,
+        ProbeId, QueueId, SeederId,
     };
+    use uuid::Uuid;
+
+    struct User;
+    struct Order;
 
     #[test]
     fn identifiers_expose_static_values() {
@@ -93,5 +217,28 @@ mod tests {
         assert_eq!(SCAFFOLD.as_str(), "dashboard");
         assert_eq!(MIGRATION.as_str(), "202604091200_create_users");
         assert_eq!(SEEDER.as_str(), "users.seed");
+    }
+
+    #[test]
+    fn model_ids_round_trip_as_strings() {
+        let parsed = ModelId::<User>::parse_str("018f05a0-6d2d-7af4-977d-2a5d76b95f0c").unwrap();
+        let json = serde_json::to_string(&parsed).unwrap();
+        let reparsed: ModelId<User> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, reparsed);
+        assert_eq!(parsed.to_string(), "018f05a0-6d2d-7af4-977d-2a5d76b95f0c");
+    }
+
+    #[test]
+    fn model_ids_preserve_type_and_uuid_access() {
+        let uuid = Uuid::parse_str("018f05a0-6d2d-7af4-977d-2a5d76b95f0c").unwrap();
+        let user_id = ModelId::<User>::from_uuid(uuid);
+        let order_id = ModelId::<Order>::from_uuid(uuid);
+
+        fn takes_user_id(_: ModelId<User>) {}
+
+        takes_user_id(user_id);
+        assert_eq!(user_id.as_uuid(), &uuid);
+        assert_eq!(Uuid::from(order_id), uuid);
     }
 }

@@ -22,32 +22,48 @@ exclude = [
 resolver = "2"
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1"
+argon2 = "0.5"
 async-trait = "0.1"
-axum = { version = "0.8.8", features = ["macros", "json", "ws"] }
+axum = { version = "0.8.8", features = ["macros", "json", "ws", "multipart"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 clap = { version = "4", features = ["string"] }
 cron = "0.12"
 dotenvy = "0.15"
 forge-build = { path = "forge-build" }
 forge-macros = { path = "forge-macros" }
 futures-util = "0.3"
+getrandom = "0.3"
+hmac = "0.12"
+image = "0.25"
+infer = "0.19"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
+object_store = { version = "0.13", features = ["aws"] }
 redis = { version = "1", features = ["tokio-comp"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+regex = "1"
+rust_xlsxwriter = "0.94"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["any", "sqlite", "postgres", "mysql", "runtime-tokio-rustls", "chrono", "uuid"] }
 thiserror = "2"
 tokio = { version = "1.37", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 toml = "0.9"
 tower = "0.5.3"
+tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+url = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["serde", "v7"] }
 validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3"
 tokio-tungstenite = "0.28"
 trybuild = "1"

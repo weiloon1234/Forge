@@ -1,5 +1,11 @@
+pub mod session;
+pub mod token;
+
+use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -11,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::AuthConfig;
+use crate::database::{Model, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::{GuardId, PermissionId, PolicyId, RoleId};
 
@@ -155,6 +162,29 @@ impl Actor {
     {
         self.permissions.contains(&permission.into())
     }
+
+    /// Resolve this actor to its backing model.
+    ///
+    /// Returns the model instance if found, `None` if the actor's ID
+    /// does not match any record, or an error if the guard doesn't match.
+    ///
+    /// ```ignore
+    /// let user = actor.resolve::<User>(&app).await?;
+    /// ```
+    pub async fn resolve<M>(&self, app: &AppContext) -> Result<Option<M>>
+    where
+        M: Authenticatable,
+    {
+        if self.guard != M::guard() {
+            return Err(Error::message(format!(
+                "actor guard `{}` does not match authenticatable guard `{}`",
+                self.guard,
+                M::guard()
+            )));
+        }
+        let db = app.database()?;
+        M::resolve_from_actor(self, db.as_ref()).await
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -195,6 +225,7 @@ impl IntoResponse for AuthError {
             self.status_code(),
             Json(serde_json::json!({
                 "message": self.to_string(),
+                "status": self.status_code().as_u16(),
             })),
         )
             .into_response()
@@ -211,17 +242,52 @@ pub trait Policy: Send + Sync + 'static {
     async fn evaluate(&self, actor: &Actor, app: &AppContext) -> Result<bool>;
 }
 
+/// A model that can be resolved from an authenticated [`Actor`].
+///
+/// Implement this on your User, Admin, or Merchant model to enable
+/// `actor.resolve::<User>(&app).await` — similar to Laravel's
+/// `$request->user()` returning the backing Eloquent model.
+///
+/// Each `Authenticatable` model is associated with exactly one guard.
+/// Multiple models may back different guards (e.g., `"api"` → `User`,
+/// `"admin"` → `AdminUser`), but two models cannot share the same guard.
+#[async_trait]
+pub trait Authenticatable: Model + Sized + Send + Sync + 'static {
+    /// The guard this model backs.
+    fn guard() -> GuardId;
+
+    /// Resolve the model instance from the actor's ID.
+    ///
+    /// Override this to add eager loading, active-status checks, or
+    /// any custom resolution logic.
+    async fn resolve_from_actor<E>(actor: &Actor, executor: &E) -> Result<Option<Self>>
+    where
+        E: QueryExecutor;
+}
+
 pub(crate) type GuardRegistryHandle = Arc<Mutex<GuardRegistryBuilder>>;
 pub(crate) type PolicyRegistryHandle = Arc<Mutex<PolicyRegistryBuilder>>;
+pub(crate) type AuthenticatableRegistryHandle = Arc<Mutex<AuthenticatableRegistryBuilder>>;
+
+/// Internal enum distinguishing bearer (token) from session (cookie) guard drivers.
+#[derive(Clone)]
+pub(crate) enum GuardAuthenticator {
+    Bearer(Arc<dyn BearerAuthenticator>),
+    Session(Arc<session::SessionManager>),
+}
 
 #[derive(Default)]
 pub(crate) struct GuardRegistryBuilder {
-    guards: HashMap<GuardId, Arc<dyn BearerAuthenticator>>,
+    guards: HashMap<GuardId, GuardAuthenticator>,
 }
 
 impl GuardRegistryBuilder {
     pub(crate) fn shared() -> GuardRegistryHandle {
         Arc::new(Mutex::new(Self::default()))
+    }
+
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.guards.keys().any(|k| k.as_ref() == id)
     }
 
     pub(crate) fn register_arc<I>(
@@ -238,13 +304,31 @@ impl GuardRegistryBuilder {
                 "auth guard `{id}` already registered"
             )));
         }
-        self.guards.insert(id, guard);
+        self.guards.insert(id, GuardAuthenticator::Bearer(guard));
+        Ok(())
+    }
+
+    pub(crate) fn register_session<I>(
+        &mut self,
+        id: I,
+        manager: Arc<session::SessionManager>,
+    ) -> Result<()>
+    where
+        I: Into<GuardId>,
+    {
+        let id = id.into();
+        if self.guards.contains_key(&id) {
+            return Err(Error::message(format!(
+                "auth guard `{id}` already registered"
+            )));
+        }
+        self.guards.insert(id, GuardAuthenticator::Session(manager));
         Ok(())
     }
 
     pub(crate) fn freeze_shared(
         handle: GuardRegistryHandle,
-    ) -> HashMap<GuardId, Arc<dyn BearerAuthenticator>> {
+    ) -> HashMap<GuardId, GuardAuthenticator> {
         let mut builder = handle.lock().expect("guard registry lock poisoned");
         std::mem::take(&mut builder.guards)
     }
@@ -282,16 +366,103 @@ impl PolicyRegistryBuilder {
     }
 }
 
+type ErasedResolver = Arc<
+    dyn for<'a> Fn(
+            &'a Actor,
+            &'a AppContext,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Option<Box<dyn Any + Send + Sync>>>> + Send + 'a>,
+        > + Send
+        + Sync,
+>;
+
+#[derive(Default)]
+pub(crate) struct AuthenticatableRegistryBuilder {
+    resolvers: HashMap<GuardId, ErasedResolver>,
+}
+
+impl AuthenticatableRegistryBuilder {
+    pub(crate) fn shared() -> AuthenticatableRegistryHandle {
+        Arc::new(Mutex::new(Self::default()))
+    }
+
+    pub(crate) fn register<M>(&mut self) -> Result<()>
+    where
+        M: Authenticatable,
+    {
+        let guard = M::guard();
+        if self.resolvers.contains_key(&guard) {
+            return Err(Error::message(format!(
+                "authenticatable guard `{guard}` already registered"
+            )));
+        }
+
+        let resolver: ErasedResolver = Arc::new(|actor: &Actor, app: &AppContext| {
+            let db = app.database();
+            let actor_clone = actor.clone();
+            Box::pin(async move {
+                let db = db?;
+                let model = M::resolve_from_actor(&actor_clone, db.as_ref()).await?;
+                Ok(model.map(|m| Box::new(m) as Box<dyn Any + Send + Sync>))
+            })
+        });
+
+        self.resolvers.insert(guard, resolver);
+        Ok(())
+    }
+
+    pub(crate) fn freeze_shared(
+        handle: AuthenticatableRegistryHandle,
+    ) -> AuthenticatableRegistry {
+        let mut builder = handle
+            .lock()
+            .expect("authenticatable registry lock poisoned");
+        AuthenticatableRegistry {
+            resolvers: std::mem::take(&mut builder.resolvers),
+        }
+    }
+}
+
+pub struct AuthenticatableRegistry {
+    resolvers: HashMap<GuardId, ErasedResolver>,
+}
+
+impl AuthenticatableRegistry {
+    /// Resolve an actor to its backing model using the type-erased registry.
+    ///
+    /// This is useful for dynamic dispatch when the concrete type isn't known
+    /// at compile time (e.g., queued export jobs). For typed resolution,
+    /// prefer [`Actor::resolve`].
+    pub async fn resolve_dynamic(
+        &self,
+        actor: &Actor,
+        app: &AppContext,
+    ) -> Result<Option<Box<dyn Any + Send + Sync>>> {
+        let Some(resolver) = self.resolvers.get(&actor.guard) else {
+            return Err(Error::message(format!(
+                "no authenticatable model registered for guard `{}`",
+                actor.guard
+            )));
+        };
+        resolver(actor, app).await
+    }
+
+    /// Check whether a guard has a registered authenticatable model.
+    pub fn contains_guard(&self, guard: &GuardId) -> bool {
+        self.resolvers.contains_key(guard)
+    }
+}
+
 #[derive(Clone)]
 pub struct AuthManager {
     config: AuthConfig,
-    guards: Arc<HashMap<GuardId, Arc<dyn BearerAuthenticator>>>,
+    guards: Arc<HashMap<GuardId, GuardAuthenticator>>,
 }
 
 impl AuthManager {
     pub(crate) fn new(
         config: AuthConfig,
-        guards: HashMap<GuardId, Arc<dyn BearerAuthenticator>>,
+        guards: HashMap<GuardId, GuardAuthenticator>,
     ) -> Self {
         Self {
             config,
@@ -303,13 +474,47 @@ impl AuthManager {
         &self.config.default_guard
     }
 
+    /// Authenticate a request using the appropriate strategy for the guard.
+    ///
+    /// For bearer guards: reads the `Authorization` header.
+    /// For session guards: reads the session cookie from the `Cookie` header.
     pub async fn authenticate_headers(
         &self,
         headers: &HeaderMap,
         guard: Option<&GuardId>,
     ) -> std::result::Result<Actor, AuthError> {
-        let token = self.extract_token(headers)?;
-        self.authenticate_token(&token, guard).await
+        let guard_id = guard
+            .cloned()
+            .unwrap_or_else(|| self.default_guard().clone());
+
+        let Some(authenticator) = self.guards.get(&guard_id).cloned() else {
+            return Err(AuthError::internal(format!(
+                "auth guard `{guard_id}` is not registered"
+            )));
+        };
+
+        let actor = match authenticator {
+            GuardAuthenticator::Bearer(bearer) => {
+                let token = self.extract_token(headers)?;
+                bearer
+                    .authenticate(&token)
+                    .await
+                    .map_err(|error| AuthError::internal(error.to_string()))?
+                    .ok_or_else(|| AuthError::unauthorized("invalid bearer token"))?
+            }
+            GuardAuthenticator::Session(session_manager) => {
+                let session_id = session_manager
+                    .extract_session_id(headers)
+                    .ok_or_else(|| AuthError::unauthorized("missing session cookie"))?;
+                session_manager
+                    .validate(&session_id)
+                    .await
+                    .map_err(|error| AuthError::internal(error.to_string()))?
+                    .ok_or_else(|| AuthError::unauthorized("invalid or expired session"))?
+            }
+        };
+
+        Ok(actor.with_guard(guard_id))
     }
 
     pub async fn authenticate_token(
@@ -326,15 +531,21 @@ impl AuthManager {
             )));
         };
 
-        let Some(actor) = authenticator
-            .authenticate(token)
-            .await
-            .map_err(|error| AuthError::internal(error.to_string()))?
-        else {
-            return Err(AuthError::unauthorized("invalid bearer token"));
-        };
-
-        Ok(actor.with_guard(guard_id))
+        match authenticator {
+            GuardAuthenticator::Bearer(bearer) => {
+                let Some(actor) = bearer
+                    .authenticate(token)
+                    .await
+                    .map_err(|error| AuthError::internal(error.to_string()))?
+                else {
+                    return Err(AuthError::unauthorized("invalid bearer token"));
+                };
+                Ok(actor.with_guard(guard_id))
+            }
+            GuardAuthenticator::Session(_) => Err(AuthError::internal(
+                "authenticate_token called on a session guard",
+            )),
+        }
     }
 
     pub fn extract_token(&self, headers: &HeaderMap) -> std::result::Result<String, AuthError> {
@@ -494,6 +705,72 @@ where
     }
 }
 
+/// Extractor that authenticates and resolves the backing model in one step.
+///
+/// Combines [`CurrentActor`] extraction with [`Actor::resolve`], returning
+/// the fully hydrated model. Returns 401 if unauthenticated, or if the
+/// model cannot be found.
+///
+/// ```ignore
+/// async fn profile(
+///     AuthenticatedModel(user): AuthenticatedModel<User>,
+/// ) -> Result<Json<User>> {
+///     Ok(Json(user))
+/// }
+/// ```
+pub struct AuthenticatedModel<M: Authenticatable>(pub M);
+
+impl<M: Authenticatable> Deref for AuthenticatedModel<M> {
+    type Target = M;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<M, S> FromRequestParts<S> for AuthenticatedModel<M>
+where
+    M: Authenticatable,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let CurrentActor(actor) = CurrentActor::from_request_parts(parts, state).await?;
+
+        let app = parts
+            .extensions
+            .get::<AppContext>()
+            .cloned()
+            .ok_or_else(|| {
+                AuthError::internal("app context not available in request extensions")
+                    .into_response()
+            })?;
+
+        let model = actor
+            .resolve::<M>(&app)
+            .await
+            .map_err(|e| AuthError::internal(e.to_string()).into_response())?
+            .ok_or_else(|| {
+                AuthError::unauthorized("authenticated model not found").into_response()
+            })?;
+
+        Ok(Self(model))
+    }
+}
+
+/// Short alias for [`AuthenticatedModel`].
+///
+/// ```ignore
+/// async fn profile(Auth(user): Auth<User>) -> Result<Json<User>> {
+///     Ok(Json(user))
+/// }
+/// ```
+pub type Auth<M> = AuthenticatedModel<M>;
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
@@ -503,8 +780,8 @@ mod tests {
     use axum::http::{header, HeaderMap};
 
     use super::{
-        Actor, AuthConfig, AuthManager, Authorizer, GuardRegistryBuilder, PermissionId,
-        PolicyRegistryBuilder, StaticBearerAuthenticator,
+        Actor, AuthConfig, AuthManager, AuthenticatableRegistryBuilder, Authorizer,
+        GuardRegistryBuilder, PermissionId, PolicyRegistryBuilder, StaticBearerAuthenticator,
     };
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
@@ -526,6 +803,7 @@ mod tests {
             ConfigRepository::empty(),
             RuleRegistry::new(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -575,8 +853,9 @@ mod tests {
             AuthConfig::default(),
             HashMap::from([(
                 GuardId::new("api"),
-                Arc::new(StaticBearerAuthenticator::new().token("token-1", actor.clone()))
-                    as Arc<dyn super::BearerAuthenticator>,
+                super::GuardAuthenticator::Bearer(Arc::new(
+                    StaticBearerAuthenticator::new().token("token-1", actor.clone()),
+                )),
             )]),
         );
 
@@ -608,5 +887,96 @@ mod tests {
             .authorize_permissions(&actor, &denied)
             .await
             .is_err());
+    }
+
+    // --- Authenticatable registry tests ---
+
+    // Minimal model stub for testing registration only (no real DB needed)
+    #[derive(Clone, Debug)]
+    struct FakeUser;
+
+    impl crate::database::Model for FakeUser {
+        type Lifecycle = crate::database::NoModelLifecycle;
+        fn table_meta() -> &'static crate::database::TableMeta<Self> {
+            unimplemented!("test stub")
+        }
+    }
+
+    #[async_trait]
+    impl super::Authenticatable for FakeUser {
+        fn guard() -> GuardId {
+            GuardId::new("api")
+        }
+
+        async fn resolve_from_actor<E>(
+            _actor: &Actor,
+            _executor: &E,
+        ) -> crate::Result<Option<Self>>
+        where
+            E: crate::database::QueryExecutor,
+        {
+            Ok(Some(FakeUser))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FakeAdmin;
+
+    impl crate::database::Model for FakeAdmin {
+        type Lifecycle = crate::database::NoModelLifecycle;
+        fn table_meta() -> &'static crate::database::TableMeta<Self> {
+            unimplemented!("test stub")
+        }
+    }
+
+    #[async_trait]
+    impl super::Authenticatable for FakeAdmin {
+        fn guard() -> GuardId {
+            GuardId::new("admin")
+        }
+
+        async fn resolve_from_actor<E>(
+            _actor: &Actor,
+            _executor: &E,
+        ) -> crate::Result<Option<Self>>
+        where
+            E: crate::database::QueryExecutor,
+        {
+            Ok(Some(FakeAdmin))
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_authenticatable_guard() {
+        let registry = AuthenticatableRegistryBuilder::shared();
+        registry.lock().unwrap().register::<FakeUser>().unwrap();
+
+        // Second model trying to claim same "api" guard should fail
+        let error = registry.lock().unwrap().register::<FakeUser>().unwrap_err();
+        assert!(error.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn allows_different_guards_for_different_models() {
+        let registry = AuthenticatableRegistryBuilder::shared();
+        registry.lock().unwrap().register::<FakeUser>().unwrap();
+        registry.lock().unwrap().register::<FakeAdmin>().unwrap();
+
+        let frozen = AuthenticatableRegistryBuilder::freeze_shared(registry);
+        assert!(frozen.contains_guard(&GuardId::new("api")));
+        assert!(frozen.contains_guard(&GuardId::new("admin")));
+    }
+
+    #[tokio::test]
+    async fn actor_resolve_rejects_guard_mismatch() {
+        let app = app();
+        // Actor authenticated via "admin" guard trying to resolve as User ("api" guard)
+        let actor = Actor::new("user-1", GuardId::new("admin"));
+        let result = actor.resolve::<FakeUser>(&app).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not match authenticatable guard"));
     }
 }

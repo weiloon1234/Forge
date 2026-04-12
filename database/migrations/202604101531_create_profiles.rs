@@ -9,8 +9,8 @@ impl MigrationFile for Entry {
         ctx.raw_execute(
             r#"
             CREATE TABLE profiles (
-                id BIGINT PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                id UUID PRIMARY KEY DEFAULT uuidv7(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 bio TEXT
             )
             "#,

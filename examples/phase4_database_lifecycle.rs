@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use forge::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "users")]
 struct User {
-    id: i64,
+    id: ModelId<User>,
     email: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    created_at: DateTime,
+    updated_at: DateTime,
 }
 
 #[derive(Clone)]

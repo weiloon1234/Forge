@@ -1,6 +1,6 @@
 # Rust Query System Blueprint (v1 → v3)
 
-> Status note (April 9, 2026): the v1-v3 query blueprint described here is complete in Forge. See [docs/query-blueprint-status.md](docs/query-blueprint-status.md) for the implementation map, canonical examples, and acceptance coverage.
+> Status note (April 12, 2026): the v1-v3 query blueprint described here is complete in Forge. See [docs/query-blueprint-status.md](docs/query-blueprint-status.md) for the implementation map, canonical examples, and acceptance coverage. Post-blueprint model DX is now stricter than this historical spec in a few places, including safe-by-default `ModelId<M>` UUIDv7 primary keys serialized as strings, built-in timestamps/soft deletes, model lifecycle hooks, and same-type field write mutators plus explicit read accessor methods.
 
 ## Overview
 

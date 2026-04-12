@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, future::Future, marker::PhantomData, pin::Pin};
 
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::{Collection, ModelId};
 use futures_util::stream::{self, BoxStream, StreamExt};
 
 use super::aggregate::{
@@ -8,7 +9,7 @@ use super::aggregate::{
     AggregateProjection,
 };
 use super::ast::{
-    BinaryOperator, CaseExpr, CaseWhen, ColumnRef, ComparisonOp, Condition, CteNode, Expr,
+    BinaryOperator, CaseExpr, CaseWhen, ColumnRef, ComparisonOp, Condition, CteNode, DbValue, Expr,
     FromItem, InsertNode, InsertSource, JoinKind, JoinNode, JsonPathExpr, JsonPathMode,
     JsonPathSegment, JsonPredicateOp, JsonPredicateValue, LockBehavior, LockClause, LockStrength,
     OnConflictAction, OnConflictNode, OnConflictTarget, OnConflictUpdate, OrderBy, QueryAst,
@@ -17,10 +18,10 @@ use super::ast::{
 };
 use super::compiler::PostgresCompiler;
 use super::model::{
-    Column, CreateDraft, FromDbValue, IntoFieldValue, Model, ModelCreatedEvent, ModelCreatingEvent,
-    ModelDeletedEvent, ModelDeletingEvent, ModelHookContext, ModelLifecycle,
-    ModelLifecycleSnapshot, ModelUpdatedEvent, ModelUpdatingEvent, ModelWriteExecutor, TableMeta,
-    UpdateDraft,
+    upsert_assignment, Column, CreateDraft, FromDbValue, IntoFieldValue, Model, ModelCreatedEvent,
+    ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent, ModelHookContext, ModelLifecycle,
+    ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent,
+    ModelWriteExecutor, TableMeta, ToDbValue, UpdateDraft,
 };
 use super::projection::{Projection, ProjectionField, ProjectionMeta};
 use super::relation::{
@@ -49,9 +50,16 @@ impl Pagination {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Paginated<T> {
-    pub data: Vec<T>,
+    pub data: Collection<T>,
     pub pagination: Pagination,
     pub total: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SoftDeleteScope {
+    ActiveOnly,
+    WithTrashed,
+    OnlyTrashed,
 }
 
 pub struct Case;
@@ -889,7 +897,7 @@ impl Query {
         self
     }
 
-    pub async fn get<E>(&self, executor: &E) -> Result<Vec<DbRecord>>
+    pub async fn get<E>(&self, executor: &E) -> Result<Collection<DbRecord>>
     where
         E: QueryExecutor,
     {
@@ -897,6 +905,7 @@ impl Query {
         executor
             .query_records_with(&compiled, self.options.clone())
             .await
+            .map(Collection::from)
     }
 
     pub async fn first<E>(&self, executor: &E) -> Result<Option<DbRecord>>
@@ -1288,7 +1297,7 @@ where
         self
     }
 
-    pub async fn get<E>(&self, executor: &E) -> Result<Vec<P>>
+    pub async fn get<E>(&self, executor: &E) -> Result<Collection<P>>
     where
         E: QueryExecutor,
     {
@@ -1463,6 +1472,7 @@ pub struct ModelQuery<M: 'static> {
     select: SelectNode,
     relations: Vec<AnyRelation<M>>,
     relation_aggregates: Vec<AnyRelationAggregate<M>>,
+    soft_delete_scope: SoftDeleteScope,
     stream_batch_size: usize,
     options: QueryExecutionOptions,
 }
@@ -1492,6 +1502,7 @@ where
             },
             relations: Vec::new(),
             relation_aggregates: Vec::new(),
+            soft_delete_scope: SoftDeleteScope::ActiveOnly,
             stream_batch_size: 256,
             options: QueryExecutionOptions::default(),
         }
@@ -1519,6 +1530,16 @@ where
 
     pub fn where_(mut self, condition: Condition) -> Self {
         self.select.condition = merge_condition(self.select.condition.take(), condition);
+        self
+    }
+
+    pub fn with_trashed(mut self) -> Self {
+        self.soft_delete_scope = SoftDeleteScope::WithTrashed;
+        self
+    }
+
+    pub fn only_trashed(mut self) -> Self {
+        self.soft_delete_scope = SoftDeleteScope::OnlyTrashed;
         self
     }
 
@@ -1580,7 +1601,7 @@ where
         F: FnOnce(ModelQuery<To>) -> ModelQuery<To>,
     {
         let scoped = scope(ModelQuery::new(To::table_meta()));
-        let relation = relation.scoped_with_filter(scoped.select.condition.clone());
+        let relation = relation.scoped_with_filter(scoped.effective_condition());
         self.select.condition =
             merge_condition(self.select.condition.take(), relation.exists_condition());
         self
@@ -1597,16 +1618,18 @@ where
         F: FnOnce(ModelQuery<To>) -> ModelQuery<To>,
     {
         let scoped = scope(ModelQuery::new(To::table_meta()));
-        let relation = relation.scoped_with_filter(scoped.select.condition.clone());
+        let relation = relation.scoped_with_filter(scoped.effective_condition());
         self.select.condition =
             merge_condition(self.select.condition.take(), relation.exists_condition());
         self
     }
 
     pub fn ast(&self) -> QueryAst {
+        let mut select = self.select.clone();
+        select.condition = self.effective_condition();
         QueryAst {
             with: self.with.clone(),
-            body: QueryBody::Select(Box::new(self.select.clone())),
+            body: QueryBody::Select(Box::new(select)),
         }
     }
 
@@ -1668,7 +1691,27 @@ where
         self
     }
 
-    pub async fn get<E>(&self, executor: &E) -> Result<Vec<M>>
+    fn effective_condition(&self) -> Option<Condition> {
+        merge_optional_condition(self.select.condition.clone(), self.soft_delete_condition())
+    }
+
+    fn soft_delete_condition(&self) -> Option<Condition> {
+        if !self.table.soft_deletes_enabled() {
+            return None;
+        }
+
+        let deleted_at = self.table.deleted_at_column_info()?;
+        let deleted_at_ref =
+            ColumnRef::new(self.table.name(), deleted_at.name).typed(deleted_at.db_type);
+
+        match self.soft_delete_scope {
+            SoftDeleteScope::ActiveOnly => Some(Condition::IsNull(deleted_at_ref)),
+            SoftDeleteScope::WithTrashed => None,
+            SoftDeleteScope::OnlyTrashed => Some(Condition::IsNotNull(deleted_at_ref)),
+        }
+    }
+
+    pub async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
     where
         E: QueryExecutor,
     {
@@ -2079,9 +2122,13 @@ where
     where
         E: ModelWriteExecutor,
     {
-        let mut records = self.get(executor).await?;
-        match records.len() {
-            1 => Ok(records.remove(0)),
+        let records = self.get(executor).await?;
+        let len = records.len();
+        let mut records = records.into_iter();
+        match len {
+            1 => records
+                .next()
+                .ok_or_else(|| Error::message("create() did not return a record")),
             0 => Err(Error::message("create() did not return a record")),
             _ => Err(Error::message(
                 "create() returned more than one record; use get() instead",
@@ -2089,11 +2136,13 @@ where
         }
     }
 
-    pub async fn get<E>(&self, executor: &E) -> Result<Vec<M>>
+    pub async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
     where
         E: ModelWriteExecutor,
     {
-        create_model_records(self, executor).await
+        create_model_records(self, executor)
+            .await
+            .map(Collection::from)
     }
 
     pub async fn first<E>(&self, executor: &E) -> Result<Option<M>>
@@ -2280,24 +2329,43 @@ where
 
     async fn fast_execute<E>(&self, executor: &E) -> Result<u64>
     where
-        E: QueryExecutor,
+        E: ModelWriteExecutor,
     {
-        executor
-            .execute_compiled_with(&self.compiled_sql(false)?, self.options.clone())
-            .await
+        let create_many = self.clone();
+        with_model_write_transaction(executor, |app, transaction| {
+            Box::pin(async move {
+                let prepared =
+                    prepare_create_many_for_execution(&create_many, app, transaction).await?;
+                transaction
+                    .execute_compiled_with(
+                        &prepared.compiled_sql(false)?,
+                        create_many.options.clone(),
+                    )
+                    .await
+            })
+        })
+        .await
     }
 
-    async fn fast_get<E>(&self, executor: &E) -> Result<Vec<M>>
+    async fn fast_get<E>(&self, executor: &E) -> Result<Collection<M>>
     where
-        E: QueryExecutor,
+        E: ModelWriteExecutor,
     {
-        let records = executor
-            .query_records_with(&self.compiled_sql(true)?, self.options.clone())
-            .await?;
-        records
-            .iter()
-            .map(|record| self.table.hydrate_record(record))
-            .collect()
+        let create_many = self.clone();
+        with_model_write_transaction(executor, |app, transaction| {
+            Box::pin(async move {
+                let prepared =
+                    prepare_create_many_for_execution(&create_many, app, transaction).await?;
+                let records = transaction
+                    .query_records_with(&prepared.compiled_sql(true)?, create_many.options.clone())
+                    .await?;
+                records
+                    .iter()
+                    .map(|record| prepared.table.hydrate_record(record))
+                    .collect()
+            })
+        })
+        .await
     }
 
     pub async fn execute<E>(&self, executor: &E) -> Result<u64>
@@ -2311,14 +2379,16 @@ where
         }
     }
 
-    pub async fn get<E>(&self, executor: &E) -> Result<Vec<M>>
+    pub async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
     where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
             self.fast_get(executor).await
         } else {
-            create_many_model_records(self, executor).await
+            create_many_model_records(self, executor)
+                .await
+                .map(Collection::from)
         }
     }
 
@@ -2360,6 +2430,12 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemUpdateAction {
+    None,
+    Restore,
+}
+
 #[derive(Clone)]
 pub struct UpdateModel<M: 'static> {
     table: &'static TableMeta<M>,
@@ -2368,8 +2444,11 @@ pub struct UpdateModel<M: 'static> {
     condition: Option<Condition>,
     allow_all: bool,
     without_lifecycle: bool,
+    system_action: SystemUpdateAction,
     options: QueryExecutionOptions,
 }
+
+pub type RestoreModel<M> = UpdateModel<M>;
 
 impl<M> UpdateModel<M>
 where
@@ -2383,6 +2462,20 @@ where
             condition: None,
             allow_all: false,
             without_lifecycle: false,
+            system_action: SystemUpdateAction::None,
+            options: QueryExecutionOptions::default(),
+        }
+    }
+
+    pub(crate) fn new_restore(table: &'static TableMeta<M>) -> Self {
+        Self {
+            table,
+            values: Vec::new(),
+            from: Vec::new(),
+            condition: None,
+            allow_all: false,
+            without_lifecycle: false,
+            system_action: SystemUpdateAction::Restore,
             options: QueryExecutionOptions::default(),
         }
     }
@@ -2444,7 +2537,7 @@ where
     fn ast(&self, returning_all: bool) -> QueryAst {
         QueryAst::update(UpdateNode {
             table: self.table.table_ref(),
-            values: self.values.clone(),
+            values: self.values_for_ast(),
             from: self.from.clone(),
             condition: self.condition.clone(),
             returning: if returning_all {
@@ -2456,7 +2549,7 @@ where
     }
 
     fn validate(&self) -> Result<()> {
-        if self.values.is_empty() {
+        if self.values.is_empty() && self.system_action == SystemUpdateAction::None {
             return Err(Error::message(
                 "update() requires at least one assigned column before save() or execute()",
             ));
@@ -2471,6 +2564,14 @@ where
         Ok(())
     }
 
+    fn values_for_ast(&self) -> Vec<(super::ast::ColumnRef, Expr)> {
+        let mut values = self.values.clone();
+        if self.system_action == SystemUpdateAction::Restore {
+            let _ = apply_restore_assignments(self.table, &mut values);
+        }
+        values
+    }
+
     fn compiled_sql(&self, returning_all: bool) -> Result<super::compiler::CompiledSql> {
         self.validate()?;
         PostgresCompiler::compile(&self.ast(returning_all))
@@ -2478,24 +2579,38 @@ where
 
     async fn fast_execute<E>(&self, executor: &E) -> Result<u64>
     where
-        E: QueryExecutor,
+        E: ModelWriteExecutor,
     {
-        executor
-            .execute_compiled_with(&self.compiled_sql(false)?, self.options.clone())
-            .await
+        let update = self.clone();
+        with_model_write_transaction(executor, |app, transaction| {
+            Box::pin(async move {
+                let prepared = prepare_update_for_execution(&update, app, transaction).await?;
+                transaction
+                    .execute_compiled_with(&prepared.compiled_sql(false)?, update.options.clone())
+                    .await
+            })
+        })
+        .await
     }
 
-    async fn fast_get<E>(&self, executor: &E) -> Result<Vec<M>>
+    async fn fast_get<E>(&self, executor: &E) -> Result<Collection<M>>
     where
-        E: QueryExecutor,
+        E: ModelWriteExecutor,
     {
-        let records = executor
-            .query_records_with(&self.compiled_sql(true)?, self.options.clone())
-            .await?;
-        records
-            .iter()
-            .map(|record| self.table.hydrate_record(record))
-            .collect()
+        let update = self.clone();
+        with_model_write_transaction(executor, |app, transaction| {
+            Box::pin(async move {
+                let prepared = prepare_update_for_execution(&update, app, transaction).await?;
+                let records = transaction
+                    .query_records_with(&prepared.compiled_sql(true)?, update.options.clone())
+                    .await?;
+                records
+                    .iter()
+                    .map(|record| prepared.table.hydrate_record(record))
+                    .collect()
+            })
+        })
+        .await
     }
 
     pub async fn execute<E>(&self, executor: &E) -> Result<u64>
@@ -2513,9 +2628,13 @@ where
     where
         E: ModelWriteExecutor,
     {
-        let mut records = self.get(executor).await?;
-        match records.len() {
-            1 => Ok(records.remove(0)),
+        let records = self.get(executor).await?;
+        let len = records.len();
+        let mut records = records.into_iter();
+        match len {
+            1 => records
+                .next()
+                .ok_or_else(|| Error::message("update() did not return a record")),
             0 => Err(Error::message("update() did not return a record")),
             _ => Err(Error::message(
                 "update() returned more than one record; use get() instead",
@@ -2523,14 +2642,16 @@ where
         }
     }
 
-    pub async fn get<E>(&self, executor: &E) -> Result<Vec<M>>
+    pub async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
     where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
             self.fast_get(executor).await
         } else {
-            update_model_records(self, executor).await
+            update_model_records(self, executor)
+                .await
+                .map(Collection::from)
         }
     }
 
@@ -2579,6 +2700,7 @@ pub struct DeleteModel<M: 'static> {
     condition: Option<Condition>,
     allow_all: bool,
     without_lifecycle: bool,
+    force_delete: bool,
     options: QueryExecutionOptions,
 }
 
@@ -2593,6 +2715,19 @@ where
             condition: None,
             allow_all: false,
             without_lifecycle: false,
+            force_delete: false,
+            options: QueryExecutionOptions::default(),
+        }
+    }
+
+    pub(crate) fn new_force(table: &'static TableMeta<M>) -> Self {
+        Self {
+            table,
+            using: Vec::new(),
+            condition: None,
+            allow_all: false,
+            without_lifecycle: false,
+            force_delete: true,
             options: QueryExecutionOptions::default(),
         }
     }
@@ -2653,8 +2788,15 @@ where
 
     async fn fast_execute<E>(&self, executor: &E) -> Result<u64>
     where
-        E: QueryExecutor,
+        E: ModelWriteExecutor,
     {
+        if self.table.soft_deletes_enabled() && !self.force_delete {
+            let update = soft_delete_update(self, executor.app_context())?;
+            return executor
+                .execute_compiled_with(&update.compiled_sql(false)?, self.options.clone())
+                .await;
+        }
+
         executor
             .execute_compiled_with(&self.compiled_sql()?, self.options.clone())
             .await
@@ -2737,6 +2879,79 @@ where
     }
 }
 
+async fn apply_assignment_write_mutators<M>(
+    table: &'static TableMeta<M>,
+    context: &ModelHookContext<'_>,
+    values: &mut [(ColumnRef, Expr)],
+) -> Result<()>
+where
+    M: Model,
+{
+    for (column, expr) in values.iter_mut() {
+        let belongs_to_table = column.table.as_deref() == Some(table.name());
+        if !belongs_to_table {
+            continue;
+        }
+
+        let Some(column_info) = table.column_info(&column.name) else {
+            continue;
+        };
+        let Some(write_mutator) = column_info.write_mutator() else {
+            continue;
+        };
+
+        match expr {
+            Expr::Value(value) => {
+                let transformed = write_mutator(context, value.clone()).await?;
+                *expr = Expr::value(transformed);
+            }
+            Expr::Excluded(_) => {}
+            _ => {
+                return Err(Error::message(format!(
+                    "field `{}` on `{}` uses a write mutator and only supports literal values or EXCLUDED assignments in model write APIs",
+                    column.name,
+                    table.name()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_create_write_mutators<M>(
+    create: &CreateModel<M>,
+    context: &ModelHookContext<'_>,
+    values: &mut [(ColumnRef, Expr)],
+    on_conflict: &mut Option<OnConflictNode>,
+) -> Result<()>
+where
+    M: Model,
+{
+    apply_assignment_write_mutators(create.table, context, values).await?;
+
+    if let Some(OnConflictNode {
+        action: OnConflictAction::DoUpdate(conflict),
+        ..
+    }) = on_conflict
+    {
+        apply_assignment_write_mutators(create.table, context, &mut conflict.assignments).await?;
+    }
+
+    Ok(())
+}
+
+async fn apply_update_write_mutators<M>(
+    table: &'static TableMeta<M>,
+    context: &ModelHookContext<'_>,
+    values: &mut [(ColumnRef, Expr)],
+) -> Result<()>
+where
+    M: Model,
+{
+    apply_assignment_write_mutators(table, context, values).await
+}
+
 async fn create_model_records<E, M>(create: &CreateModel<M>, executor: &E) -> Result<Vec<M>>
 where
     E: ModelWriteExecutor,
@@ -2747,15 +2962,20 @@ where
     with_model_write_transaction(executor, |app, transaction| {
         Box::pin(async move {
             let database = app.database()?;
-            let mut draft = CreateDraft::<M>::new(create.rows[0].clone());
+            let mut values = create.rows[0].clone();
+            apply_create_model_conventions(create.table, app, &mut values)?;
+            let mut draft = CreateDraft::<M>::new(values);
             let context = ModelHookContext::new(app, database, transaction);
             M::Lifecycle::creating(&context, &mut draft).await?;
+            let mut on_conflict = create.on_conflict.clone();
+            let mut values = draft.into_values();
+            apply_create_write_mutators(&create, &context, &mut values, &mut on_conflict).await?;
             context
                 .dispatch(ModelCreatingEvent {
                     snapshot: ModelLifecycleSnapshot::for_model::<M>(
                         None,
                         None,
-                        Some(draft.pending_record()),
+                        Some(CreateDraft::<M>::new(values.clone()).pending_record()),
                     ),
                 })
                 .await?;
@@ -2764,8 +2984,8 @@ where
                 .query_records_with(
                     &CreateModel {
                         table: create.table,
-                        rows: vec![draft.into_values()],
-                        on_conflict: create.on_conflict.clone(),
+                        rows: vec![values],
+                        on_conflict,
                         options: create.options.clone(),
                     }
                     .compiled_sql(true)?,
@@ -2833,15 +3053,20 @@ where
     M: Model,
 {
     let database = app.database()?;
-    let mut draft = CreateDraft::<M>::new(create.rows[0].clone());
+    let mut values = create.rows[0].clone();
+    apply_create_model_conventions(create.table, app, &mut values)?;
+    let mut draft = CreateDraft::<M>::new(values);
     let context = ModelHookContext::new(app, database, transaction);
     M::Lifecycle::creating(&context, &mut draft).await?;
+    let mut on_conflict = create.on_conflict.clone();
+    let mut values = draft.into_values();
+    apply_create_write_mutators(create, &context, &mut values, &mut on_conflict).await?;
     context
         .dispatch(ModelCreatingEvent {
             snapshot: ModelLifecycleSnapshot::for_model::<M>(
                 None,
                 None,
-                Some(draft.pending_record()),
+                Some(CreateDraft::<M>::new(values.clone()).pending_record()),
             ),
         })
         .await?;
@@ -2850,8 +3075,8 @@ where
         .query_records_with(
             &CreateModel {
                 table: create.table,
-                rows: vec![draft.into_values()],
-                on_conflict: create.on_conflict.clone(),
+                rows: vec![values],
+                on_conflict,
                 options: create.options.clone(),
             }
             .compiled_sql(true)?,
@@ -2904,14 +3129,18 @@ where
 
     for current_record in current_records {
         let current_model = update.table.hydrate_record(&current_record)?;
-        let mut draft = UpdateDraft::<M>::new(update.values.clone());
+        let mut values = update.values.clone();
+        apply_update_model_conventions(update.table, app, &mut values, update.system_action)?;
+        let mut draft = UpdateDraft::<M>::new(values);
         M::Lifecycle::updating(&context, &current_model, &mut draft).await?;
+        let mut values = draft.into_values();
+        apply_update_write_mutators(update.table, &context, &mut values).await?;
         context
             .dispatch(ModelUpdatingEvent {
                 snapshot: ModelLifecycleSnapshot::for_model::<M>(
                     Some(current_record.clone()),
                     None,
-                    Some(draft.pending_record()),
+                    Some(UpdateDraft::<M>::new(values.clone()).pending_record()),
                 ),
             })
             .await?;
@@ -2921,7 +3150,7 @@ where
             .query_records_with(
                 &UpdateModel {
                     table: update.table,
-                    values: draft.into_values(),
+                    values,
                     from: update.from.clone(),
                     condition: merge_optional_condition(
                         Some(pk_condition),
@@ -2929,6 +3158,7 @@ where
                     ),
                     allow_all: false,
                     without_lifecycle: false,
+                    system_action: SystemUpdateAction::None,
                     options: update.options.clone(),
                 }
                 .compiled_sql(true)?,
@@ -3000,8 +3230,8 @@ where
             .await?;
 
         let pk_condition = record_primary_key_condition(delete.table, current_record)?;
-        transaction
-            .execute_compiled_with(
+        if delete.table.soft_deletes_enabled() && !delete.force_delete {
+            let update = soft_delete_update(
                 &DeleteModel {
                     table: delete.table,
                     using: delete.using.clone(),
@@ -3011,12 +3241,34 @@ where
                     ),
                     allow_all: false,
                     without_lifecycle: false,
+                    force_delete: false,
                     options: delete.options.clone(),
-                }
-                .compiled_sql()?,
-                delete.options.clone(),
-            )
-            .await?;
+                },
+                app,
+            )?;
+            transaction
+                .execute_compiled_with(&update.compiled_sql(false)?, delete.options.clone())
+                .await?;
+        } else {
+            transaction
+                .execute_compiled_with(
+                    &DeleteModel {
+                        table: delete.table,
+                        using: delete.using.clone(),
+                        condition: merge_optional_condition(
+                            Some(pk_condition),
+                            delete.condition.clone(),
+                        ),
+                        allow_all: false,
+                        without_lifecycle: false,
+                        force_delete: true,
+                        options: delete.options.clone(),
+                    }
+                    .compiled_sql()?,
+                    delete.options.clone(),
+                )
+                .await?;
+        }
 
         M::Lifecycle::deleted(&context, &current_model, current_record).await?;
         context
@@ -3054,7 +3306,7 @@ where
         .order_by(OrderBy::asc(update.table.primary_key_ref()))
         .for_update()
         .of([update.table.name()]);
-    query.get(executor).await
+    query.get(executor).await.map(Collection::into_vec)
 }
 
 async fn select_delete_target_records<M>(
@@ -3078,7 +3330,7 @@ where
         .order_by(OrderBy::asc(delete.table.primary_key_ref()))
         .for_update()
         .of([delete.table.name()]);
-    query.get(executor).await
+    query.get(executor).await.map(Collection::into_vec)
 }
 
 fn record_primary_key_condition<M>(table: &TableMeta<M>, record: &DbRecord) -> Result<Condition> {
@@ -3112,6 +3364,180 @@ fn expect_single_record(operation: &str, mut records: Vec<DbRecord>) -> Result<D
             "{operation} returned more than one record unexpectedly"
         ))),
     }
+}
+
+async fn prepare_create_many_for_execution<M>(
+    create_many: &CreateManyModel<M>,
+    app: &AppContext,
+    transaction: &super::runtime::DatabaseTransaction,
+) -> Result<CreateManyModel<M>>
+where
+    M: Model,
+{
+    let mut prepared = create_many.clone();
+    let database = app.database()?;
+    let context = ModelHookContext::new(app, database, transaction);
+    for row in &mut prepared.rows {
+        apply_create_model_conventions(prepared.table, app, row)?;
+        apply_assignment_write_mutators(prepared.table, &context, row).await?;
+    }
+    if let Some(OnConflictNode {
+        action: OnConflictAction::DoUpdate(conflict),
+        ..
+    }) = &mut prepared.on_conflict
+    {
+        apply_assignment_write_mutators(prepared.table, &context, &mut conflict.assignments)
+            .await?;
+    }
+    Ok(prepared)
+}
+
+async fn prepare_update_for_execution<M>(
+    update: &UpdateModel<M>,
+    app: &AppContext,
+    transaction: &super::runtime::DatabaseTransaction,
+) -> Result<UpdateModel<M>>
+where
+    M: Model,
+{
+    let mut prepared = update.clone();
+    apply_update_model_conventions(
+        prepared.table,
+        app,
+        &mut prepared.values,
+        prepared.system_action,
+    )?;
+    let database = app.database()?;
+    let context = ModelHookContext::new(app, database, transaction);
+    apply_update_write_mutators(prepared.table, &context, &mut prepared.values).await?;
+    prepared.system_action = SystemUpdateAction::None;
+    Ok(prepared)
+}
+
+fn soft_delete_update<M>(delete: &DeleteModel<M>, app: &AppContext) -> Result<UpdateModel<M>>
+where
+    M: Model,
+{
+    let mut values = Vec::new();
+    apply_soft_delete_model_conventions(delete.table, app, &mut values)?;
+    Ok(UpdateModel {
+        table: delete.table,
+        values,
+        from: delete.using.clone(),
+        condition: delete.condition.clone(),
+        allow_all: delete.allow_all,
+        without_lifecycle: delete.without_lifecycle,
+        system_action: SystemUpdateAction::None,
+        options: delete.options.clone(),
+    })
+}
+
+fn apply_create_model_conventions<M>(
+    table: &TableMeta<M>,
+    app: &AppContext,
+    values: &mut Vec<(super::ast::ColumnRef, Expr)>,
+) -> Result<()> {
+    apply_primary_key_model_conventions(table, values)?;
+    if table.timestamps_enabled(app)? {
+        let now = app.clock().now();
+        if !has_assignment(values, "created_at") {
+            upsert_model_value(table, values, "created_at", now.to_db_value())?;
+        }
+        upsert_model_value(table, values, "updated_at", now.to_db_value())?;
+    }
+    Ok(())
+}
+
+fn apply_primary_key_model_conventions<M>(
+    table: &TableMeta<M>,
+    values: &mut Vec<(super::ast::ColumnRef, Expr)>,
+) -> Result<()> {
+    if has_assignment(values, table.primary_key_name()) {
+        return Ok(());
+    }
+
+    match table.primary_key_strategy() {
+        ModelPrimaryKeyStrategy::UuidV7 => upsert_model_value(
+            table,
+            values,
+            table.primary_key_name(),
+            DbValue::Uuid(ModelId::<M>::generate().into_uuid()),
+        ),
+        ModelPrimaryKeyStrategy::Manual => Err(Error::message(format!(
+            "create() requires an explicit `{}` assignment for `{}` because its primary_key_strategy is manual",
+            table.primary_key_name(),
+            table.name()
+        ))),
+    }
+}
+
+fn apply_update_model_conventions<M>(
+    table: &TableMeta<M>,
+    app: &AppContext,
+    values: &mut Vec<(super::ast::ColumnRef, Expr)>,
+    action: SystemUpdateAction,
+) -> Result<()> {
+    if action == SystemUpdateAction::Restore {
+        apply_restore_assignments(table, values)?;
+    }
+    if table.timestamps_enabled(app)? {
+        upsert_model_value(table, values, "updated_at", app.clock().now().to_db_value())?;
+    }
+    Ok(())
+}
+
+fn apply_soft_delete_model_conventions<M>(
+    table: &TableMeta<M>,
+    app: &AppContext,
+    values: &mut Vec<(super::ast::ColumnRef, Expr)>,
+) -> Result<()> {
+    upsert_model_value(table, values, "deleted_at", app.clock().now().to_db_value())?;
+    if table.timestamps_enabled(app)? {
+        upsert_model_value(table, values, "updated_at", app.clock().now().to_db_value())?;
+    }
+    Ok(())
+}
+
+fn apply_restore_assignments<M>(
+    table: &TableMeta<M>,
+    values: &mut Vec<(super::ast::ColumnRef, Expr)>,
+) -> Result<()> {
+    let deleted_at = table.deleted_at_column_info().ok_or_else(|| {
+        Error::message(format!(
+            "restore() requires a `deleted_at` column on `{}`",
+            table.name()
+        ))
+    })?;
+    upsert_assignment(
+        values,
+        ColumnRef::new(table.name(), deleted_at.name).typed(deleted_at.db_type),
+        Expr::value(DbValue::Null(deleted_at.db_type)),
+    );
+    Ok(())
+}
+
+fn has_assignment(values: &[(super::ast::ColumnRef, Expr)], column_name: &str) -> bool {
+    values.iter().any(|(column, _)| column.name == column_name)
+}
+
+fn upsert_model_value<M>(
+    table: &TableMeta<M>,
+    values: &mut Vec<(super::ast::ColumnRef, Expr)>,
+    column_name: &str,
+    value: DbValue,
+) -> Result<()> {
+    let column = table.column_info(column_name).ok_or_else(|| {
+        Error::message(format!(
+            "missing `{column_name}` column on table `{}`",
+            table.name()
+        ))
+    })?;
+    upsert_assignment(
+        values,
+        ColumnRef::new(table.name(), column.name).typed(column.db_type),
+        Expr::value(value),
+    );
+    Ok(())
 }
 
 fn merge_condition(existing: Option<Condition>, next: Condition) -> Option<Condition> {

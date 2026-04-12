@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::TimeZone;
 use forge::prelude::*;
 use tempfile::tempdir;
 
@@ -289,7 +288,7 @@ async fn only_one_scheduler_kernel_executes_when_sharing_a_backend() {
         .await
         .unwrap();
 
-    let now = chrono::Utc.with_ymd_and_hms(2026, 4, 9, 12, 0, 0).unwrap();
+    let now = DateTime::parse("2026-04-09T12:00:00Z").unwrap();
     let executed_one = scheduler_one.run_once_at(now).await.unwrap();
     let executed_two = scheduler_two.run_once_at(now).await.unwrap();
 

@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::TimeZone;
 use forge::prelude::*;
 use tempfile::tempdir;
 
@@ -86,8 +85,32 @@ mod app {
                     .required()
                     .rule(ids::MOBILE_RULE)
                     .apply()
-                    .await?;
-                Ok(())
+                    .await
+            }
+        }
+
+        #[async_trait]
+        impl forge::validation::FromMultipart for CreateUser {
+            async fn from_multipart(
+                multipart: &mut axum::extract::Multipart,
+            ) -> forge::foundation::Result<Self> {
+                let mut email = None;
+                let mut phone = None;
+                while let Some(field) = multipart.next_field().await
+                    .map_err(|e| forge::foundation::Error::message(format!("multipart error: {e}")))?
+                {
+                    match field.name().unwrap_or("") {
+                        "email" => email = Some(field.text().await
+                            .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?),
+                        "phone" => phone = Some(field.text().await
+                            .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?),
+                        _ => {}
+                    }
+                }
+                Ok(Self {
+                    email: email.unwrap_or_default(),
+                    phone: phone.unwrap_or_default(),
+                })
             }
         }
 
@@ -271,7 +294,7 @@ async fn scheduler_kernel_runs_registered_cron_jobs() {
         .build_scheduler_kernel()
         .await
         .unwrap();
-    let now = chrono::Utc.with_ymd_and_hms(2026, 4, 8, 12, 0, 0).unwrap();
+    let now = DateTime::parse("2026-04-08T12:00:00Z").unwrap();
 
     let executed = scheduler.tick_at(now).await.unwrap();
     assert_eq!(executed, vec![app::ids::HEARTBEAT_SCHEDULE]);

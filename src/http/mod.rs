@@ -1,14 +1,18 @@
+pub mod cookie;
+pub mod middleware;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::middleware::{self, Next};
+use axum::middleware::{self as axum_middleware, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
 use axum::Router;
 
 use crate::auth::{AccessScope, AuthError};
 use crate::foundation::{AppContext, Error, Result};
+use crate::http::middleware::MiddlewareConfig;
 use crate::logging::AuthOutcome;
 use crate::support::{GuardId, PermissionId};
 pub use crate::validation::Validated;
@@ -16,9 +20,10 @@ pub use crate::validation::Validated;
 pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
 pub type HttpRouter = Router<AppContext>;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct HttpRouteOptions {
     pub access: AccessScope,
+    middlewares: Vec<MiddlewareConfig>,
 }
 
 impl HttpRouteOptions {
@@ -48,6 +53,15 @@ impl HttpRouteOptions {
         P: Into<PermissionId>,
     {
         self.access = self.access.with_permissions(permissions);
+        self
+    }
+
+    /// Attach a middleware to this specific route.
+    ///
+    /// Per-route middleware runs between global middleware and auth middleware.
+    /// Multiple calls append middleware in order.
+    pub fn middleware(mut self, config: MiddlewareConfig) -> Self {
+        self.middlewares.push(config);
         self
     }
 
@@ -128,6 +142,14 @@ impl HttpRegistrar {
     }
 
     pub fn into_router(self, app: AppContext) -> Router {
+        self.into_router_with_middlewares(app, Vec::new())
+    }
+
+    pub fn into_router_with_middlewares(
+        self,
+        app: AppContext,
+        middlewares: Vec<middleware::MiddlewareConfig>,
+    ) -> Router {
         let mut router = Router::<AppContext>::new();
 
         for registration in self.registrations {
@@ -138,8 +160,9 @@ impl HttpRegistrar {
                     options,
                 } => {
                     let method_router = *method_router;
+                    let route_middlewares = options.middlewares.clone();
                     let method_router = if options.requires_auth() {
-                        method_router.route_layer(middleware::from_fn_with_state(
+                        method_router.route_layer(axum_middleware::from_fn_with_state(
                             HttpAuthState {
                                 app: app.clone(),
                                 options,
@@ -149,7 +172,15 @@ impl HttpRegistrar {
                     } else {
                         method_router
                     };
-                    router = router.route(&path, method_router);
+
+                    if route_middlewares.is_empty() {
+                        router = router.route(&path, method_router);
+                    } else {
+                        let mini = Router::<AppContext>::new().route(&path, method_router);
+                        let mini =
+                            middleware::apply_ordered_middlewares(mini, route_middlewares, &app);
+                        router = router.merge(mini);
+                    }
                 }
                 HttpRegistration::Nest {
                     path,
@@ -163,8 +194,11 @@ impl HttpRegistrar {
             }
         }
 
+        // Apply user-registered middleware (CORS, security headers, rate limit, etc.)
+        router = middleware::apply_ordered_middlewares(router, middlewares, &app);
+
         router
-            .layer(middleware::from_fn_with_state(
+            .layer(axum_middleware::from_fn_with_state(
                 app.clone(),
                 crate::logging::request_context_middleware,
             ))
@@ -215,6 +249,7 @@ async fn http_auth_middleware(
     }
 
     record_auth_outcome(&state.app, AuthOutcome::Success);
+    request.extensions_mut().insert(state.app.clone());
     request.extensions_mut().insert(actor);
     next.run(request).await
 }

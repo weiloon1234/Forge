@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::foundation::{Error, Result};
+use crate::redis::namespaced_value;
 use crate::support::runtime::{
     LeasedJobToken, MemoryRuntime, RedisRuntime, RuntimeBackend, ScheduledJobToken,
 };
@@ -213,23 +214,23 @@ impl RuntimeBackend {
 }
 
 fn ready_key(runtime: &RedisRuntime, queue: &QueueId) -> String {
-    format!("{}:jobs:ready:{queue}", runtime.namespace)
+    namespaced_value(&runtime.namespace, &format!("jobs:ready:{queue}"))
 }
 
 fn scheduled_key(runtime: &RedisRuntime, queue: &QueueId) -> String {
-    format!("{}:jobs:scheduled:{queue}", runtime.namespace)
+    namespaced_value(&runtime.namespace, &format!("jobs:scheduled:{queue}"))
 }
 
 fn leased_key(runtime: &RedisRuntime, queue: &QueueId) -> String {
-    format!("{}:jobs:leased:{queue}", runtime.namespace)
+    namespaced_value(&runtime.namespace, &format!("jobs:leased:{queue}"))
 }
 
 fn payload_key(runtime: &RedisRuntime, queue: &QueueId) -> String {
-    format!("{}:jobs:payload:{queue}", runtime.namespace)
+    namespaced_value(&runtime.namespace, &format!("jobs:payload:{queue}"))
 }
 
 fn dead_letter_key(runtime: &RedisRuntime, queue: &QueueId) -> String {
-    format!("{}:jobs:dead:{queue}", runtime.namespace)
+    namespaced_value(&runtime.namespace, &format!("jobs:dead:{queue}"))
 }
 
 fn expires_at(lease_ttl: Duration) -> i64 {
@@ -247,7 +248,7 @@ async fn enqueue_job_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let _: () = redis::pipe()
+    let _: () = ::redis::pipe()
         .atomic()
         .cmd("HSET")
         .arg(payload_key(runtime, queue))
@@ -276,7 +277,7 @@ async fn schedule_job_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let _: () = redis::pipe()
+    let _: () = ::redis::pipe()
         .atomic()
         .cmd("HSET")
         .arg(payload_key(runtime, queue))
@@ -311,7 +312,7 @@ async fn promote_due_jobs_redis(
             .get_multiplexed_async_connection()
             .await
             .map_err(Error::other)?;
-        let count: i64 = redis::cmd("EVAL")
+        let count: i64 = ::redis::cmd("EVAL")
             .arg(PROMOTE_DUE_SCRIPT)
             .arg(2)
             .arg(scheduled_key(runtime, queue))
@@ -344,7 +345,7 @@ async fn requeue_expired_jobs_redis(
             .get_multiplexed_async_connection()
             .await
             .map_err(Error::other)?;
-        let count: i64 = redis::cmd("EVAL")
+        let count: i64 = ::redis::cmd("EVAL")
             .arg(REQUEUE_EXPIRED_SCRIPT)
             .arg(2)
             .arg(leased_key(runtime, queue))
@@ -372,7 +373,7 @@ async fn claim_job_redis(
             .get_multiplexed_async_connection()
             .await
             .map_err(Error::other)?;
-        let result: Option<Vec<String>> = redis::cmd("EVAL")
+        let result: Option<Vec<String>> = ::redis::cmd("EVAL")
             .arg(CLAIM_JOB_SCRIPT)
             .arg(3)
             .arg(ready_key(runtime, queue))
@@ -408,7 +409,7 @@ async fn renew_job_lease_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let renewed: i64 = redis::cmd("EVAL")
+    let renewed: i64 = ::redis::cmd("EVAL")
         .arg(RENEW_LEASE_SCRIPT)
         .arg(1)
         .arg(leased_key(runtime, queue))
@@ -426,7 +427,7 @@ async fn ack_job_redis(runtime: &RedisRuntime, queue: &QueueId, token: &str) -> 
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let acknowledged: i64 = redis::cmd("EVAL")
+    let acknowledged: i64 = ::redis::cmd("EVAL")
         .arg(ACK_JOB_SCRIPT)
         .arg(2)
         .arg(leased_key(runtime, queue))
@@ -451,7 +452,7 @@ async fn retry_job_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let rescheduled: i64 = redis::cmd("EVAL")
+    let rescheduled: i64 = ::redis::cmd("EVAL")
         .arg(RETRY_JOB_SCRIPT)
         .arg(3)
         .arg(leased_key(runtime, queue))
@@ -478,7 +479,7 @@ async fn dead_letter_job_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let dead_lettered: i64 = redis::cmd("EVAL")
+    let dead_lettered: i64 = ::redis::cmd("EVAL")
         .arg(DEAD_LETTER_JOB_SCRIPT)
         .arg(3)
         .arg(leased_key(runtime, queue))

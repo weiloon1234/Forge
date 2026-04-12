@@ -3,13 +3,12 @@ mod leadership;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 
 use crate::foundation::{AppContext, Error, Result};
-use crate::support::ScheduleId;
 use crate::support::{boxed, BoxFuture};
+use crate::support::{DateTime, ScheduleId};
 
 pub type ScheduleRegistrar = Arc<dyn Fn(&mut ScheduleRegistry) -> Result<()> + Send + Sync>;
 type ScheduleHandler = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
@@ -148,16 +147,12 @@ fn ensure_unique_name(tasks: &[ScheduledTask], id: &ScheduleId) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cron_due(
-    schedule: &CronExpression,
-    previous: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> bool {
+pub(crate) fn cron_due(schedule: &CronExpression, previous: DateTime, now: DateTime) -> bool {
     schedule
         .schedule()
-        .after(&(previous - chrono::Duration::nanoseconds(1)))
+        .after(&(previous.as_chrono() - chrono::Duration::nanoseconds(1)))
         .next()
-        .map(|next| next <= now)
+        .map(|next| next <= now.as_chrono())
         .unwrap_or(false)
 }
 

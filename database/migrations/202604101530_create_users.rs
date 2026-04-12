@@ -9,7 +9,7 @@ impl MigrationFile for Entry {
         ctx.raw_execute(
             r#"
             CREATE TABLE users (
-                id BIGINT PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT uuidv7(),
                 email TEXT NOT NULL UNIQUE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

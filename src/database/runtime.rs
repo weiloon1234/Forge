@@ -3,7 +3,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{
+    DateTime as ChronoDateTime, NaiveDate as ChronoDate, NaiveDateTime as ChronoNaiveDateTime,
+    NaiveTime as ChronoTime, Utc as ChronoUtc,
+};
 use futures_util::stream::{self, BoxStream};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,7 @@ use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
 use crate::foundation::{Error, Result};
+use crate::support::{Date, DateTime, LocalDateTime, Time};
 
 use super::ast::{DbType, DbValue, Numeric};
 use super::compiler::CompiledSql;
@@ -927,10 +931,10 @@ fn bind_query<'q>(
             DbValue::Text(value) => query.bind(value.clone()),
             DbValue::Json(value) => query.bind(sqlx::types::Json(value.clone())),
             DbValue::Uuid(value) => query.bind(*value),
-            DbValue::TimestampTz(value) => query.bind(*value),
-            DbValue::Timestamp(value) => query.bind(*value),
-            DbValue::Date(value) => query.bind(*value),
-            DbValue::Time(value) => query.bind(*value),
+            DbValue::TimestampTz(value) => query.bind(value.as_chrono()),
+            DbValue::Timestamp(value) => query.bind(value.as_chrono()),
+            DbValue::Date(value) => query.bind(value.as_chrono()),
+            DbValue::Time(value) => query.bind(value.as_chrono()),
             DbValue::Bytea(value) => query.bind(value.clone()),
             DbValue::Int16Array(value) => query.bind(value.clone()),
             DbValue::Int32Array(value) => query.bind(value.clone()),
@@ -950,10 +954,21 @@ fn bind_query<'q>(
                     .collect::<Vec<_>>(),
             ),
             DbValue::UuidArray(value) => query.bind(value.clone()),
-            DbValue::TimestampTzArray(value) => query.bind(value.clone()),
-            DbValue::TimestampArray(value) => query.bind(value.clone()),
-            DbValue::DateArray(value) => query.bind(value.clone()),
-            DbValue::TimeArray(value) => query.bind(value.clone()),
+            DbValue::TimestampTzArray(value) => {
+                query.bind(value.iter().map(DateTime::as_chrono).collect::<Vec<_>>())
+            }
+            DbValue::TimestampArray(value) => query.bind(
+                value
+                    .iter()
+                    .map(LocalDateTime::as_chrono)
+                    .collect::<Vec<_>>(),
+            ),
+            DbValue::DateArray(value) => {
+                query.bind(value.iter().map(Date::as_chrono).collect::<Vec<_>>())
+            }
+            DbValue::TimeArray(value) => {
+                query.bind(value.iter().map(Time::as_chrono).collect::<Vec<_>>())
+            }
             DbValue::ByteaArray(value) => query.bind(value.clone()),
         };
     }
@@ -975,10 +990,10 @@ fn bind_null<'q>(
         DbType::Text => query.bind(Option::<String>::None),
         DbType::Json => query.bind(Option::<sqlx::types::Json<serde_json::Value>>::None),
         DbType::Uuid => query.bind(Option::<Uuid>::None),
-        DbType::TimestampTz => query.bind(Option::<DateTime<Utc>>::None),
-        DbType::Timestamp => query.bind(Option::<NaiveDateTime>::None),
-        DbType::Date => query.bind(Option::<NaiveDate>::None),
-        DbType::Time => query.bind(Option::<NaiveTime>::None),
+        DbType::TimestampTz => query.bind(Option::<ChronoDateTime<ChronoUtc>>::None),
+        DbType::Timestamp => query.bind(Option::<ChronoNaiveDateTime>::None),
+        DbType::Date => query.bind(Option::<ChronoDate>::None),
+        DbType::Time => query.bind(Option::<ChronoTime>::None),
         DbType::Bytea => query.bind(Option::<Vec<u8>>::None),
         DbType::Int16Array => query.bind(Option::<Vec<i16>>::None),
         DbType::Int32Array => query.bind(Option::<Vec<i32>>::None),
@@ -990,10 +1005,10 @@ fn bind_null<'q>(
         DbType::TextArray => query.bind(Option::<Vec<String>>::None),
         DbType::JsonArray => query.bind(Option::<Vec<sqlx::types::Json<serde_json::Value>>>::None),
         DbType::UuidArray => query.bind(Option::<Vec<Uuid>>::None),
-        DbType::TimestampTzArray => query.bind(Option::<Vec<DateTime<Utc>>>::None),
-        DbType::TimestampArray => query.bind(Option::<Vec<NaiveDateTime>>::None),
-        DbType::DateArray => query.bind(Option::<Vec<NaiveDate>>::None),
-        DbType::TimeArray => query.bind(Option::<Vec<NaiveTime>>::None),
+        DbType::TimestampTzArray => query.bind(Option::<Vec<ChronoDateTime<ChronoUtc>>>::None),
+        DbType::TimestampArray => query.bind(Option::<Vec<ChronoNaiveDateTime>>::None),
+        DbType::DateArray => query.bind(Option::<Vec<ChronoDate>>::None),
+        DbType::TimeArray => query.bind(Option::<Vec<ChronoTime>>::None),
         DbType::ByteaArray => query.bind(Option::<Vec<Vec<u8>>>::None),
     }
 }
@@ -1150,33 +1165,37 @@ fn decode_column_as(row: &PgRow, name: &str, db_type: DbType) -> Result<DbValue>
             })
             .map_err(Error::other),
         DbType::TimestampTz => row
-            .try_get::<Option<DateTime<Utc>>, _>(name)
+            .try_get::<Option<ChronoDateTime<ChronoUtc>>, _>(name)
             .map(|value| {
                 value
+                    .map(DateTime::from_chrono)
                     .map(DbValue::TimestampTz)
                     .unwrap_or(DbValue::Null(DbType::TimestampTz))
             })
             .map_err(Error::other),
         DbType::Timestamp => row
-            .try_get::<Option<NaiveDateTime>, _>(name)
+            .try_get::<Option<ChronoNaiveDateTime>, _>(name)
             .map(|value| {
                 value
+                    .map(LocalDateTime::from_chrono)
                     .map(DbValue::Timestamp)
                     .unwrap_or(DbValue::Null(DbType::Timestamp))
             })
             .map_err(Error::other),
         DbType::Date => row
-            .try_get::<Option<NaiveDate>, _>(name)
+            .try_get::<Option<ChronoDate>, _>(name)
             .map(|value| {
                 value
+                    .map(Date::from_chrono)
                     .map(DbValue::Date)
                     .unwrap_or(DbValue::Null(DbType::Date))
             })
             .map_err(Error::other),
         DbType::Time => row
-            .try_get::<Option<NaiveTime>, _>(name)
+            .try_get::<Option<ChronoTime>, _>(name)
             .map(|value| {
                 value
+                    .map(Time::from_chrono)
                     .map(DbValue::Time)
                     .unwrap_or(DbValue::Null(DbType::Time))
             })
@@ -1275,34 +1294,46 @@ fn decode_column_as(row: &PgRow, name: &str, db_type: DbType) -> Result<DbValue>
             })
             .map_err(Error::other),
         DbType::TimestampTzArray => row
-            .try_get::<Option<Vec<DateTime<Utc>>>, _>(name)
+            .try_get::<Option<Vec<ChronoDateTime<ChronoUtc>>>, _>(name)
             .map(|value| {
                 value
-                    .map(DbValue::TimestampTzArray)
+                    .map(|values| {
+                        DbValue::TimestampTzArray(
+                            values.into_iter().map(DateTime::from_chrono).collect(),
+                        )
+                    })
                     .unwrap_or(DbValue::Null(DbType::TimestampTzArray))
             })
             .map_err(Error::other),
         DbType::TimestampArray => row
-            .try_get::<Option<Vec<NaiveDateTime>>, _>(name)
+            .try_get::<Option<Vec<ChronoNaiveDateTime>>, _>(name)
             .map(|value| {
                 value
-                    .map(DbValue::TimestampArray)
+                    .map(|values| {
+                        DbValue::TimestampArray(
+                            values.into_iter().map(LocalDateTime::from_chrono).collect(),
+                        )
+                    })
                     .unwrap_or(DbValue::Null(DbType::TimestampArray))
             })
             .map_err(Error::other),
         DbType::DateArray => row
-            .try_get::<Option<Vec<NaiveDate>>, _>(name)
+            .try_get::<Option<Vec<ChronoDate>>, _>(name)
             .map(|value| {
                 value
-                    .map(DbValue::DateArray)
+                    .map(|values| {
+                        DbValue::DateArray(values.into_iter().map(Date::from_chrono).collect())
+                    })
                     .unwrap_or(DbValue::Null(DbType::DateArray))
             })
             .map_err(Error::other),
         DbType::TimeArray => row
-            .try_get::<Option<Vec<NaiveTime>>, _>(name)
+            .try_get::<Option<Vec<ChronoTime>>, _>(name)
             .map(|value| {
                 value
-                    .map(DbValue::TimeArray)
+                    .map(|values| {
+                        DbValue::TimeArray(values.into_iter().map(Time::from_chrono).collect())
+                    })
                     .unwrap_or(DbValue::Null(DbType::TimeArray))
             })
             .map_err(Error::other),

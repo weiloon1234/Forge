@@ -1,371 +1,61 @@
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock};
+mod context;
+mod executor;
+mod extractor;
+mod field;
+pub mod file_rules;
+mod from_multipart;
+mod rules;
+mod types;
+mod validator;
 
-use async_trait::async_trait;
-use axum::extract::{FromRef, FromRequest, Request};
-use axum::response::{IntoResponse, Response};
-use axum::{http::StatusCode, Json};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use validator::ValidateEmail;
-
-use crate::foundation::{AppContext, Error, Result};
-use crate::support::ValidationRuleId;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ValidationError {
-    pub code: String,
-    pub message: String,
-}
-
-impl ValidationError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct FieldError {
-    pub field: String,
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, thiserror::Error)]
-#[error("validation failed")]
-pub struct ValidationErrors {
-    pub errors: Vec<FieldError>,
-}
-
-impl ValidationErrors {
-    pub fn new(errors: Vec<FieldError>) -> Self {
-        Self { errors }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.errors.is_empty()
-    }
-}
-
-impl IntoResponse for ValidationErrors {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({
-                "message": "Validation failed",
-                "errors": self.errors,
-            })),
-        )
-            .into_response()
-    }
-}
-
-#[derive(Clone)]
-pub struct RuleContext {
-    app: AppContext,
-    field: String,
-}
-
-impl RuleContext {
-    pub fn new(app: AppContext, field: impl Into<String>) -> Self {
-        Self {
-            app,
-            field: field.into(),
-        }
-    }
-
-    pub fn app(&self) -> &AppContext {
-        &self.app
-    }
-
-    pub fn field(&self) -> &str {
-        &self.field
-    }
-}
-
-#[async_trait]
-pub trait ValidationRule: Send + Sync + 'static {
-    async fn validate(
-        &self,
-        context: &RuleContext,
-        value: &str,
-    ) -> std::result::Result<(), ValidationError>;
-}
-
-#[derive(Clone, Default)]
-pub struct RuleRegistry {
-    rules: Arc<RwLock<HashMap<ValidationRuleId, Arc<dyn ValidationRule>>>>,
-}
-
-impl RuleRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register<I>(&self, id: I, rule: impl ValidationRule) -> Result<()>
-    where
-        I: Into<ValidationRuleId>,
-    {
-        self.register_arc(id, Arc::new(rule))
-    }
-
-    pub fn register_arc<I>(&self, id: I, rule: Arc<dyn ValidationRule>) -> Result<()>
-    where
-        I: Into<ValidationRuleId>,
-    {
-        let id = id.into();
-        let mut rules = self
-            .rules
-            .write()
-            .map_err(|_| Error::message("rule registry lock poisoned"))?;
-        if rules.contains_key(&id) {
-            return Err(Error::message(format!(
-                "validation rule `{id}` already registered"
-            )));
-        }
-        rules.insert(id, rule);
-        Ok(())
-    }
-
-    pub fn get(&self, id: &ValidationRuleId) -> Result<Option<Arc<dyn ValidationRule>>> {
-        Ok(self
-            .rules
-            .read()
-            .map_err(|_| Error::message("rule registry lock poisoned"))?
-            .get(id)
-            .cloned())
-    }
-}
-
-pub struct Validator {
-    app: AppContext,
-    errors: Vec<FieldError>,
-}
-
-impl Validator {
-    pub fn new(app: AppContext) -> Self {
-        Self {
-            app,
-            errors: Vec::new(),
-        }
-    }
-
-    pub fn app(&self) -> &AppContext {
-        &self.app
-    }
-
-    pub fn field<'a>(
-        &'a mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> FieldValidator<'a> {
-        FieldValidator {
-            validator: self,
-            field: name.into(),
-            value: value.into(),
-            steps: Vec::new(),
-        }
-    }
-
-    pub fn finish(self) -> std::result::Result<(), ValidationErrors> {
-        if self.errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ValidationErrors::new(self.errors))
-        }
-    }
-
-    fn push_error(&mut self, field: String, error: ValidationError) {
-        self.errors.push(FieldError {
-            field,
-            code: error.code,
-            message: error.message,
-        });
-    }
-}
-
-enum FieldRule {
-    Required,
-    Email,
-    Min(usize),
-    Max(usize),
-    Named(ValidationRuleId),
-}
-
-pub struct FieldValidator<'a> {
-    validator: &'a mut Validator,
-    field: String,
-    value: String,
-    steps: Vec<FieldRule>,
-}
-
-impl<'a> FieldValidator<'a> {
-    pub fn required(mut self) -> Self {
-        self.steps.push(FieldRule::Required);
-        self
-    }
-
-    pub fn email(mut self) -> Self {
-        self.steps.push(FieldRule::Email);
-        self
-    }
-
-    pub fn min(mut self, length: usize) -> Self {
-        self.steps.push(FieldRule::Min(length));
-        self
-    }
-
-    pub fn max(mut self, length: usize) -> Self {
-        self.steps.push(FieldRule::Max(length));
-        self
-    }
-
-    pub fn rule<I>(mut self, id: I) -> Self
-    where
-        I: Into<ValidationRuleId>,
-    {
-        self.steps.push(FieldRule::Named(id.into()));
-        self
-    }
-
-    pub async fn apply(self) -> Result<()> {
-        let FieldValidator {
-            validator,
-            field,
-            value,
-            steps,
-        } = self;
-
-        for step in steps {
-            match step {
-                FieldRule::Required => {
-                    if value.trim().is_empty() {
-                        validator.push_error(
-                            field.clone(),
-                            ValidationError::new("required", format!("{field} is required")),
-                        );
-                    }
-                }
-                FieldRule::Email => {
-                    if !value.validate_email() {
-                        validator.push_error(
-                            field.clone(),
-                            ValidationError::new("email", format!("{field} must be a valid email")),
-                        );
-                    }
-                }
-                FieldRule::Min(length) => {
-                    if value.chars().count() < length {
-                        validator.push_error(
-                            field.clone(),
-                            ValidationError::new(
-                                "min",
-                                format!("{field} must be at least {length} characters"),
-                            ),
-                        );
-                    }
-                }
-                FieldRule::Max(length) => {
-                    if value.chars().count() > length {
-                        validator.push_error(
-                            field.clone(),
-                            ValidationError::new(
-                                "max",
-                                format!("{field} must be at most {length} characters"),
-                            ),
-                        );
-                    }
-                }
-                FieldRule::Named(id) => {
-                    let Some(rule) = validator.app.rules().get(&id)? else {
-                        return Err(Error::message(format!(
-                            "validation rule `{id}` is not registered"
-                        )));
-                    };
-                    let context = RuleContext::new(validator.app.clone(), field.clone());
-                    if let Err(error) = rule.validate(&context, &value).await {
-                        validator.push_error(field.clone(), error);
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[async_trait]
-pub trait RequestValidator: Send + Sync {
-    async fn validate(&self, validator: &mut Validator) -> Result<()>;
-}
-
-pub struct Validated<T>(pub T);
-
-impl<T> Deref for Validated<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for Validated<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<T, S> FromRequest<S> for Validated<T>
-where
-    T: DeserializeOwned + RequestValidator + Send + Sync,
-    S: Send + Sync,
-    AppContext: FromRef<S>,
-{
-    type Rejection = Response;
-
-    fn from_request(
-        req: Request,
-        state: &S,
-    ) -> impl std::future::Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
-        let app = AppContext::from_ref(state);
-        async move {
-            let Json(value) = Json::<T>::from_request(req, state)
-                .await
-                .map_err(|error| (StatusCode::BAD_REQUEST, error.body_text()).into_response())?;
-
-            let mut validator = Validator::new(app);
-            value
-                .validate(&mut validator)
-                .await
-                .map_err(|error| internal_error(error).into_response())?;
-            validator.finish().map_err(IntoResponse::into_response)?;
-
-            Ok(Self(value))
-        }
-    }
-}
-
-fn internal_error(error: Error) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({
-            "message": error.to_string(),
-        })),
-    )
-}
+pub use context::{RuleContext, RuleRegistry, ValidationRule};
+pub use extractor::{RequestValidator, Validated};
+pub use field::{EachValidator, FieldValidator};
+pub use from_multipart::FromMultipart;
+pub use types::{FieldError, ValidationError, ValidationErrors};
+pub use validator::Validator;
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use async_trait::async_trait;
+    use tempfile::tempdir;
 
     use super::{RuleContext, RuleRegistry, ValidationError, ValidationRule, Validator};
     use crate::foundation::AppContext;
     use crate::support::ValidationRuleId;
     use crate::{config::ConfigRepository, foundation::Container};
+
+    fn test_app() -> AppContext {
+        AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap()
+    }
+
+    fn test_app_in_timezone(timezone: &str) -> AppContext {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-app.toml"),
+            format!(
+                r#"
+                    [app]
+                    timezone = "{timezone}"
+                "#
+            ),
+        )
+        .unwrap();
+
+        AppContext::new(
+            Container::new(),
+            ConfigRepository::from_dir(directory.path()).unwrap(),
+            RuleRegistry::new(),
+        )
+        .unwrap()
+    }
 
     struct MobileRule;
 
@@ -390,7 +80,7 @@ mod tests {
         rules
             .register(ValidationRuleId::new("mobile"), MobileRule)
             .unwrap();
-        let app = AppContext::new(Container::new(), ConfigRepository::empty(), rules);
+        let app = AppContext::new(Container::new(), ConfigRepository::empty(), rules).unwrap();
         let mut validator = Validator::new(app);
 
         validator
@@ -417,5 +107,1010 @@ mod tests {
             .register(ValidationRuleId::new("mobile"), MobileRule)
             .unwrap_err();
         assert!(error.to_string().contains("already registered"));
+    }
+
+    // --- Regex rule tests ---
+
+    #[tokio::test]
+    async fn regex_rule_accepts_matching_value() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("code", "ABC123")
+            .regex(r"^[A-Z]{3}\d{3}$")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn regex_rule_rejects_non_matching_value() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("code", "abc123")
+            .regex(r"^[A-Z]{3}\d{3}$")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "regex");
+    }
+
+    // --- URL rule tests ---
+
+    #[tokio::test]
+    async fn url_rule_accepts_valid_urls() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("website", "https://example.com")
+            .url()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn url_rule_rejects_invalid_urls() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("website", "not-a-url").url().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "url");
+    }
+
+    #[tokio::test]
+    async fn url_rule_rejects_empty_string() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("website", "").url().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "url");
+    }
+
+    // --- UUID rule tests ---
+
+    #[tokio::test]
+    async fn uuid_rule_accepts_valid_uuid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("id", "550e8400-e29b-41d4-a716-446655440000")
+            .uuid()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn uuid_rule_rejects_invalid_uuid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("id", "not-a-uuid").uuid().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "uuid");
+    }
+
+    #[tokio::test]
+    async fn date_rule_accepts_valid_date() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("published_on", "2026-04-11")
+            .date()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn time_rule_rejects_invalid_time() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("starts_at", "25:00:00")
+            .time()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "time");
+    }
+
+    #[tokio::test]
+    async fn datetime_rule_uses_app_timezone_for_offset_less_values() {
+        let app = test_app_in_timezone("Asia/Kuala_Lumpur");
+        let mut v = Validator::new(app);
+        v.field("published_at", "2026-04-11T13:00:00")
+            .datetime()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn local_datetime_rule_rejects_offset_aware_values() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("published_at", "2026-04-11T13:00:00+08:00")
+            .local_datetime()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "local_datetime");
+    }
+
+    #[tokio::test]
+    async fn before_and_after_rules_compare_normalized_datetimes() {
+        let app = test_app_in_timezone("Asia/Kuala_Lumpur");
+        let mut v = Validator::new(app.clone());
+        v.field("window_start", "2026-04-11T13:00:00")
+            .before("window_end", "2026-04-11T14:00:00+08:00")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+
+        let mut v = Validator::new(app);
+        v.field("window_end", "2026-04-11T14:00:00")
+            .after("window_start", "2026-04-11T14:00:00+08:00")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "after");
+    }
+
+    // --- Numeric rule tests ---
+
+    #[tokio::test]
+    async fn numeric_rule_accepts_digits() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("amount", "123.45").numeric().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn numeric_rule_accepts_negative() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("amount", "-42").numeric().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn numeric_rule_rejects_letters() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("amount", "12abc").numeric().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "numeric");
+    }
+
+    // --- Alpha rule tests ---
+
+    #[tokio::test]
+    async fn alpha_rule_accepts_letters() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("name", "Hello").alpha().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn alpha_rule_rejects_digits() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("name", "Hello123").alpha().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "alpha");
+    }
+
+    // --- AlphaNumeric rule tests ---
+
+    #[tokio::test]
+    async fn alpha_numeric_rule_accepts_letters_and_digits() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("username", "user123")
+            .alpha_numeric()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn alpha_numeric_rule_rejects_special_chars() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("username", "user@123")
+            .alpha_numeric()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "alpha_numeric");
+    }
+
+    // --- InList rule tests ---
+
+    #[tokio::test]
+    async fn in_list_rule_accepts_valid_value() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("color", "red")
+            .in_list(vec!["red", "green", "blue"])
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn in_list_rule_rejects_invalid_value() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("color", "yellow")
+            .in_list(vec!["red", "green", "blue"])
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "in_list");
+    }
+
+    // --- NotIn rule tests ---
+
+    #[tokio::test]
+    async fn not_in_rule_accepts_valid_value() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("color", "yellow")
+            .not_in(vec!["red", "green", "blue"])
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn not_in_rule_rejects_forbidden_value() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("color", "red")
+            .not_in(vec!["red", "green", "blue"])
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "not_in");
+    }
+
+    // --- StartsWith rule tests ---
+
+    #[tokio::test]
+    async fn starts_with_rule_accepts_matching_prefix() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("path", "/api/users")
+            .starts_with("/api")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn starts_with_rule_rejects_wrong_prefix() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("path", "/web/users")
+            .starts_with("/api")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "starts_with");
+    }
+
+    // --- EndsWith rule tests ---
+
+    #[tokio::test]
+    async fn ends_with_rule_accepts_matching_suffix() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("file", "photo.png")
+            .ends_with(".png")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ends_with_rule_rejects_wrong_suffix() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("file", "photo.jpg")
+            .ends_with(".png")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "ends_with");
+    }
+
+    // --- IP rule tests ---
+
+    #[tokio::test]
+    async fn ip_rule_accepts_valid_ipv4() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("addr", "192.168.1.1").ip().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ip_rule_accepts_valid_ipv6() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("addr", "::1").ip().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ip_rule_rejects_invalid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("addr", "999.999.999.999")
+            .ip()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "ip");
+    }
+
+    // --- JSON rule tests ---
+
+    #[tokio::test]
+    async fn json_rule_accepts_valid_json() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("data", r#"{"key":"value"}"#)
+            .json()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn json_rule_rejects_invalid_json() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("data", "not json").json().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "json");
+    }
+
+    // --- Confirmed rule tests ---
+
+    #[tokio::test]
+    async fn confirmed_rule_accepts_matching_values() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("password", "secret123")
+            .confirmed("password_confirmation", "secret123")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn confirmed_rule_rejects_mismatched_values() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("password", "secret123")
+            .confirmed("password_confirmation", "different")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "confirmed");
+    }
+
+    // --- Digits rule tests ---
+
+    #[tokio::test]
+    async fn digits_rule_accepts_only_digits() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("zip", "12345").digits().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn digits_rule_rejects_non_digits() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("zip", "12a45").digits().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "digits");
+    }
+
+    // --- Timezone rule tests ---
+
+    #[tokio::test]
+    async fn timezone_rule_accepts_utc() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("tz", "UTC").timezone().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn timezone_rule_accepts_iana() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("tz", "Asia/Kuala_Lumpur")
+            .timezone()
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn timezone_rule_accepts_fixed_offset() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("tz", "+08:00").timezone().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn timezone_rule_rejects_invalid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("tz", "Invalid/Zone")
+            .timezone()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "timezone");
+    }
+
+    // --- Nullable tests ---
+
+    #[tokio::test]
+    async fn nullable_skips_rules_when_empty() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("nickname", "")
+            .nullable()
+            .email()
+            .min(3)
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn nullable_validates_when_not_empty() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("nickname", "ab")
+            .nullable()
+            .email()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "email");
+    }
+
+    // --- Bail tests ---
+
+    #[tokio::test]
+    async fn bail_stops_on_first_error() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("name", "")
+            .bail()
+            .required()
+            .email()
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors.len(), 1); // Only required error, not email
+    }
+
+    // --- MinNumeric rule tests ---
+
+    #[tokio::test]
+    async fn min_numeric_accepts_above() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("age", "25").min_numeric(0.0).apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn min_numeric_rejects_below() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("age", "-1").min_numeric(0.0).apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "min_numeric");
+    }
+
+    // --- MaxNumeric rule tests ---
+
+    #[tokio::test]
+    async fn max_numeric_rejects_above() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("age", "200")
+            .max_numeric(150.0)
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "max_numeric");
+    }
+
+    // --- Integer rule tests ---
+
+    #[tokio::test]
+    async fn integer_accepts_valid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("count", "42").integer().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn integer_rejects_decimal() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("count", "3.14").integer().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "integer");
+    }
+
+    // --- Between rule tests ---
+
+    #[tokio::test]
+    async fn between_accepts_in_range() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("score", "85")
+            .between(0.0, 100.0)
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn between_rejects_out_of_range() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("score", "150")
+            .between(0.0, 100.0)
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "between");
+    }
+
+    // --- Ipv4 rule tests ---
+
+    #[tokio::test]
+    async fn ipv4_accepts_valid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("ip", "192.168.1.1").ipv4().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ipv4_rejects_ipv6() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("ip", "::1").ipv4().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "ipv4");
+    }
+
+    // --- Ipv6 rule tests ---
+
+    #[tokio::test]
+    async fn ipv6_accepts_valid() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("ip", "::1").ipv6().apply().await.unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ipv6_rejects_ipv4() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("ip", "192.168.1.1").ipv6().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "ipv6");
+    }
+
+    // --- Same rule tests ---
+
+    #[tokio::test]
+    async fn same_accepts_matching() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("password", "secret123")
+            .same("password_confirmation", "secret123")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn same_rejects_mismatch() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("password", "secret123")
+            .same("password_confirmation", "different")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "same");
+    }
+
+    // --- Different rule tests ---
+
+    #[tokio::test]
+    async fn different_accepts_different() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("new_email", "new@test.com")
+            .different("current_email", "old@test.com")
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn different_rejects_same() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("new_email", "same@test.com")
+            .different("current_email", "same@test.com")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "different");
+    }
+
+    // --- Unique rule tests ---
+
+    #[tokio::test]
+    async fn unique_adds_rule_to_steps() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        // The apply will fail because no database is configured in test_app
+        v.field("email", "test@example.com")
+            .unique("users", "email")
+            .apply()
+            .await
+            .unwrap_err();
+    }
+
+    // --- Exists rule tests ---
+
+    #[tokio::test]
+    async fn exists_adds_rule_to_steps() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("country_id", "1")
+            .exists("countries", "id")
+            .apply()
+            .await
+            .unwrap_err();
+    }
+
+    // --- Translation-aware validation tests ---
+
+    fn test_app_with_i18n() -> (AppContext, tempfile::TempDir) {
+        use crate::config::I18nConfig;
+        use crate::i18n::I18nManager;
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let locale_dir = dir.path().join("en");
+        fs::create_dir_all(&locale_dir).unwrap();
+        fs::write(
+            locale_dir.join("validation.json"),
+            r#"{
+                "validation": {
+                    "required": "The {{attribute}} field is required.",
+                    "email": "The {{attribute}} must be a valid email address.",
+                    "min": "The {{attribute}} must be at least {{min}} characters.",
+                    "attributes": {
+                        "email": "email address"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let ms_dir = dir.path().join("ms");
+        fs::create_dir_all(&ms_dir).unwrap();
+        fs::write(
+            ms_dir.join("validation.json"),
+            r#"{
+                "validation": {
+                    "required": "Medan {{attribute}} adalah wajib.",
+                    "attributes": {
+                        "email": "alamat e-mel"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = I18nConfig {
+            default_locale: "en".to_string(),
+            fallback_locale: "en".to_string(),
+            resource_path: dir.path().to_str().unwrap().to_string(),
+        };
+        let manager = I18nManager::load(&config).unwrap();
+
+        let container = Container::new();
+        container.singleton_arc(Arc::new(manager)).unwrap();
+
+        let app =
+            AppContext::new(container, ConfigRepository::empty(), RuleRegistry::new()).unwrap();
+        (app, dir)
+    }
+
+    #[tokio::test]
+    async fn default_messages_use_fallback_when_no_i18n() {
+        let app = test_app();
+        let mut v = Validator::new(app);
+        v.field("email", "").required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "required");
+        assert_eq!(errors.errors[0].message, "The email field is required.");
+    }
+
+    #[tokio::test]
+    async fn translates_messages_from_i18n() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.field("email", "").required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(
+            errors.errors[0].message,
+            "The email address field is required."
+        );
+    }
+
+    #[tokio::test]
+    async fn translates_messages_with_locale() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app).locale("ms");
+        v.field("email", "").required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].message, "Medan alamat e-mel adalah wajib.");
+    }
+
+    #[tokio::test]
+    async fn translates_messages_with_params() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.field("password", "ab").min(8).apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(
+            errors.errors[0].message,
+            "The password must be at least 8 characters."
+        );
+    }
+
+    #[tokio::test]
+    async fn with_message_overrides_translation() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.field("email", "")
+            .required()
+            .with_message("We need your email!")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].message, "We need your email!");
+    }
+
+    #[tokio::test]
+    async fn with_message_supports_placeholders() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.field("email", "")
+            .required()
+            .with_message("Please provide the {{attribute}}.")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(
+            errors.errors[0].message,
+            "Please provide the email address."
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_message_overrides_translation() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.custom_message("email", "required", "Email is mandatory!");
+        v.field("email", "").required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].message, "Email is mandatory!");
+    }
+
+    #[tokio::test]
+    async fn custom_attribute_overrides_field_name() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.custom_attribute("email", "work email");
+        v.field("email", "").required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(
+            errors.errors[0].message,
+            "The work email field is required."
+        );
+    }
+
+    #[tokio::test]
+    async fn with_message_has_highest_priority() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app);
+        v.custom_message("email", "required", "Custom from validator");
+        v.field("email", "")
+            .required()
+            .with_message("Inline message wins")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].message, "Inline message wins");
+    }
+
+    #[tokio::test]
+    async fn named_rule_with_with_message() {
+        let rules = RuleRegistry::new();
+        rules
+            .register(ValidationRuleId::new("mobile"), MobileRule)
+            .unwrap();
+        let app = AppContext::new(Container::new(), ConfigRepository::empty(), rules).unwrap();
+        let mut v = Validator::new(app);
+        v.field("phone", "123")
+            .rule(ValidationRuleId::new("mobile"))
+            .with_message("Invalid phone format")
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "mobile");
+        assert_eq!(errors.errors[0].message, "Invalid phone format");
+    }
+
+    #[tokio::test]
+    async fn named_rule_without_with_message_uses_rule_message() {
+        let rules = RuleRegistry::new();
+        rules
+            .register(ValidationRuleId::new("mobile"), MobileRule)
+            .unwrap();
+        let app = AppContext::new(Container::new(), ConfigRepository::empty(), rules).unwrap();
+        let mut v = Validator::new(app);
+        v.field("phone", "123")
+            .rule(ValidationRuleId::new("mobile"))
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].code, "mobile");
+        assert_eq!(errors.errors[0].message, "invalid mobile number");
+    }
+
+    // --- EachValidator tests ---
+
+    #[tokio::test]
+    async fn each_validates_all_items() {
+        let app = test_app();
+        let items = vec!["ab".to_string(), "".to_string(), "c".to_string()];
+        let mut v = Validator::new(app);
+        v.each("tags", &items)
+            .required()
+            .min(2)
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors.len(), 2);
+        assert_eq!(errors.errors[0].field, "tags[1]");
+        assert_eq!(errors.errors[0].code, "required");
+        assert_eq!(errors.errors[1].field, "tags[2]");
+        assert_eq!(errors.errors[1].code, "min");
+    }
+
+    #[tokio::test]
+    async fn each_with_no_errors() {
+        let app = test_app();
+        let items = vec!["rust".to_string(), "forge".to_string()];
+        let mut v = Validator::new(app);
+        v.each("tags", &items)
+            .required()
+            .min(2)
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn each_nullable_skips_empty() {
+        let app = test_app();
+        let items = vec!["rust".to_string(), "".to_string(), "forge".to_string()];
+        let mut v = Validator::new(app);
+        v.each("tags", &items)
+            .nullable()
+            .min(2)
+            .apply()
+            .await
+            .unwrap();
+        assert!(v.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn each_with_custom_attribute() {
+        let app = test_app();
+        let items = vec!["".to_string()];
+        let mut v = Validator::new(app);
+        v.custom_attribute("tags", "tag");
+        v.each("tags", &items).required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].field, "tags[0]");
+        assert_eq!(errors.errors[0].message, "The tag field is required.");
+    }
+
+    #[tokio::test]
+    async fn each_with_bail() {
+        let app = test_app();
+        let items = vec!["".to_string()];
+        let mut v = Validator::new(app);
+        v.each("tags", &items)
+            .bail()
+            .required()
+            .min(2)
+            .apply()
+            .await
+            .unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors.len(), 1);
+        assert_eq!(errors.errors[0].code, "required");
     }
 }

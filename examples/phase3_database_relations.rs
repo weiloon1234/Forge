@@ -1,50 +1,49 @@
 use forge::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "users")]
 struct User {
-    id: i64,
+    id: ModelId<User>,
     merchants: Loaded<Vec<Merchant>>,
     merchant_count: Loaded<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "merchants")]
 struct Merchant {
-    id: i64,
-    user_id: i64,
+    id: ModelId<Merchant>,
+    user_id: ModelId<User>,
     orders: Loaded<Vec<Order>>,
     order_total: Loaded<Option<i64>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "orders")]
 struct Order {
-    id: i64,
-    merchant_id: i64,
+    id: ModelId<Order>,
+    merchant_id: ModelId<Merchant>,
     total: i64,
     items: Loaded<Vec<OrderItem>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "order_items")]
 struct OrderItem {
-    id: i64,
-    order_id: i64,
-    product_id: i64,
+    id: ModelId<OrderItem>,
+    order_id: ModelId<Order>,
+    product_id: ModelId<Product>,
     product: Loaded<Option<Product>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "products")]
 struct Product {
-    id: i64,
+    id: ModelId<Product>,
 }
 
 impl User {
     fn merchants() -> RelationDef<Self, Merchant> {
         has_many(
-            "merchants",
             Self::ID,
             Merchant::USER_ID,
             |user| user.id,
@@ -60,7 +59,6 @@ impl User {
 impl Merchant {
     fn orders() -> RelationDef<Self, Order> {
         has_many(
-            "orders",
             Self::ID,
             Order::MERCHANT_ID,
             |merchant| merchant.id,
@@ -78,7 +76,6 @@ impl Merchant {
 impl Order {
     fn items() -> RelationDef<Self, OrderItem> {
         has_many(
-            "items",
             Self::ID,
             OrderItem::ORDER_ID,
             |order| order.id,
@@ -90,7 +87,6 @@ impl Order {
 impl OrderItem {
     fn product() -> RelationDef<Self, Product> {
         belongs_to(
-            "product",
             Self::PRODUCT_ID,
             Product::ID,
             |item| Some(item.product_id),

@@ -37,6 +37,20 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             ));
         }
 
+        if field_args.write_mutator.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "Projection derive does not support #[forge(write_mutator = ...)]",
+            ));
+        }
+
+        if field_args.read_accessor.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "Projection derive does not support #[forge(read_accessor = ...)]",
+            ));
+        }
+
         let alias = field_name_literal(field_ident, &field_args.alias);
         if !aliases.insert(alias.value()) {
             return Err(syn::Error::new_spanned(

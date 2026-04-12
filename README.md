@@ -118,8 +118,38 @@ Advanced but first-class bootstraps:
 - Observability: readiness, liveness, runtime diagnostics, and typed runtime counters are implemented.
 - Distributed runtime: leased worker processing and cluster-safe scheduler leadership are implemented.
 - Plugins: compile-time plugin registry, dependency validation, config defaults, package assets, and scaffolds are implemented.
-- Database query blueprint (`v1 -> v3`): complete. Forge ships the AST-first Postgres query system described in [rust_query_system_blueprint_v_1_v_3.md](rust_query_system_blueprint_v_1_v_3.md), including generic builders, typed model/projection queries, model-first `create()/update()/query()` APIs, always-on model lifecycle hooks/events on app-backed writes, explicit handwritten relations, recursive eager loading, `where_has`, aggregates, many-to-many, codegen-assisted metadata, raw SQL escape hatches, and batched `ModelQuery::stream()` support for eager-loaded relations and relation aggregates.
+- Database query blueprint (`v1 -> v3`): complete. Forge ships the AST-first Postgres query system described in [rust_query_system_blueprint_v_1_v_3.md](rust_query_system_blueprint_v_1_v_3.md), including generic builders, typed model/projection queries, model-first `create()/update()/query()` APIs, safe-by-default `ModelId<M>` UUIDv7 primary keys serialized as strings, always-on model lifecycle hooks/events on app-backed writes, explicit handwritten relations, recursive eager loading, `where_has`, aggregates, many-to-many, codegen-assisted metadata, raw SQL escape hatches, and batched `ModelQuery::stream()` support for eager-loaded relations and relation aggregates.
 - Database post-blueprint work: Rust migration/seeder lifecycle with build-time discovery and runtime hardening are implemented separately from the query blueprint scope. See [docs/query-blueprint-status.md](docs/query-blueprint-status.md).
+- Date/time kernel: Forge now exposes immutable `DateTime`, `LocalDateTime`, `Date`, `Time`, `Timezone`, and `Clock` types as the public framework date story, with `[app] timezone` controlling parsing and presentation defaults while runtime storage stays UTC-first.
+- Redis app API: `app.redis()` now exposes a safe namespaced Redis wrapper for low-level key/channel operations, with an explicit cross-namespace escape hatch for the rare multi-project integration case, while the internal runtime backend remains framework plumbing.
+
+## Redis
+
+Forge keeps the internal runtime backend private, but consumer app code can use Redis directly through `AppContext`:
+
+```rust
+use forge::prelude::*;
+
+async fn remember_login(app: &AppContext, user_id: &str) -> Result<()> {
+    let redis = app.redis()?;
+    let key = redis.key(format!("logins:{user_id}"));
+    let mut connection = redis.connection().await?;
+
+    connection.set_ex(&key, "1", 3600).await?;
+
+    Ok(())
+}
+```
+
+All `RedisKey` and `RedisChannel` values are automatically prefixed with `redis.namespace`, so apps sharing the same Redis server stay isolated as long as each project sets a distinct namespace.
+
+For the rare case where one Forge app must read another app's keys intentionally, use the explicit namespace helpers instead of turning off namespacing:
+
+```rust
+let redis = app.redis()?;
+let foreign_key = redis.key_in_namespace("analytics:prod", "daily:users");
+let foreign_channel = redis.channel_in_namespace("analytics:prod", "events");
+```
 
 ## Examples
 
@@ -129,8 +159,9 @@ Advanced but first-class bootstraps:
 - [examples/phase25_auth.rs](examples/phase25_auth.rs)
 - [examples/phase3_observability.rs](examples/phase3_observability.rs)
 - [examples/phase3_worker.rs](examples/phase3_worker.rs)
+- [examples/phase3_redis.rs](examples/phase3_redis.rs): public `app.redis()` API with default namespacing and explicit cross-namespace access
 - [examples/phase3_database_generic.rs](examples/phase3_database_generic.rs): generic `Query` builder and AST-first foundation
-- [examples/phase3_database_model.rs](examples/phase3_database_model.rs): typed `ModelQuery` with model-first `create()/update()` builders and model-local lifecycle hooks
+- [examples/phase3_database_model.rs](examples/phase3_database_model.rs): typed `ModelQuery` with model-first `create()/update()` builders, safe `ModelId<M>` UUIDv7 primary keys, default timestamps, soft deletes, and model-local lifecycle hooks
 - [examples/phase3_database_relations.rs](examples/phase3_database_relations.rs): canonical v3 relation-tree example with nested `.with(...)`, `where_has`, and relation aggregates
 - [examples/phase3_database_projection.rs](examples/phase3_database_projection.rs): typed projections with CTE, `UNION`, `CASE`, and JSON expressions
 - [examples/phase3_database_many_to_many.rs](examples/phase3_database_many_to_many.rs): explicit many-to-many relations with pivot projection hydration

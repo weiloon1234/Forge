@@ -3,7 +3,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use forge::config::DatabaseConfig;
 use forge::prelude::*;
 use futures_util::TryStreamExt;
@@ -19,6 +18,9 @@ const PRODUCTS_TABLE: &str = "forge_test_products";
 const TAGS_TABLE: &str = "forge_test_tags";
 const MERCHANT_TAGS_TABLE: &str = "forge_test_merchant_tags";
 const PAYMENTS_TABLE: &str = "forge_test_payments";
+const POSTS_TABLE: &str = "forge_test_posts";
+const SAFE_USERS_TABLE: &str = "forge_test_safe_uuid_users";
+const PASSWORD_USERS_TABLE: &str = "forge_test_password_users";
 
 fn database_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -63,6 +65,16 @@ async fn test_app_runtime_with_provider<P>(provider: P) -> Option<TestAppRuntime
 where
     P: ServiceProvider,
 {
+    test_app_runtime_with_provider_and_config(provider, "").await
+}
+
+async fn test_app_runtime_with_provider_and_config<P>(
+    provider: P,
+    extra_config: &str,
+) -> Option<TestAppRuntime>
+where
+    P: ServiceProvider,
+{
     let url = postgres_url()?;
     let dir = tempfile::tempdir().ok()?;
     fs::write(
@@ -71,6 +83,7 @@ where
             r#"
             [database]
             url = "{url}"
+            {extra_config}
             "#
         ),
     )
@@ -107,6 +120,8 @@ async fn reset_schema(database: &DatabaseManager) {
             &format!("DROP TABLE IF EXISTS {ORDERS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {TAGS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PAYMENTS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {POSTS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {PASSWORD_USERS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {MERCHANTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PRODUCTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {USERS_TABLE}"),
@@ -130,6 +145,12 @@ async fn reset_schema(database: &DatabaseManager) {
             ),
             &format!(
                 "CREATE TABLE {PAYMENTS_TABLE} (id BIGINT PRIMARY KEY, merchant_id BIGINT NOT NULL, amount NUMERIC NOT NULL, metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb)"
+            ),
+            &format!(
+                "CREATE TABLE {POSTS_TABLE} (id BIGINT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, deleted_at TIMESTAMPTZ NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {PASSWORD_USERS_TABLE} (id BIGINT PRIMARY KEY, email TEXT NOT NULL, password TEXT NOT NULL)"
             ),
             &format!(
                 "CREATE TABLE {ORDER_ITEMS_TABLE} (id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL, product_id BIGINT NOT NULL, quantity BIGINT NOT NULL)"
@@ -166,8 +187,8 @@ impl FromDbValue for MerchantStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE, primary_key_strategy = "manual")]
 struct User {
     id: i64,
     email: String,
@@ -177,8 +198,8 @@ struct User {
     merchant_count: Loaded<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = MERCHANTS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = MERCHANTS_TABLE, primary_key_strategy = "manual")]
 struct Merchant {
     id: i64,
     user_id: i64,
@@ -191,8 +212,8 @@ struct Merchant {
     tag_count: Loaded<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = ORDERS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = ORDERS_TABLE, primary_key_strategy = "manual")]
 struct Order {
     id: i64,
     merchant_id: i64,
@@ -200,8 +221,8 @@ struct Order {
     items: Loaded<Vec<OrderItem>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = ORDER_ITEMS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = ORDER_ITEMS_TABLE, primary_key_strategy = "manual")]
 struct OrderItem {
     id: i64,
     order_id: i64,
@@ -210,15 +231,15 @@ struct OrderItem {
     product: Loaded<Option<Product>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = PRODUCTS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = PRODUCTS_TABLE, primary_key_strategy = "manual")]
 struct Product {
     id: i64,
     name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = TAGS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = TAGS_TABLE, primary_key_strategy = "manual")]
 struct Tag {
     id: i64,
     user_id: i64,
@@ -227,11 +248,174 @@ struct Tag {
     creator: Loaded<Option<TagCreator>>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE, primary_key_strategy = "manual")]
 struct TagCreator {
     id: i64,
     email: String,
+}
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true)]
+struct PostRecord {
+    id: i64,
+    title: String,
+    body: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+    deleted_at: Option<DateTime>,
+}
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = POSTS_TABLE, primary_key_strategy = "manual")]
+struct DefaultSoftDeletePost {
+    id: i64,
+    title: String,
+    body: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+    deleted_at: Option<DateTime>,
+}
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = false)]
+struct OptOutSoftDeletePost {
+    id: i64,
+    title: String,
+    body: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+    deleted_at: Option<DateTime>,
+}
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = PASSWORD_USERS_TABLE, primary_key_strategy = "manual")]
+struct PasswordUser {
+    id: i64,
+    email: String,
+    #[forge(write_mutator = "hash_password")]
+    #[forge(read_accessor = "masked_password")]
+    password: String,
+}
+
+impl PasswordUser {
+    async fn hash_password(context: &ModelHookContext<'_>, value: String) -> Result<String> {
+        context.app().hash()?.hash(&value)
+    }
+
+    fn masked_password(&self) -> String {
+        "********".to_string()
+    }
+}
+
+#[derive(Default)]
+struct TimestampHookLog {
+    entries: Mutex<Vec<String>>,
+}
+
+impl TimestampHookLog {
+    async fn push(&self, entry: impl Into<String>) {
+        self.entries.lock().await.push(entry.into());
+    }
+
+    async fn snapshot(&self) -> Vec<String> {
+        self.entries.lock().await.clone()
+    }
+
+    async fn clear(&self) {
+        self.entries.lock().await.clear();
+    }
+}
+
+#[derive(Clone)]
+struct TimestampHookProvider {
+    log: std::sync::Arc<TimestampHookLog>,
+}
+
+#[async_trait]
+impl ServiceProvider for TimestampHookProvider {
+    async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+        registrar.singleton_arc(self.log.clone())
+    }
+}
+
+struct HookedPostLifecycle;
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true, lifecycle = HookedPostLifecycle)]
+struct HookedPost {
+    id: i64,
+    title: String,
+    body: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+    deleted_at: Option<DateTime>,
+}
+
+fn fixed_time(day: u32) -> DateTime {
+    DateTime::parse(format!("2026-01-{day:02}T10:00:00Z")).unwrap()
+}
+
+#[async_trait]
+impl ModelLifecycle<HookedPost> for HookedPostLifecycle {
+    async fn creating(
+        context: &ModelHookContext<'_>,
+        draft: &mut CreateDraft<HookedPost>,
+    ) -> Result<()> {
+        let pending = draft.pending_record();
+        context
+            .app()
+            .resolve::<TimestampHookLog>()?
+            .push(format!(
+                "creating:{}:{}",
+                pending.get("created_at").is_some(),
+                pending.get("updated_at").is_some()
+            ))
+            .await;
+        draft.set(HookedPost::UPDATED_AT, fixed_time(2));
+        Ok(())
+    }
+
+    async fn updating(
+        context: &ModelHookContext<'_>,
+        _current: &HookedPost,
+        draft: &mut UpdateDraft<HookedPost>,
+    ) -> Result<()> {
+        let pending = draft.pending_record();
+        context
+            .app()
+            .resolve::<TimestampHookLog>()?
+            .push(format!("updating:{}", pending.get("updated_at").is_some()))
+            .await;
+        draft.set(HookedPost::UPDATED_AT, fixed_time(3));
+        Ok(())
+    }
+
+    async fn deleting(
+        context: &ModelHookContext<'_>,
+        _current: &HookedPost,
+        _record: &DbRecord,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<TimestampHookLog>()?
+            .push("deleting")
+            .await;
+        Ok(())
+    }
+
+    async fn deleted(
+        context: &ModelHookContext<'_>,
+        _deleted: &HookedPost,
+        _record: &DbRecord,
+    ) -> Result<()> {
+        context
+            .app()
+            .resolve::<TimestampHookLog>()?
+            .push("deleted")
+            .await;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, forge::Projection)]
@@ -391,8 +575,8 @@ impl ServiceProvider for LifecycleTestProvider {
 
 struct LifecycleUserHooks;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE, lifecycle = LifecycleUserHooks)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE, primary_key_strategy = "manual", lifecycle = LifecycleUserHooks)]
 struct LifecycleUser {
     id: i64,
     email: String,
@@ -498,8 +682,8 @@ impl ModelLifecycle<LifecycleUser> for LifecycleUserHooks {
 
 struct RejectingLifecycleUserHooks;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE, lifecycle = RejectingLifecycleUserHooks)]
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = USERS_TABLE, primary_key_strategy = "manual", lifecycle = RejectingLifecycleUserHooks)]
 struct RejectingLifecycleUser {
     id: i64,
     email: String,
@@ -520,10 +704,16 @@ impl ModelLifecycle<RejectingLifecycleUser> for RejectingLifecycleUserHooks {
     }
 }
 
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = SAFE_USERS_TABLE)]
+struct SafeUuidUser {
+    id: ModelId<SafeUuidUser>,
+    email: String,
+}
+
 impl User {
     fn merchants() -> RelationDef<Self, Merchant> {
         has_many(
-            "merchants",
             Self::ID,
             Merchant::USER_ID,
             |user| user.id,
@@ -541,7 +731,6 @@ impl User {
 impl Merchant {
     fn orders() -> RelationDef<Self, Order> {
         has_many(
-            "orders",
             Self::ID,
             Order::MERCHANT_ID,
             |merchant| merchant.id,
@@ -557,7 +746,6 @@ impl Merchant {
 
     fn tags() -> ManyToManyDef<Self, Tag, ()> {
         many_to_many(
-            "tags",
             Self::ID,
             MERCHANT_TAGS_TABLE,
             "merchant_id",
@@ -582,7 +770,6 @@ impl Merchant {
 impl Order {
     fn items() -> RelationDef<Self, OrderItem> {
         has_many(
-            "items",
             Self::ID,
             OrderItem::ORDER_ID,
             |order| order.id,
@@ -594,7 +781,6 @@ impl Order {
 impl OrderItem {
     fn product() -> RelationDef<Self, Product> {
         belongs_to(
-            "product",
             Self::PRODUCT_ID,
             Product::ID,
             |item| Some(item.product_id),
@@ -606,7 +792,6 @@ impl OrderItem {
 impl Tag {
     fn creator() -> RelationDef<Self, TagCreator> {
         belongs_to(
-            "creator",
             Self::USER_ID,
             TagCreator::ID,
             |tag| Some(tag.user_id),
@@ -841,6 +1026,422 @@ async fn generic_builder_and_model_first_queries_are_typed_and_short() {
         .await
         .unwrap();
     assert_eq!(deleted_rows, 1);
+}
+
+#[tokio::test]
+async fn manual_primary_keys_require_explicit_values_on_create() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let error = User::create()
+        .set(User::EMAIL, "missing-id@example.com")
+        .set(User::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("primary_key_strategy is manual"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn safe_model_ids_auto_generate_and_sort_newest_first() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+
+    database
+        .raw_execute(&format!("DROP TABLE IF EXISTS {SAFE_USERS_TABLE}"), &[])
+        .await
+        .unwrap();
+    database
+        .raw_execute(
+            &format!(
+                "CREATE TABLE {SAFE_USERS_TABLE} (id UUID PRIMARY KEY DEFAULT uuidv7(), email TEXT NOT NULL)"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let first = SafeUuidUser::create()
+        .set(SafeUuidUser::EMAIL, "first@example.com")
+        .save(app)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let second = SafeUuidUser::create()
+        .set(SafeUuidUser::EMAIL, "second@example.com")
+        .save(app)
+        .await
+        .unwrap();
+
+    let ordered = SafeUuidUser::query()
+        .order_by(SafeUuidUser::ID.desc())
+        .get(database)
+        .await
+        .unwrap();
+
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].id, second.id);
+    assert_eq!(ordered[1].id, first.id);
+    assert_ne!(first.id, second.id);
+}
+
+#[tokio::test]
+async fn model_write_mutators_hash_passwords_and_generated_accessors_return_transformed_values() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let created = PasswordUser::create()
+        .set(PasswordUser::ID, 1_i64)
+        .set(PasswordUser::EMAIL, "forge@example.com")
+        .set(PasswordUser::PASSWORD, "secret-password")
+        .save(app)
+        .await
+        .unwrap();
+
+    assert_ne!(created.password, "secret-password");
+    assert!(app
+        .hash()
+        .unwrap()
+        .check("secret-password", &created.password)
+        .unwrap());
+    assert_eq!(created.password_accessed(), "********");
+    assert_eq!(created.password, created.clone().password);
+
+    let bulk_created = PasswordUser::create_many()
+        .row(|row| {
+            row.set(PasswordUser::ID, 2_i64)
+                .set(PasswordUser::EMAIL, "ops@example.com")
+                .set(PasswordUser::PASSWORD, "ops-secret")
+        })
+        .row(|row| {
+            row.set(PasswordUser::ID, 3_i64)
+                .set(PasswordUser::EMAIL, "dev@example.com")
+                .set(PasswordUser::PASSWORD, "dev-secret")
+        })
+        .get(app)
+        .await
+        .unwrap();
+
+    assert_eq!(bulk_created.len(), 2);
+    assert!(app
+        .hash()
+        .unwrap()
+        .check("ops-secret", &bulk_created[0].password)
+        .unwrap());
+    assert!(app
+        .hash()
+        .unwrap()
+        .check("dev-secret", &bulk_created[1].password)
+        .unwrap());
+
+    let updated = created
+        .update()
+        .set(PasswordUser::PASSWORD, "new-secret")
+        .save(app)
+        .await
+        .unwrap();
+    assert!(app
+        .hash()
+        .unwrap()
+        .check("new-secret", &updated.password)
+        .unwrap());
+
+    PasswordUser::update()
+        .set(PasswordUser::PASSWORD, "bulk-secret")
+        .where_(PasswordUser::ID.eq(2_i64))
+        .without_lifecycle()
+        .execute(app)
+        .await
+        .unwrap();
+
+    let fast_updated = PasswordUser::query()
+        .where_(PasswordUser::ID.eq(2_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(app
+        .hash()
+        .unwrap()
+        .check("bulk-secret", &fast_updated.password)
+        .unwrap());
+
+    database
+        .raw_execute(
+            &format!(
+                "INSERT INTO {PASSWORD_USERS_TABLE} (id, email, password) VALUES ($1, $2, $3)"
+            ),
+            &[
+                DbValue::from(4_i64),
+                DbValue::from("raw@example.com"),
+                DbValue::from("raw-password"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let raw_inserted = PasswordUser::query()
+        .where_(PasswordUser::ID.eq(4_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw_inserted.password, "raw-password");
+}
+
+#[tokio::test]
+async fn timestamps_and_soft_deletes_work_on_model_first_writes() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let created = PostRecord::create()
+        .set(PostRecord::ID, 1_i64)
+        .set(PostRecord::TITLE, "Hello")
+        .set(PostRecord::BODY, "World")
+        .save(app)
+        .await
+        .unwrap();
+    assert!(created.deleted_at.is_none());
+    assert!(created.updated_at >= created.created_at);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let updated = created
+        .update()
+        .set(PostRecord::TITLE, "Updated")
+        .save(app)
+        .await
+        .unwrap();
+    assert!(updated.updated_at > created.updated_at);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let fast_updated = PostRecord::update()
+        .set(PostRecord::BODY, "Fast path")
+        .where_(PostRecord::ID.eq(updated.id))
+        .without_lifecycle()
+        .save(app)
+        .await
+        .unwrap();
+    assert!(fast_updated.updated_at > updated.updated_at);
+
+    let deleted = fast_updated.delete().execute(app).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    let visible = PostRecord::query().get(database).await.unwrap();
+    assert!(visible.is_empty());
+
+    let all = PostRecord::query()
+        .with_trashed()
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+    assert!(all[0].deleted_at.is_some());
+
+    let trashed = PostRecord::query()
+        .only_trashed()
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(trashed.len(), 1);
+
+    let restored = PostRecord::restore()
+        .where_(PostRecord::ID.eq(1_i64))
+        .save(app)
+        .await
+        .unwrap();
+    assert!(restored.deleted_at.is_none());
+
+    let forced = PostRecord::force_delete()
+        .where_(PostRecord::ID.eq(1_i64))
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(forced, 1);
+    assert!(PostRecord::query()
+        .with_trashed()
+        .get(database)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn app_config_can_disable_default_timestamp_management() {
+    let Some(runtime) = test_app_runtime_with_provider_and_config(
+        NoopProvider,
+        r#"
+            [database.models]
+            timestamps_default = false
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let manual_created_at = fixed_time(10);
+    let manual_updated_at = fixed_time(11);
+
+    let created = PostRecord::create()
+        .set(PostRecord::ID, 2_i64)
+        .set(PostRecord::TITLE, "Manual timestamps")
+        .set(PostRecord::BODY, "Still works")
+        .set(PostRecord::CREATED_AT, manual_created_at)
+        .set(PostRecord::UPDATED_AT, manual_updated_at)
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(created.created_at, manual_created_at);
+    assert_eq!(created.updated_at, manual_updated_at);
+
+    let updated = created
+        .update()
+        .set(PostRecord::TITLE, "No auto bump")
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(updated.updated_at, manual_updated_at);
+}
+
+#[tokio::test]
+async fn app_config_can_enable_default_soft_delete_behavior_and_model_can_opt_out() {
+    let _guard = database_lock().lock().await;
+    let Some(runtime) = test_app_runtime_with_provider_and_config(
+        NoopProvider,
+        r#"
+            [database.models]
+            soft_deletes_default = true
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+    let app = &runtime.app;
+    let database = &runtime.database;
+
+    reset_schema(database).await;
+
+    let created = DefaultSoftDeletePost::create()
+        .set(DefaultSoftDeletePost::ID, 20_i64)
+        .set(DefaultSoftDeletePost::TITLE, "config soft delete")
+        .set(DefaultSoftDeletePost::BODY, "enabled")
+        .save(app)
+        .await
+        .unwrap();
+
+    created.delete().execute(app).await.unwrap();
+
+    assert!(DefaultSoftDeletePost::query()
+        .where_(DefaultSoftDeletePost::ID.eq(20_i64))
+        .first(database.as_ref())
+        .await
+        .unwrap()
+        .is_none());
+
+    assert!(DefaultSoftDeletePost::query()
+        .with_trashed()
+        .where_(DefaultSoftDeletePost::ID.eq(20_i64))
+        .first(database.as_ref())
+        .await
+        .unwrap()
+        .is_some());
+
+    let created = OptOutSoftDeletePost::create()
+        .set(OptOutSoftDeletePost::ID, 21_i64)
+        .set(OptOutSoftDeletePost::TITLE, "opt out")
+        .set(OptOutSoftDeletePost::BODY, "hard delete")
+        .save(app)
+        .await
+        .unwrap();
+
+    created.delete().execute(app).await.unwrap();
+
+    assert!(OptOutSoftDeletePost::query()
+        .with_trashed()
+        .where_(OptOutSoftDeletePost::ID.eq(21_i64))
+        .first(database.as_ref())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn built_in_timestamp_values_are_visible_to_hooks_and_soft_delete_stays_on_delete_hooks() {
+    let log = std::sync::Arc::new(TimestampHookLog::default());
+    let Some(runtime) =
+        test_app_runtime_with_provider(TimestampHookProvider { log: log.clone() }).await
+    else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let created = HookedPost::create()
+        .set(HookedPost::ID, 3_i64)
+        .set(HookedPost::TITLE, "Hooked")
+        .set(HookedPost::BODY, "Create")
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(created.updated_at, fixed_time(2));
+    assert_eq!(log.snapshot().await, vec!["creating:true:true"]);
+
+    log.clear().await;
+    let updated = created
+        .update()
+        .set(HookedPost::BODY, "Update")
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(updated.updated_at, fixed_time(3));
+    assert_eq!(log.snapshot().await, vec!["updating:true"]);
+
+    log.clear().await;
+    let deleted = HookedPost::delete()
+        .where_(HookedPost::ID.eq(3_i64))
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+    assert_eq!(log.snapshot().await, vec!["deleting", "deleted"]);
+
+    let trashed = HookedPost::query()
+        .with_trashed()
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(trashed.deleted_at.is_some());
 }
 
 #[tokio::test]
@@ -1584,10 +2185,11 @@ async fn typed_runtime_supports_production_postgres_values_and_custom_adapters()
     .await;
 
     let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-    let timestamp_tz = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().unwrap();
-    let date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
-    let timestamp = date.and_hms_opt(3, 4, 5).unwrap();
-    let time = NaiveTime::from_hms_opt(6, 7, 8).unwrap();
+    let model_id = ModelId::<SafeUuidUser>::from_uuid(uuid);
+    let timestamp_tz = DateTime::parse("2024-01-02T03:04:05Z").unwrap();
+    let date = Date::parse("2024-01-02").unwrap();
+    let timestamp = LocalDateTime::parse("2024-01-02T03:04:05").unwrap();
+    let time = Time::parse("06:07:08").unwrap();
     let numeric = Numeric::new("42.75").unwrap();
 
     let scalar_record = database
@@ -1602,7 +2204,7 @@ async fn typed_runtime_supports_production_postgres_values_and_custom_adapters()
                 numeric.clone().into(),
                 "forge".into(),
                 serde_json::json!({"theme":"amber"}).into(),
-                uuid.into(),
+                model_id.into(),
                 timestamp_tz.into(),
                 timestamp.into(),
                 date.into(),
@@ -1639,24 +2241,24 @@ async fn typed_runtime_supports_production_postgres_values_and_custom_adapters()
     assert_eq!(scalar_record.decode::<Uuid>("uuid_value").unwrap(), uuid);
     assert_eq!(
         scalar_record
-            .decode::<chrono::DateTime<Utc>>("timestamptz_value")
+            .decode::<ModelId<SafeUuidUser>>("uuid_value")
+            .unwrap(),
+        model_id
+    );
+    assert_eq!(
+        scalar_record
+            .decode::<DateTime>("timestamptz_value")
             .unwrap(),
         timestamp_tz
     );
     assert_eq!(
         scalar_record
-            .decode::<chrono::NaiveDateTime>("timestamp_value")
+            .decode::<LocalDateTime>("timestamp_value")
             .unwrap(),
         timestamp
     );
-    assert_eq!(
-        scalar_record.decode::<NaiveDate>("date_value").unwrap(),
-        date
-    );
-    assert_eq!(
-        scalar_record.decode::<NaiveTime>("time_value").unwrap(),
-        time
-    );
+    assert_eq!(scalar_record.decode::<Date>("date_value").unwrap(), date);
+    assert_eq!(scalar_record.decode::<Time>("time_value").unwrap(), time);
     assert_eq!(
         scalar_record.decode::<Vec<u8>>("bytea_value").unwrap(),
         vec![1, 2, 3]
@@ -1675,7 +2277,7 @@ async fn typed_runtime_supports_production_postgres_values_and_custom_adapters()
                 vec![Numeric::new("1.10").unwrap(), Numeric::new("2.20").unwrap()].into(),
                 vec!["alpha".to_string(), "beta".to_string()].into(),
                 vec![serde_json::json!({"rank":1}), serde_json::json!({"rank":2})].into(),
-                vec![uuid].into(),
+                vec![model_id].into(),
                 vec![timestamp_tz].into(),
                 vec![timestamp].into(),
                 vec![date].into(),
@@ -1730,26 +2332,28 @@ async fn typed_runtime_supports_production_postgres_values_and_custom_adapters()
     );
     assert_eq!(
         array_record
-            .decode::<Vec<chrono::DateTime<Utc>>>("timestamptz_values")
+            .decode::<Vec<ModelId<SafeUuidUser>>>("uuid_values")
+            .unwrap(),
+        vec![model_id]
+    );
+    assert_eq!(
+        array_record
+            .decode::<Vec<DateTime>>("timestamptz_values")
             .unwrap(),
         vec![timestamp_tz]
     );
     assert_eq!(
         array_record
-            .decode::<Vec<chrono::NaiveDateTime>>("timestamp_values")
+            .decode::<Vec<LocalDateTime>>("timestamp_values")
             .unwrap(),
         vec![timestamp]
     );
     assert_eq!(
-        array_record
-            .decode::<Vec<NaiveDate>>("date_values")
-            .unwrap(),
+        array_record.decode::<Vec<Date>>("date_values").unwrap(),
         vec![date]
     );
     assert_eq!(
-        array_record
-            .decode::<Vec<NaiveTime>>("time_values")
-            .unwrap(),
+        array_record.decode::<Vec<Time>>("time_values").unwrap(),
         vec![time]
     );
     assert_eq!(

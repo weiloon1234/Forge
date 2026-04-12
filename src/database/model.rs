@@ -1,19 +1,27 @@
-use std::{any::type_name, marker::PhantomData, sync::Arc};
+use std::{
+    any::type_name,
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::config::DatabaseModelConfig;
 use crate::events::{Event, EventBus};
 use crate::foundation::{AppContext, Error, Result};
-use crate::support::EventId;
+use crate::support::{Date, DateTime, EventId, LocalDateTime, ModelId, Time};
 
 use super::ast::{
     ColumnRef, ComparisonOp, Condition, DbType, DbValue, Expr, Numeric, OrderBy, SelectItem,
     TableRef,
 };
-use super::query::{CreateManyModel, CreateModel, DeleteModel, ModelQuery, UpdateModel};
+use super::query::{
+    CreateManyModel, CreateModel, DeleteModel, ModelQuery, RestoreModel, UpdateModel,
+};
 use super::runtime::{DatabaseManager, DatabaseTransaction, DbRecord, QueryExecutor};
 
 pub trait ToDbValue {
@@ -151,25 +159,31 @@ impl ToDbValue for Uuid {
     }
 }
 
-impl ToDbValue for DateTime<Utc> {
+impl<M> ToDbValue for ModelId<M> {
+    fn to_db_value(self) -> DbValue {
+        DbValue::Uuid(self.into_uuid())
+    }
+}
+
+impl ToDbValue for DateTime {
     fn to_db_value(self) -> DbValue {
         DbValue::TimestampTz(self)
     }
 }
 
-impl ToDbValue for NaiveDateTime {
+impl ToDbValue for LocalDateTime {
     fn to_db_value(self) -> DbValue {
         DbValue::Timestamp(self)
     }
 }
 
-impl ToDbValue for NaiveDate {
+impl ToDbValue for Date {
     fn to_db_value(self) -> DbValue {
         DbValue::Date(self)
     }
 }
 
-impl ToDbValue for NaiveTime {
+impl ToDbValue for Time {
     fn to_db_value(self) -> DbValue {
         DbValue::Time(self)
     }
@@ -289,7 +303,13 @@ impl FromDbValue for Uuid {
     }
 }
 
-impl FromDbValue for DateTime<Utc> {
+impl<M> FromDbValue for ModelId<M> {
+    fn from_db_value(value: &DbValue) -> Result<Self> {
+        Uuid::from_db_value(value).map(ModelId::from_uuid)
+    }
+}
+
+impl FromDbValue for DateTime {
     fn from_db_value(value: &DbValue) -> Result<Self> {
         match value {
             DbValue::TimestampTz(value) => Ok(*value),
@@ -299,7 +319,7 @@ impl FromDbValue for DateTime<Utc> {
     }
 }
 
-impl FromDbValue for NaiveDateTime {
+impl FromDbValue for LocalDateTime {
     fn from_db_value(value: &DbValue) -> Result<Self> {
         match value {
             DbValue::Timestamp(value) => Ok(*value),
@@ -309,7 +329,7 @@ impl FromDbValue for NaiveDateTime {
     }
 }
 
-impl FromDbValue for NaiveDate {
+impl FromDbValue for Date {
     fn from_db_value(value: &DbValue) -> Result<Self> {
         match value {
             DbValue::Date(value) => Ok(*value),
@@ -319,7 +339,7 @@ impl FromDbValue for NaiveDate {
     }
 }
 
-impl FromDbValue for NaiveTime {
+impl FromDbValue for Time {
     fn from_db_value(value: &DbValue) -> Result<Self> {
         match value {
             DbValue::Time(value) => Ok(*value),
@@ -419,10 +439,10 @@ impl_array_value!(Numeric, NumericArray, "numeric");
 impl_array_value!(String, TextArray, "text");
 impl_array_value!(serde_json::Value, JsonArray, "json");
 impl_array_value!(Uuid, UuidArray, "uuid");
-impl_array_value!(DateTime<Utc>, TimestampTzArray, "timestamptz");
-impl_array_value!(NaiveDateTime, TimestampArray, "timestamp");
-impl_array_value!(NaiveDate, DateArray, "date");
-impl_array_value!(NaiveTime, TimeArray, "time");
+impl_array_value!(DateTime, TimestampTzArray, "timestamptz");
+impl_array_value!(LocalDateTime, TimestampArray, "timestamp");
+impl_array_value!(Date, DateArray, "date");
+impl_array_value!(Time, TimeArray, "time");
 impl_array_value!(Vec<u8>, ByteaArray, "bytea");
 
 impl<T> ToDbValue for Vec<T>
@@ -431,6 +451,22 @@ where
 {
     fn to_db_value(self) -> DbValue {
         T::to_array_value(self)
+    }
+}
+
+impl<M> DbArrayElement for ModelId<M> {
+    fn to_array_value(values: Vec<Self>) -> DbValue {
+        DbValue::UuidArray(values.into_iter().map(ModelId::into_uuid).collect())
+    }
+
+    fn from_array_value(value: &DbValue) -> Result<Vec<Self>> {
+        match value {
+            DbValue::UuidArray(values) => {
+                Ok(values.iter().copied().map(ModelId::from_uuid).collect())
+            }
+            DbValue::Null(_) => Err(Error::message("expected uuid array, found null")),
+            _ => Err(Error::message("expected uuid array value")),
+        }
     }
 }
 
@@ -443,15 +479,95 @@ where
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct ColumnInfo {
     pub name: &'static str,
     pub db_type: DbType,
+    write_mutator: Option<ModelFieldWriteMutator>,
+}
+
+#[doc(hidden)]
+pub type ModelFieldWriteMutatorFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<DbValue>> + Send + 'a>>;
+
+#[doc(hidden)]
+pub type ModelFieldWriteMutator =
+    for<'a> fn(&'a ModelHookContext<'a>, DbValue) -> ModelFieldWriteMutatorFuture<'a>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelFeatureSetting {
+    Default,
+    Enabled,
+    Disabled,
+}
+
+impl ModelFeatureSetting {
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelBehavior {
+    pub timestamps: ModelFeatureSetting,
+    pub soft_deletes: ModelFeatureSetting,
+}
+
+impl ModelBehavior {
+    pub const fn new(timestamps: ModelFeatureSetting, soft_deletes: ModelFeatureSetting) -> Self {
+        Self {
+            timestamps,
+            soft_deletes,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelPrimaryKeyStrategy {
+    UuidV7,
+    Manual,
+}
+
+impl ModelPrimaryKeyStrategy {
+    pub const fn generates_value(self) -> bool {
+        matches!(self, Self::UuidV7)
+    }
+}
+
+fn runtime_model_defaults_lock() -> &'static Mutex<DatabaseModelConfig> {
+    static DEFAULTS: OnceLock<Mutex<DatabaseModelConfig>> = OnceLock::new();
+    DEFAULTS.get_or_init(|| Mutex::new(DatabaseModelConfig::default()))
+}
+
+fn runtime_model_defaults() -> DatabaseModelConfig {
+    runtime_model_defaults_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+pub(crate) fn set_runtime_model_defaults(defaults: DatabaseModelConfig) {
+    *runtime_model_defaults_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = defaults;
 }
 
 impl ColumnInfo {
     pub const fn new(name: &'static str, db_type: DbType) -> Self {
-        Self { name, db_type }
+        Self {
+            name,
+            db_type,
+            write_mutator: None,
+        }
+    }
+
+    pub const fn with_write_mutator(mut self, write_mutator: ModelFieldWriteMutator) -> Self {
+        self.write_mutator = Some(write_mutator);
+        self
+    }
+
+    pub const fn write_mutator(&self) -> Option<ModelFieldWriteMutator> {
+        self.write_mutator
     }
 }
 
@@ -591,6 +707,22 @@ impl<M, T> Column<M, T> {
     pub fn is_not_null(&self) -> Condition {
         Condition::IsNotNull(self.column_ref())
     }
+
+    pub fn like(&self, value: impl Into<String>) -> Condition {
+        Condition::compare(
+            Expr::column(self.column_ref()),
+            ComparisonOp::Like,
+            Expr::value(DbValue::Text(value.into())),
+        )
+    }
+
+    pub fn not_like(&self, value: impl Into<String>) -> Condition {
+        Condition::compare(
+            Expr::column(self.column_ref()),
+            ComparisonOp::NotLike,
+            Expr::value(DbValue::Text(value.into())),
+        )
+    }
 }
 
 impl<M> Column<M, serde_json::Value> {
@@ -610,6 +742,8 @@ pub struct TableMeta<M> {
     name: &'static str,
     columns: &'static [ColumnInfo],
     primary_key: &'static str,
+    primary_key_strategy: ModelPrimaryKeyStrategy,
+    behavior: ModelBehavior,
     hydrate: fn(&DbRecord) -> Result<M>,
 }
 
@@ -618,12 +752,16 @@ impl<M> TableMeta<M> {
         name: &'static str,
         columns: &'static [ColumnInfo],
         primary_key: &'static str,
+        primary_key_strategy: ModelPrimaryKeyStrategy,
+        behavior: ModelBehavior,
         hydrate: fn(&DbRecord) -> Result<M>,
     ) -> Self {
         Self {
             name,
             columns,
             primary_key,
+            primary_key_strategy,
+            behavior,
             hydrate,
         }
     }
@@ -644,8 +782,16 @@ impl<M> TableMeta<M> {
         self.primary_key
     }
 
+    pub const fn primary_key_strategy(&self) -> ModelPrimaryKeyStrategy {
+        self.primary_key_strategy
+    }
+
     pub const fn columns(&self) -> &'static [ColumnInfo] {
         self.columns
+    }
+
+    pub const fn behavior(&self) -> ModelBehavior {
+        self.behavior
     }
 
     pub fn column_info(&self, name: &str) -> Option<&ColumnInfo> {
@@ -654,6 +800,41 @@ impl<M> TableMeta<M> {
 
     pub fn primary_key_column_info(&self) -> Option<&ColumnInfo> {
         self.column_info(self.primary_key)
+    }
+
+    pub fn created_at_column_info(&self) -> Option<&ColumnInfo> {
+        self.column_info("created_at")
+    }
+
+    pub fn updated_at_column_info(&self) -> Option<&ColumnInfo> {
+        self.column_info("updated_at")
+    }
+
+    pub fn deleted_at_column_info(&self) -> Option<&ColumnInfo> {
+        self.column_info("deleted_at")
+    }
+
+    pub fn timestamps_enabled(&self, _app: &AppContext) -> Result<bool> {
+        Ok(match self.behavior.timestamps {
+            ModelFeatureSetting::Enabled => true,
+            ModelFeatureSetting::Disabled => false,
+            ModelFeatureSetting::Default => {
+                runtime_model_defaults().timestamps_default
+                    && self.created_at_column_info().is_some()
+                    && self.updated_at_column_info().is_some()
+            }
+        })
+    }
+
+    pub fn soft_deletes_enabled(&self) -> bool {
+        match self.behavior.soft_deletes {
+            ModelFeatureSetting::Enabled => true,
+            ModelFeatureSetting::Disabled => false,
+            ModelFeatureSetting::Default => {
+                runtime_model_defaults().soft_deletes_default
+                    && self.deleted_at_column_info().is_some()
+            }
+        }
     }
 
     pub fn all_select_items(&self) -> Vec<SelectItem> {
@@ -974,6 +1155,16 @@ pub trait Model: Clone + Send + Sync + Sized + 'static {
     fn model_delete() -> DeleteModel<Self> {
         DeleteModel::new(Self::table_meta())
     }
+
+    #[doc(hidden)]
+    fn model_force_delete() -> DeleteModel<Self> {
+        DeleteModel::new_force(Self::table_meta())
+    }
+
+    #[doc(hidden)]
+    fn model_restore() -> RestoreModel<Self> {
+        UpdateModel::new_restore(Self::table_meta())
+    }
 }
 
 pub trait PersistedModel: Model {
@@ -984,11 +1175,27 @@ pub trait ModelInstanceWriteExt: PersistedModel {
     fn update(&self) -> UpdateModel<Self> {
         <Self as Model>::model_update().where_(self.persisted_condition())
     }
+
+    fn delete(&self) -> DeleteModel<Self> {
+        <Self as Model>::model_delete().where_(self.persisted_condition())
+    }
+
+    fn force_delete(&self) -> DeleteModel<Self> {
+        <Self as Model>::model_force_delete().where_(self.persisted_condition())
+    }
+
+    fn restore(&self) -> RestoreModel<Self> {
+        <Self as Model>::model_restore().where_(self.persisted_condition())
+    }
 }
 
 impl<T> ModelInstanceWriteExt for T where T: PersistedModel {}
 
-fn upsert_assignment(values: &mut Vec<(ColumnRef, Expr)>, column: ColumnRef, expr: Expr) {
+pub(crate) fn upsert_assignment(
+    values: &mut Vec<(ColumnRef, Expr)>,
+    column: ColumnRef,
+    expr: Expr,
+) {
     if let Some((_, existing)) = values
         .iter_mut()
         .find(|(existing_column, _)| existing_column.name == column.name)

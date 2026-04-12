@@ -248,7 +248,8 @@ mod tests {
             Container::new(),
             ConfigRepository::empty(),
             RuleRegistry::new(),
-        );
+        )
+        .unwrap();
         let bus = EventBus::new(app, EventRegistryBuilder::freeze_shared(registry));
         bus.dispatch(TestEvent).await.unwrap();
 

@@ -1,17 +1,17 @@
 use forge::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "merchants")]
 struct Merchant {
-    id: i64,
+    id: ModelId<Merchant>,
     tags: Loaded<Vec<Tag>>,
     tag_count: Loaded<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, forge::Model)]
+#[derive(forge::Model)]
 #[forge(model = "tags")]
 struct Tag {
-    id: i64,
+    id: ModelId<Tag>,
     name: String,
     link: Loaded<TagLink>,
 }
@@ -25,7 +25,6 @@ struct TagLink {
 impl Merchant {
     fn tags() -> ManyToManyDef<Self, Tag, ()> {
         many_to_many(
-            "tags",
             Self::ID,
             "merchant_tags",
             "merchant_id",

@@ -8,7 +8,7 @@ This status note maps the blueprint's v1-v3 goals to the concrete surfaces, exam
 
 - Blueprint scope: complete
 - First-class target: Postgres query system
-- Post-blueprint DB work: Rust migration/seeder lifecycle and runtime hardening are implemented separately and are not part of the v1-v3 query blueprint scope
+- Post-blueprint DB work: Rust migration/seeder lifecycle, runtime hardening, safe-by-default `ModelId<M>` UUIDv7 primary keys, built-in timestamps/soft deletes, model lifecycle hooks, and field mutators/accessors are implemented separately and are not part of the v1-v3 query blueprint scope
 
 ## Blueprint Mapping
 
@@ -46,6 +46,9 @@ The blueprint's typed model/codegen layer is covered by:
 
 - `Model`, `Column`, `TableMeta`, `ModelQuery`
 - `CreateModel`, `CreateManyModel`, `UpdateModel`
+- safe-by-default `ModelId<M>` UUIDv7 primary keys serialized as strings on the model surface
+- built-in timestamp and soft-delete conventions on the model write/query layer
+- field-level write mutators and explicit generated read accessor methods on derived models
 - `Projection`, `ProjectionField`, `ProjectionQuery`
 - derive-assisted metadata via `forge::Model` and `forge::Projection`
 - explicit handwritten relations layered on top of generated metadata
@@ -85,6 +88,7 @@ Acceptance coverage:
 Forge matches the blueprint's intended boundary:
 
 - codegen assists metadata, columns, and projections
+- codegen also binds field mutator/accessor metadata into the model layer
 - writes use model-first fluent builders instead of dedicated payload structs
 - relationships remain handwritten and explicit in application code
 - business-specific relation semantics are not generated
@@ -115,3 +119,4 @@ The following are implemented in Forge but are post-blueprint work and should no
 
 - Rust migration and seeding lifecycle
 - runtime hardening, native streaming, and statement timeouts
+- safe-by-default model conventions such as UUIDv7 `ModelId<M>`, timestamps, soft deletes, lifecycle hooks, and field mutators/accessors

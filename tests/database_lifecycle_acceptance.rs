@@ -190,7 +190,7 @@ impl TestRuntime {
         self.database
             .raw_execute(
                 &format!(
-                    "CREATE TABLE IF NOT EXISTS {} (id BIGINT PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+                    "CREATE TABLE IF NOT EXISTS {} (id UUID PRIMARY KEY DEFAULT uuidv7(), email TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
                     quote_identifier(USERS_TABLE)
                 ),
                 &[],

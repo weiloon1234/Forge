@@ -177,6 +177,26 @@ mod app {
             }
         }
 
+        #[async_trait]
+        impl forge::validation::FromMultipart for CreateUser {
+            async fn from_multipart(
+                multipart: &mut axum::extract::Multipart,
+            ) -> forge::foundation::Result<Self> {
+                let mut phone = None;
+                while let Some(field) = multipart.next_field().await
+                    .map_err(|e| forge::foundation::Error::message(format!("multipart error: {e}")))?
+                {
+                    if field.name() == Some("phone") {
+                        phone = Some(field.text().await
+                            .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?);
+                    }
+                }
+                Ok(Self {
+                    phone: phone.unwrap_or_default(),
+                })
+            }
+        }
+
         pub fn router(registrar: &mut HttpRegistrar) -> Result<()> {
             registrar.route_with_options(
                 "/users",

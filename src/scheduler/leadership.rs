@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::foundation::{Error, Result};
+use crate::redis::namespaced_value;
 use crate::support::runtime::{MemoryRuntime, RedisRuntime, RuntimeBackend};
 
 const RENEW_LEADERSHIP_SCRIPT: &str = r#"
@@ -57,7 +58,7 @@ impl RuntimeBackend {
 }
 
 fn leadership_key(runtime: &RedisRuntime) -> String {
-    format!("{}:scheduler:leader", runtime.namespace)
+    namespaced_value(&runtime.namespace, "scheduler:leader")
 }
 
 fn ttl_millis(ttl: Duration) -> u64 {
@@ -78,7 +79,7 @@ async fn acquire_scheduler_leadership_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let result: Option<String> = redis::cmd("SET")
+    let result: Option<String> = ::redis::cmd("SET")
         .arg(leadership_key(runtime))
         .arg(owner_id)
         .arg("NX")
@@ -100,7 +101,7 @@ async fn renew_scheduler_leadership_redis(
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let renewed: i64 = redis::cmd("EVAL")
+    let renewed: i64 = ::redis::cmd("EVAL")
         .arg(RENEW_LEADERSHIP_SCRIPT)
         .arg(1)
         .arg(leadership_key(runtime))
@@ -118,7 +119,7 @@ async fn release_scheduler_leadership_redis(runtime: &RedisRuntime, owner_id: &s
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let _: i64 = redis::cmd("EVAL")
+    let _: i64 = ::redis::cmd("EVAL")
         .arg(RELEASE_LEADERSHIP_SCRIPT)
         .arg(1)
         .arg(leadership_key(runtime))

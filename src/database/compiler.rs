@@ -988,6 +988,8 @@ impl CompilerState {
             ComparisonOp::Gte => ">=",
             ComparisonOp::Lt => "<",
             ComparisonOp::Lte => "<=",
+            ComparisonOp::Like => "LIKE",
+            ComparisonOp::NotLike => "NOT LIKE",
         }
     }
 

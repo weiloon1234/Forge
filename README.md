@@ -120,17 +120,25 @@ Forge ships an AST-first query system. Queries are built as expression trees, th
 ### Models
 
 ```rust
+#[derive(Clone, Copy, AppEnum)]
+enum UserStatus {
+    Pending,     // DB: "pending" (TEXT)
+    Active,      // DB: "active"
+    Suspended,   // DB: "suspended"
+}
+
 #[derive(Model)]
 #[forge(table = "users")]
 struct User {
     id: ModelId<Self>,
     name: String,
     email: String,
+    status: UserStatus,  // stored as TEXT, auto serde + OpenAPI + validation
     created_at: DateTime,
 }
 
 // Query
-let users = User::model_query()
+let user = User::model_query()
     .where_col(User::EMAIL, "alice@example.com")
     .first(&db)
     .await?;
@@ -139,6 +147,7 @@ let users = User::model_query()
 User::model_create()
     .set(User::NAME, "Alice")
     .set(User::EMAIL, "alice@example.com")
+    .set(User::STATUS, UserStatus::Pending)
     .execute(&db)
     .await?;
 ```
@@ -186,36 +195,31 @@ async fn admin_handler(CurrentActor(actor): CurrentActor) -> impl IntoResponse {
 
 ## Validation
 
-38+ built-in rules with async database checks:
+38+ built-in rules with async database checks. Use `#[derive(Validate)]` to generate validation from attributes, or implement `RequestValidator` manually for full control:
 
 ```rust
-#[derive(Deserialize)]
+#[derive(Deserialize, ApiSchema, Validate)]
+#[validate(
+    messages(email(unique = "This email is already registered")),
+    attributes(email = "email address")
+)]
 struct CreateUser {
+    #[validate(required, email, unique("users", "email"))]
     email: String,
+
+    #[validate(required, min_length(8))]
     password: String,
+
+    #[validate(required, confirmed)]
     password_confirmation: String,
-}
 
-#[async_trait]
-impl RequestValidator for CreateUser {
-    async fn validate(&self, v: &mut Validator) -> Result<()> {
-        v.field("email", &self.email)
-            .bail().required().email()
-            .unique("users", "email")
-            .apply().await?;
-
-        v.field("password", &self.password)
-            .bail().required().min(8)
-            .confirmed("password_confirmation", &self.password_confirmation)
-            .apply().await?;
-
-        Ok(())
-    }
+    #[validate(required, app_enum)]
+    status: UserStatus,  // AppEnum auto-validates + auto-generates OpenAPI schema
 }
 
 // Use in handler — auto-validates, returns 422 on failure
 async fn create_user(Validated(payload): Validated<CreateUser>) -> impl IntoResponse {
-    // payload is validated
+    // payload is validated — status is a valid UserStatus, email is unique
 }
 ```
 
@@ -325,6 +329,114 @@ App::builder()
 ```
 
 Plugins support dependency resolution (topological sort with cycle detection), SemVer version constraints, config defaults, asset distribution, and scaffold templating. Use `plugin:list` to inspect registered plugins and their contributions.
+
+## Full Example: Model to API
+
+A complete flow showing how enums, models, validation, OpenAPI, and routes work together with minimal boilerplate:
+
+```rust
+// ── Enums (one derive gives you DB + serde + OpenAPI + validation) ──
+
+#[derive(Clone, Copy, AppEnum)]
+enum UserStatus {
+    Pending,       // DB: TEXT "pending",  OpenAPI: {"type":"string","enum":["pending","active","suspended"]}
+    Active,
+    Suspended,
+}
+
+#[derive(Clone, Copy, AppEnum)]
+enum Priority {
+    Low = 1,       // DB: INT4 1,  OpenAPI: {"type":"integer","enum":[1,2,3]}
+    Medium = 2,
+    High = 3,
+}
+
+// ── Model ──
+
+#[derive(Model)]
+#[forge(table = "users")]
+struct User {
+    id: ModelId<Self>,
+    email: String,
+    name: String,
+    status: UserStatus,
+    created_at: DateTime,
+}
+
+// ── Request DTO (validation + OpenAPI from one struct) ──
+
+#[derive(Deserialize, ApiSchema, Validate)]
+#[validate(messages(email(unique = "Already registered")))]
+struct CreateUserRequest {
+    #[validate(required, email, unique("users", "email"))]
+    email: String,
+
+    #[validate(required, min_length(2))]
+    name: String,
+
+    #[validate(required, min_length(8))]
+    password: String,
+
+    #[validate(required, confirmed)]
+    password_confirmation: String,
+
+    #[validate(required, app_enum)]
+    status: UserStatus,   // auto-validated + auto-documented in OpenAPI
+}
+
+// ── Response DTO ──
+
+#[derive(Serialize, ApiSchema)]
+struct UserResponse {
+    id: ModelId<User>,
+    email: String,
+    name: String,
+    status: UserStatus,   // OpenAPI schema auto-resolved from AppEnum
+}
+
+// ── Route with OpenAPI documentation ──
+
+fn routes(r: &mut HttpRegistrar) -> Result<()> {
+    r.route_with_options("/users", post(create_user),
+        HttpRouteOptions::new()
+            .guard(AuthGuard::Api)
+            .document(RouteDoc::new()
+                .post()
+                .summary("Create user")
+                .tag("users")
+                .request::<CreateUserRequest>()
+                .response::<UserResponse>(201)));
+    Ok(())
+}
+
+// ── Handler (validated, type-safe) ──
+
+async fn create_user(
+    Validated(req): Validated<CreateUserRequest>,
+    State(app): State<AppContext>,
+) -> Result<impl IntoResponse> {
+    let db = app.database()?;
+    let user = User::model_create()
+        .set(User::EMAIL, &req.email)
+        .set(User::NAME, &req.name)
+        .set(User::STATUS, req.status)
+        .execute(&*db).await?;
+
+    Ok((StatusCode::CREATED, Json(UserResponse {
+        id: user.id, email: user.email,
+        name: user.name, status: user.status,
+    })))
+}
+```
+
+**What each derive provides &mdash; zero manual wiring:**
+
+| Derive | Gives you |
+|--------|-----------|
+| `AppEnum` | DB column type, serde serialization, OpenAPI schema, validation rule |
+| `Model` | Typed columns, query builders, create/update/delete, lifecycle hooks |
+| `ApiSchema` | JSON Schema for OpenAPI (auto-resolves nested AppEnum fields) |
+| `Validate` | Request validation rules, custom messages, `Validated<T>` extractor |
 
 ## Configuration
 

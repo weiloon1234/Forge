@@ -234,21 +234,11 @@ fn type_to_schema_expr(ty: &Type) -> TokenStream {
         return quote! { ::serde_json::json!({"type": "object"}) };
     }
 
-    // For unknown types, generate a $ref
-    let type_name = extract_type_name(ty);
+    // For types that implement ApiSchema, call their schema() at runtime.
+    // This correctly resolves AppEnum, other ApiSchema structs, etc.
     quote! {
-        ::serde_json::json!({"$ref": format!("#/components/schemas/{}", #type_name)})
+        <#ty as ::forge::openapi::ApiSchema>::schema()
     }
-}
-
-/// Extract the last segment name from a type path for $ref generation.
-fn extract_type_name(ty: &Type) -> String {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            return segment.ident.to_string();
-        }
-    }
-    "Unknown".to_string()
 }
 
 // ---------------------------------------------------------------------------

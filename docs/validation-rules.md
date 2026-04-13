@@ -297,7 +297,48 @@ if !file_rules::is_image(&file).await? {
 
 ## Request Validation (HTTP handlers)
 
-### Define DTO with validator
+### Derive-based (recommended)
+
+Use `#[derive(Validate)]` to generate validation from field attributes. Combine with `#[derive(ApiSchema)]` to also generate OpenAPI schema from the same struct:
+
+```rust
+#[derive(Deserialize, ApiSchema, Validate)]
+#[validate(
+    messages(email(unique = "This email is already registered")),
+    attributes(email = "email address")
+)]
+pub struct CreateUser {
+    #[validate(required, email, unique("users", "email"))]
+    pub email: String,
+
+    #[validate(required, min_length(8))]
+    pub password: String,
+
+    #[validate(required, confirmed)]
+    pub password_confirmation: String,
+
+    #[validate(required, app_enum)]
+    pub status: UserStatus,   // AppEnum validated + OpenAPI schema auto-resolved
+}
+```
+
+`#[derive(ApiSchema)]` reads `#[validate(...)]` attributes and converts them to JSON Schema constraints:
+
+| Validate attribute | OpenAPI Schema |
+|-------------------|----------------|
+| `required` | Added to `"required"` array |
+| `email` | `"format": "email"` |
+| `url` | `"format": "uri"` |
+| `uuid` | `"format": "uuid"` |
+| `min_length(N)` | `"minLength": N` |
+| `max_length(N)` | `"maxLength": N` |
+| `min_numeric(N)` | `"minimum": N` |
+| `max_numeric(N)` | `"maximum": N` |
+| `app_enum` on `AppEnum` field | Enum values auto-resolved from `AppEnum::schema()` |
+
+### Manual (full control)
+
+For complex validation logic that can't be expressed in attributes:
 
 ```rust
 #[derive(Deserialize)]
@@ -345,6 +386,19 @@ async fn create_user(
         Json(serde_json::json!({ "email": payload.email })),
     )
 }
+```
+
+### Route with OpenAPI documentation
+
+```rust
+r.route_with_options("/users", post(create_user),
+    HttpRouteOptions::new()
+        .document(RouteDoc::new()
+            .post()
+            .summary("Create user")
+            .tag("users")
+            .request::<CreateUser>()
+            .response::<UserResponse>(201)));
 ```
 
 ### Error response format

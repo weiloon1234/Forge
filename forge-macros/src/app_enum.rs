@@ -230,6 +230,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let from_db = generate_from_db_value_impl(&ident, &variant_infos, is_int_backed)?;
     let serialize = generate_serialize_impl(&ident, &variant_infos, is_int_backed)?;
     let deserialize = generate_deserialize_impl(&ident, &variant_infos, is_int_backed)?;
+    let api_schema = generate_api_schema_impl(&ident, &variant_infos, is_int_backed);
 
     Ok(quote! {
         #forge_impl
@@ -237,6 +238,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         #from_db
         #serialize
         #deserialize
+        #api_schema
     })
 }
 
@@ -581,5 +583,51 @@ fn generate_deserialize_impl(
                 }
             }
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ApiSchema impl — auto-generated from AppEnum keys
+// ---------------------------------------------------------------------------
+
+fn generate_api_schema_impl(
+    ident: &syn::Ident,
+    variants: &[VariantInfo],
+    is_int_backed: bool,
+) -> TokenStream {
+    let name_str = ident.to_string();
+
+    if is_int_backed {
+        let values: Vec<i32> = variants.iter().map(|v| v.discriminant.unwrap()).collect();
+        quote! {
+            impl ::forge::openapi::ApiSchema for #ident {
+                fn schema() -> ::serde_json::Value {
+                    ::serde_json::json!({
+                        "type": "integer",
+                        "enum": [#(#values),*]
+                    })
+                }
+
+                fn schema_name() -> &'static str {
+                    #name_str
+                }
+            }
+        }
+    } else {
+        let keys: Vec<&str> = variants.iter().map(|v| v.key_str.as_str()).collect();
+        quote! {
+            impl ::forge::openapi::ApiSchema for #ident {
+                fn schema() -> ::serde_json::Value {
+                    ::serde_json::json!({
+                        "type": "string",
+                        "enum": [#(#keys),*]
+                    })
+                }
+
+                fn schema_name() -> &'static str {
+                    #name_str
+                }
+            }
+        }
     }
 }

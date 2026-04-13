@@ -377,15 +377,35 @@ impl ServiceProvider for AppServiceProvider {
 
 | Command | Description |
 |---------|-------------|
+| **Setup** | |
 | `config:publish` | Publish sample configuration to your project |
 | `env:publish` | Generate `.env.example` with all overridable variables |
 | `key:generate` | Generate signing and encryption keys |
 | `migrate:publish` | Publish framework migration SQL files |
-| `migrate:run` | Run pending migrations |
-| `migrate:rollback` | Rollback the last migration batch |
-| `seed:countries` | Seed 250 built-in country records |
-| `docs:api` | Generate API surface docs |
 | `about` | Display framework version and environment info |
+| **Database** | |
+| `db:migrate` | Run pending migrations |
+| `db:migrate:status` | Show migration status |
+| `db:rollback` | Rollback the last migration batch |
+| `db:seed` | Run database seeders |
+| **Scaffolding** | |
+| `make:migration` | Create a new migration file |
+| `make:seeder` | Create a new seeder file |
+| `make:model` | Create a new model file |
+| `make:job` | Create a new job file |
+| `make:command` | Create a new command file |
+| **Runtime** | |
+| `down` | Put the application into maintenance mode |
+| `up` | Bring the application out of maintenance mode |
+| `routes:list` | List all registered routes |
+| `seed:countries` | Seed 250 built-in country records |
+| `token:prune` | Prune expired personal access tokens |
+| **Plugins** | |
+| `plugin:list` | List registered plugins |
+| `plugin:install-assets` | Install plugin assets |
+| `plugin:scaffold` | Run a plugin scaffold |
+| **Documentation** | |
+| `docs:api` | Generate API surface docs |
 
 ## Examples
 

@@ -322,6 +322,9 @@ TOML-based with environment variable overlay:
 # Generate a sample config
 cargo run -- config:publish
 
+# Generate .env.example with all overridable variables
+cargo run -- env:publish
+
 # Generate signing + encryption keys
 cargo run -- key:generate
 
@@ -375,6 +378,7 @@ impl ServiceProvider for AppServiceProvider {
 | Command | Description |
 |---------|-------------|
 | `config:publish` | Publish sample configuration to your project |
+| `env:publish` | Generate `.env.example` with all overridable variables |
 | `key:generate` | Generate signing and encryption keys |
 | `migrate:publish` | Publish framework migration SQL files |
 | `migrate:run` | Run pending migrations |

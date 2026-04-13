@@ -580,7 +580,16 @@ make verify-release
 |----------|-------------|
 | [API Surface](docs/api/index.md) | Auto-generated public API reference (per module) |
 | [API Reference](docs/api-reference.md) | Hand-curated API reference with context |
-| [Validation Rules](docs/validation-rules.md) | Complete validation rule reference |
+| [Auth Guide](docs/guides/auth.md) | Token/session auth, guards, permissions, policies |
+| [Routes & Middleware](docs/guides/routes-and-middleware.md) | Routing, middleware stack, CORS, CSRF, rate limiting |
+| [Email & Notifications](docs/guides/email-and-notifications.md) | Multi-driver email, multi-channel notifications |
+| [Caching & Redis](docs/guides/caching-and-redis.md) | Cache abstraction, namespaced Redis client |
+| [Storage & Imaging](docs/guides/storage-and-imaging.md) | File uploads, local + S3, image processing |
+| [Background Processing](docs/guides/background-processing.md) | Jobs, scheduler, domain events |
+| [i18n](docs/guides/i18n.md) | Translation catalogs, locale resolution |
+| [Plugin Guide](docs/guides/plugins.md) | 5 real-world plugin use cases with full code |
+| [Datatable Guide](docs/guides/datatable.md) | Server-side datatables: filtering, sorting, export |
+| [Validation Guide](docs/guides/validation.md) | 38+ rules, custom rules, request validation |
 | [CONTRIBUTING](CONTRIBUTING.md) | Contributor workflow and expectations |
 | [CHANGELOG](CHANGELOG.md) | Release history |
 | [Release Checklist](docs/release-checklist.md) | Release procedure |

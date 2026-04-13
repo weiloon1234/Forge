@@ -597,36 +597,28 @@ fn generate_api_schema_impl(
 ) -> TokenStream {
     let name_str = ident.to_string();
 
-    if is_int_backed {
-        let values: Vec<i32> = variants.iter().map(|v| v.discriminant.unwrap()).collect();
-        quote! {
-            impl ::forge::openapi::ApiSchema for #ident {
-                fn schema() -> ::serde_json::Value {
-                    ::serde_json::json!({
-                        "type": "integer",
-                        "enum": [#(#values),*]
-                    })
-                }
-
-                fn schema_name() -> &'static str {
-                    #name_str
-                }
-            }
-        }
+    let (type_str, enum_values) = if is_int_backed {
+        let values: Vec<i32> = variants
+            .iter()
+            .map(|v| v.discriminant.expect("int-backed variant missing discriminant"))
+            .collect();
+        ("integer", quote! { #(#values),* })
     } else {
         let keys: Vec<&str> = variants.iter().map(|v| v.key_str.as_str()).collect();
-        quote! {
-            impl ::forge::openapi::ApiSchema for #ident {
-                fn schema() -> ::serde_json::Value {
-                    ::serde_json::json!({
-                        "type": "string",
-                        "enum": [#(#keys),*]
-                    })
-                }
+        ("string", quote! { #(#keys),* })
+    };
 
-                fn schema_name() -> &'static str {
-                    #name_str
-                }
+    quote! {
+        impl ::forge::openapi::ApiSchema for #ident {
+            fn schema() -> ::serde_json::Value {
+                ::serde_json::json!({
+                    "type": #type_str,
+                    "enum": [#enum_values]
+                })
+            }
+
+            fn schema_name() -> &'static str {
+                #name_str
             }
         }
     }

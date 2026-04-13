@@ -73,3 +73,4 @@ Test infra: `TestApp`, `TestClient`, `TestResponse`, `Factory` builder in `src/t
 - Public API changes should update examples, docs, and acceptance fixtures
 - Update `CHANGELOG.md` for user-visible changes
 - See `docs/release-checklist.md` for release procedure
+- See `docs/guides/` for consumer-facing usage guides (plugins, datatable, validation, etc.)

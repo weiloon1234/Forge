@@ -580,6 +580,7 @@ make verify-release
 |----------|-------------|
 | [API Surface](docs/api/index.md) | Auto-generated public API reference (per module) |
 | [API Reference](docs/api-reference.md) | Hand-curated API reference with context |
+| [Getting Started](docs/guides/getting-started.md) | AppBuilder, 5 process types, project structure |
 | [Database Guide](docs/guides/database.md) | Models, relations, queries, projections, migrations |
 | [Auth Guide](docs/guides/auth.md) | Token/session auth, guards, permissions, policies |
 | [Routes & Middleware](docs/guides/routes-and-middleware.md) | Routing, middleware stack, CORS, CSRF, rate limiting |

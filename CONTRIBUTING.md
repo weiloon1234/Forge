@@ -26,6 +26,26 @@ make verify-release
 - `make verify`: format, tests, clippy, and fixture checks
 - `make verify-release`: full verification plus package dry-run
 
+## Git Hooks
+
+Enable the project pre-commit hook (auto-regenerates API surface docs when source files change):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This is a one-time setup per clone. The hook only runs when `src/`, `Cargo.toml`, or macro crate files are staged.
+
+## API Surface Docs
+
+The `docs/api/` directory is auto-generated from `cargo doc` HTML output. Regenerate manually:
+
+```bash
+make api-docs
+```
+
+The tool auto-discovers all public modules — no manual registration needed when adding new modules. If the pre-commit hook is enabled, this happens automatically.
+
 ## Contribution Expectations
 
 - Keep the public API strongly typed. Do not reintroduce raw semantic strings where typed identifiers or enums already exist.

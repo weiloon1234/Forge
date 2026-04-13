@@ -18,6 +18,7 @@ exclude = [
     "tests/fixtures/plugin_base",
     "tests/fixtures/plugin_consumer_app",
     "tests/fixtures/plugin_dep",
+    "tools/forge-api-doc",
 ]
 resolver = "2"
 

@@ -8,7 +8,7 @@ This status note maps the blueprint's goals to the concrete surfaces already in 
 
 - Blueprint scope: core implementation complete
 - First-class target: model-backed datatables with JSON, download, and email export modes
-- Pending items: XLSX download requires `rust_xlsxwriter` dependency (stubbed), full job dispatch for email export (stubbed), acceptance tests
+- Pending items: acceptance tests, relation-based auto-filters
 
 ## Module Structure
 
@@ -28,9 +28,10 @@ All datatable modules live under `src/datatable/`:
 | `datatable_trait.rs` | `ModelDatatable` + `ProjectionDatatable` traits |
 | `response.rs` | `DatatableJsonResponse`, column/pagination meta |
 | `json.rs` | JSON output mode (paginated) |
-| `download.rs` | XLSX download mode (stubbed pending `rust_xlsxwriter`) |
+| `download.rs` | XLSX download mode (fully implemented with `rust_xlsxwriter`) |
 | `export.rs` | `DatatableExportDelivery` contract + `NoopExportDelivery` |
-| `export_job.rs` | Queued export dispatch (stubbed pending full job wiring) |
+| `export_job.rs` | Queued export dispatch (fully implemented) |
+| `query_pipeline.rs` | Shared query build pipeline for JSON/download/export |
 | `registry.rs` | `DatatableRegistry` + `DatatableRegistryBuilder` (type-erased lookup by ID) |
 
 ## Blueprint Mapping
@@ -78,8 +79,8 @@ All datatable modules live under `src/datatable/`:
 ### Output Modes (Blueprint: Output Modes)
 
 - **JSON**: `build_json_response()` in `json.rs` — scoped query, auto-filter, custom filter hook, sorting, pagination, row building with column extraction + mapping overrides
-- **Download**: `build_download_response()` in `download.rs` — stubbed, requires `rust_xlsxwriter`
-- **Email**: `dispatch_export()` in `export_job.rs` — stubbed, returns `DatatableExportAccepted`
+- **Download**: `build_download_response()` in `download.rs` — fully implemented with `rust_xlsxwriter` (bold headers, type-aware cells, exportable column filtering, mapping support)
+- **Email**: `dispatch_export()` in `export_job.rs` — fully implemented with `DatatableExportJob` (`Job` trait, max 3 retries), reuses download pipeline, pluggable `DatatableExportDelivery`
 
 ### Export Contract (Blueprint: Export Contract)
 
@@ -112,7 +113,5 @@ All datatable modules live under `src/datatable/`:
 
 ## Remaining Work
 
-- [ ] Add `rust_xlsxwriter` dependency and implement full XLSX download
-- [ ] Wire full job dispatch in `export_job.rs` for async email exports
 - [ ] Acceptance tests for JSON response, filter engine, legacy params, XLSX, registry
-- [ ] Relation-based auto-filters (filtering on joined table columns)
+- [ ] Relation-based auto-filters (column metadata has `relation: Option<String>` but filter engine does not use it yet)

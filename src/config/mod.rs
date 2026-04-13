@@ -1,3 +1,4 @@
+pub(crate) mod api_docs;
 pub(crate) mod publish;
 
 use std::collections::BTreeMap;

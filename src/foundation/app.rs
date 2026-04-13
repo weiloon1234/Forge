@@ -945,6 +945,7 @@ impl AppBuilder {
 
         let mut boot_commands = Vec::new();
         boot_commands.push(crate::config::publish::config_publish_cli_registrar());
+        boot_commands.push(crate::config::api_docs::docs_api_cli_registrar());
         boot_commands.push(crate::http::maintenance_cli_registrar());
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());

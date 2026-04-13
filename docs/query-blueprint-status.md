@@ -111,12 +111,60 @@ References:
 
 - Runtime/value acceptance coverage: [tests/database_acceptance.rs](../tests/database_acceptance.rs) `typed_runtime_supports_production_postgres_values_and_custom_adapters`
 
-## Coverage Notes
+## Post-Blueprint Features
 
 The blueprint is intentionally narrower than the full current database platform.
 
 The following are implemented in Forge but are post-blueprint work and should not be treated as unfinished blueprint scope:
 
+### Cursor Pagination
+
+Fully implemented alongside offset pagination:
+
+- `CursorPagination`, `CursorPaginated<T>`, `CursorMeta`, `CursorInfo`
+- `ModelQuery::cursor_paginate()` and `ProjectionQuery::cursor_paginate()` with encoded cursor tokens
+
+### Streaming
+
+Memory-efficient record iteration with eager relation support:
+
+- `DbRecordStream<'a>` type alias
+- `.stream()` on `Query`, `ModelQuery`, and `ProjectionQuery`
+- `stream_records()` on the `QueryExecutor` trait
+- `.with_stream_batch_size()` option on `ModelQuery`
+
+### JSON Path Expressions
+
+Full JSON querying support:
+
+- `JsonPathExpr`, `JsonPathSegment`, `JsonPathMode` in AST
+- `JsonExprBuilder` with `.as_json()`, `.contains()`, `.contained_by()`
+
+### Window Functions
+
+Full window function support:
+
+- `WindowExpr`, `WindowSpec`, `WindowFrame`, `WindowFrameUnits`, `WindowFrameBound` in AST
+- `WindowBuilder` with `.partition_by()`, `.order_by()`, `.rows_between()`, `.range_between()`
+
+### Row Locking
+
+Pessimistic locking for concurrent access:
+
+- `LockClause`, `LockStrength` (`Update`, `NoKeyUpdate`, `Share`, `KeyShare`), `LockBehavior` (`Wait`, `NoWait`, `SkipLocked`)
+- `.for_update()`, `.for_no_key_update()`, `.for_share()`, `.for_key_share()`, `.skip_locked()`, `.nowait()` on `Query`
+
+### UPSERT / ON CONFLICT
+
+Full upsert support on insert builders:
+
+- `OnConflictNode`, `OnConflictTarget` (`Columns`, `Constraint`), `OnConflictAction` (`DoNothing`, `DoUpdate`)
+- `.on_conflict_columns()`, `.on_conflict_constraint()`, `.do_nothing()`, `.do_update()`, `.set_conflict()`, `.set_conflict_expr()` on `CreateModel`, `CreateManyModel`, and `Query` insert builders
+
+### Model Conventions & Lifecycle
+
 - Rust migration and seeding lifecycle
-- runtime hardening, native streaming, and statement timeouts
-- safe-by-default model conventions such as UUIDv7 `ModelId<M>`, timestamps, soft deletes, lifecycle hooks, and field mutators/accessors
+- Runtime hardening, native streaming, and statement timeouts
+- Safe-by-default `ModelId<M>` UUIDv7 primary keys, timestamps, soft deletes
+- Model lifecycle hooks (creating, created, updating, updated, deleting, deleted)
+- Field-level write mutators and read accessors

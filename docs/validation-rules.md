@@ -27,6 +27,7 @@ Modifiers change how the validation loop behaves. They are NOT rule steps — th
 |----------|--------|
 | `.nullable()` | Skip all rules if the value is empty or whitespace |
 | `.bail()` | Stop processing rules for this field after the first error |
+| `.with_message(msg)` | Override the error message for the last added rule |
 
 ### nullable
 
@@ -56,6 +57,20 @@ validator
     .await?;
 ```
 
+### with_message
+
+Override the default error message for the preceding rule.
+
+```rust
+validator
+    .field("age", &input.age)
+    .required()
+    .min_numeric(18.0)
+    .with_message("You must be at least 18 years old")
+    .apply()
+    .await?;
+```
+
 ---
 
 ## Built-in Rules
@@ -70,8 +85,8 @@ validator
 
 | Rule | Code | Description |
 |------|------|-------------|
-| `.min(n)` | `min` | String length must be at least `n` characters |
-| `.max(n)` | `max` | String length must be at most `n` characters |
+| `.min(n)` | `min` | String length must be at least `n` characters (Unicode chars, not bytes) |
+| `.max(n)` | `max` | String length must be at most `n` characters (Unicode chars, not bytes) |
 | `.alpha()` | `alpha` | Must contain only letters (a-z, A-Z, Unicode letters) |
 | `.alpha_numeric()` | `alpha_numeric` | Must contain only letters and digits |
 | `.digits()` | `digits` | Must contain only ASCII digits (0-9) |
@@ -132,6 +147,21 @@ validator
 
 Temporal comparison rules support `forge::DateTime`, `forge::LocalDateTime`, `forge::Date`, and `forge::Time` string formats. Offset-less `.datetime()` values are interpreted in the configured app timezone.
 
+### Enum Rules
+
+| Rule | Code | Description |
+|------|------|-------------|
+| `.app_enum::<E>()` | `app_enum` | Value must be a valid key in the given `ForgeAppEnum` type |
+
+```rust
+validator
+    .field("status", &input.status)
+    .required()
+    .app_enum::<OrderStatus>()
+    .apply()
+    .await?;
+```
+
 ### Database Rules (async)
 
 These rules query the database. They require an active database connection via `AppContext`.
@@ -154,6 +184,40 @@ validator
     .apply()
     .await?;
 ```
+
+---
+
+## Array / Collection Validation
+
+Use `.each()` to validate each item in a collection. All field rules are available on the `EachValidator`.
+
+```rust
+validator
+    .each("tags", &input.tags)
+    .bail()
+    .required()
+    .min(2)
+    .max(50)
+    .apply()
+    .await?;
+```
+
+Errors are reported with indexed field names (e.g. `tags.0`, `tags.1`).
+
+---
+
+## Validator Methods
+
+The `Validator` struct provides these methods for controlling validation behavior:
+
+| Method | Description |
+|--------|-------------|
+| `.locale(locale)` | Set locale for error message translation |
+| `.set_locale(locale)` | Set locale (mutable version) |
+| `.custom_message(field, code, message)` | Override error message for a specific field + rule |
+| `.custom_attribute(field, name)` | Override display name for a field in error messages |
+| `.add_error(field, code, params)` | Manually add a validation error |
+| `.finish()` | Return `Ok(())` or `Err(ValidationErrors)` |
 
 ---
 
@@ -205,6 +269,32 @@ validator
 
 ---
 
+## File Upload Validation
+
+Utility functions for validating uploaded files (not chained on `FieldValidator`):
+
+| Function | Description |
+|----------|-------------|
+| `is_image(file)` | Check if file is an image (magic bytes) |
+| `check_max_size(file, max_kb)` | Check file size <= max_kb KB |
+| `get_image_dimensions(file)` | Get image (width, height) |
+| `check_allowed_mimes(file, allowed)` | Check MIME type against allowed list |
+| `check_allowed_extensions(file, allowed)` | Check extension against allowed list |
+
+```rust
+use forge::validation::file_rules;
+
+if !file_rules::check_max_size(&file, 2048) {
+    // file exceeds 2MB
+}
+
+if !file_rules::is_image(&file).await? {
+    // not a valid image
+}
+```
+
+---
+
 ## Request Validation (HTTP handlers)
 
 ### Define DTO with validator
@@ -214,6 +304,7 @@ validator
 pub struct CreateUser {
     pub email: String,
     pub password: String,
+    pub password_confirmation: String,
 }
 
 #[async_trait]
@@ -284,13 +375,14 @@ async fn create_user(
 | Category | Count |
 |----------|-------|
 | Presence | 1 |
-| String | 6 |
+| String | 7 |
 | Numeric | 5 |
-| Format | 6 |
+| Format | 10 |
 | IP | 3 |
 | List | 2 |
-| Comparison | 3 |
+| Comparison | 7 |
+| Enum | 1 |
 | Database (async) | 2 |
-| Modifiers | 2 |
+| Modifiers | 3 |
 | Custom (user-defined) | unlimited |
-| **Total built-in** | **30** |
+| **Total built-in** | **38** |

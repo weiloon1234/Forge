@@ -1,0 +1,201 @@
+# http
+
+HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources
+
+[Back to index](../index.md)
+
+## forge::http
+
+```rust
+pub type HttpRouter = Router<AppContext>;
+pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
+struct HttpRegistrar
+  fn new() -> Self
+  fn route( &mut self, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
+  fn route_with_options( &mut self, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
+  fn route_named( &mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
+  fn route_named_with_options( &mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
+  fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self
+  fn merge(&mut self, router: HttpRouter) -> &mut Self
+  fn group( &mut self, prefix: &str, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>, ) -> Result<&mut Self>
+  fn api_version( &mut self, version: u32, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>, ) -> Result<&mut Self>
+  fn into_router(self, app: AppContext) -> Router
+  fn into_router_with_middlewares( self, app: AppContext, middlewares: Vec<MiddlewareConfig>, ) -> Router
+struct HttpRouteOptions
+  fn new() -> Self
+  fn guard<I>(self, guard: I) -> Self
+  fn permission<I>(self, permission: I) -> Self
+  fn permissions<I, P>(self, permissions: I) -> Self
+  fn middleware(self, config: MiddlewareConfig) -> Self
+  fn middleware_group(self, name: impl Into<String>) -> Self
+  fn rate_limit(self, rate_limit: RateLimit) -> Self
+  fn document(self, doc: RouteDoc) -> Self
+```
+
+## forge::http::cookie
+
+```rust
+enum SameSite { Strict, Lax, None }
+  fn is_strict(&self) -> bool
+  fn is_lax(&self) -> bool
+  fn is_none(&self) -> bool
+struct Cookie
+  fn new<N, V>(name: N, value: V) -> Cookie<'c>
+  fn named<N>(name: N) -> Cookie<'c>
+  fn build<C>(base: C) -> CookieBuilder<'c>
+  fn parse<S>(s: S) -> Result<Cookie<'c>, ParseError>
+  fn parse_encoded<S>(s: S) -> Result<Cookie<'c>, ParseError>
+  fn split_parse<S>(string: S) -> SplitCookies<'c>
+  fn split_parse_encoded<S>(string: S) -> SplitCookies<'c>
+  fn into_owned(self) -> Cookie<'static>
+  fn name(&self) -> &str
+  fn value(&self) -> &str
+  fn value_trimmed(&self) -> &str
+  fn name_value(&self) -> (&str, &str)
+  fn name_value_trimmed(&self) -> (&str, &str)
+  fn http_only(&self) -> Option<bool>
+  fn secure(&self) -> Option<bool>
+  fn same_site(&self) -> Option<SameSite>
+  fn partitioned(&self) -> Option<bool>
+  fn max_age(&self) -> Option<Duration>
+  fn path(&self) -> Option<&str>
+  fn domain(&self) -> Option<&str>
+  fn expires(&self) -> Option<Expiration>
+  fn expires_datetime(&self) -> Option<OffsetDateTime>
+  fn set_name<N>(&mut self, name: N)
+  fn set_value<V>(&mut self, value: V)
+  fn set_http_only<T>(&mut self, value: T)
+  fn set_secure<T>(&mut self, value: T)
+  fn set_same_site<T>(&mut self, value: T)
+  fn set_partitioned<T>(&mut self, value: T)
+  fn set_max_age<D>(&mut self, value: D)
+  fn set_path<P>(&mut self, path: P)
+  fn unset_path(&mut self)
+  fn set_domain<D>(&mut self, domain: D)
+  fn unset_domain(&mut self)
+  fn set_expires<T>(&mut self, time: T)
+  fn unset_expires(&mut self)
+  fn make_permanent(&mut self)
+  fn make_removal(&mut self)
+  fn name_raw(&self) -> Option<&'c str>
+  fn value_raw(&self) -> Option<&'c str>
+  fn path_raw(&self) -> Option<&'c str>
+  fn domain_raw(&self) -> Option<&'c str>
+  fn encoded<'a>(&'a self) -> Display<'a, 'c>
+  fn stripped<'a>(&'a self) -> Display<'a, 'c>
+struct CookieJar
+  fn from_headers(headers: &HeaderMap) -> CookieJar
+  fn new() -> CookieJar
+  fn get(&self, name: &str) -> Option<&Cookie<'static>>
+  fn remove<C>(self, cookie: C) -> CookieJar
+  fn add<C>(self, cookie: C) -> CookieJar
+  fn iter(&self) -> impl Iterator<Item = &Cookie<'static>>
+struct SessionCookie
+  fn build<'a>(name: &'a str, value: &'a str, secure: bool) -> Cookie<'a>
+  fn clear(name: &str) -> Cookie<'_>
+fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String>
+```
+
+## forge::http::middleware
+
+```rust
+enum MiddlewareConfig { TrustedProxy, MaintenanceMode, Cors, SecurityHeaders, Csrf, RateLimit, MaxBodySize, RequestTimeout, ETag, Compression }
+enum RateLimitBy { Ip, Actor, ActorOrIp }
+enum RateLimitWindow { Second, Minute, Hour }
+struct Compression
+  fn new() -> Self
+  fn build(self) -> MiddlewareConfig
+struct Cors
+  fn new() -> Self
+  fn allow_origin(self, origin: &str) -> Self
+  fn allow_origins<I, O>(self, origins: I) -> Self
+  fn allow_any_origin(self) -> Self
+  fn allow_method(self, method: Method) -> Self
+  fn allow_methods<I>(self, methods: I) -> Self
+  fn allow_any_method(self) -> Self
+  fn allow_header(self, hdr: HeaderName) -> Self
+  fn allow_headers<I>(self, headers: I) -> Self
+  fn allow_any_header(self) -> Self
+  fn allow_credentials(self) -> Self
+  fn max_age(self, seconds: u64) -> Self
+  fn build(self) -> MiddlewareConfig
+struct Csrf
+  fn new() -> Self
+  fn cookie_name(self, name: &str) -> Self
+  fn header_name(self, name: HeaderName) -> Self
+  fn secure(self, secure: bool) -> Self
+  fn exclude(self, path: &str) -> Self
+  fn build(self) -> MiddlewareConfig
+struct CsrfToken
+  fn value(&self) -> &str
+struct ETag
+  fn new() -> Self
+  fn build(self) -> MiddlewareConfig
+struct MaintenanceMode
+  fn new() -> Self
+  fn bypass_secret(self, secret: impl Into<String>) -> Self
+  fn build(self) -> MiddlewareConfig
+struct MaxBodySize
+  fn bytes(n: usize) -> Self
+  fn kb(n: usize) -> Self
+  fn mb(n: usize) -> Self
+  fn build(self) -> MiddlewareConfig
+struct MiddlewareGroups
+  fn get(&self, name: &str) -> Option<&Vec<MiddlewareConfig>>
+struct RateLimit
+  fn new(max: u32) -> Self
+  fn per_second(self) -> Self
+  fn per_minute(self) -> Self
+  fn per_hour(self) -> Self
+  fn key_prefix(self, prefix: &str) -> Self
+  fn by_actor(self) -> Self
+  fn by_actor_or_ip(self) -> Self
+  fn rate_limit_by(&self) -> RateLimitBy
+  fn max(&self) -> u32
+  fn window(&self) -> RateLimitWindow
+  fn key_prefix_str(&self) -> &str
+  fn build(self) -> MiddlewareConfig
+struct RealIp
+struct RequestTimeout
+  fn secs(n: u64) -> Self
+  fn mins(n: u64) -> Self
+  fn duration(d: Duration) -> Self
+  fn build(self) -> MiddlewareConfig
+struct SecurityHeaders
+  fn new() -> Self
+  fn disable_hsts(self) -> Self
+  fn frame_options(self, value: &str) -> Self
+  fn content_security_policy(self, policy: &str) -> Self
+  fn referrer_policy(self, policy: &str) -> Self
+  fn header(self, name: HeaderName, value: HeaderValue) -> Self
+  fn build(self) -> MiddlewareConfig
+struct TrustedProxy
+  fn new() -> Self
+  fn cloudflare() -> Self
+  fn with_header(self, hdr: HeaderName) -> Self
+  fn build(self) -> MiddlewareConfig
+```
+
+## forge::http::resource
+
+```rust
+trait ApiResource
+  fn transform(item: &T) -> Value
+  fn make(item: &T) -> Value
+  fn collection(items: &[T]) -> Vec<Value>
+  fn paginated(paginated: &Paginated<T>, base_url: &str) -> Value
+```
+
+## forge::http::routes
+
+```rust
+struct RouteRegistry
+  fn new() -> Self
+  fn register(&mut self, name: impl Into<String>, pattern: impl Into<String>)
+  fn url(&self, name: &str, params: &[(&str, &str)]) -> Result<String>
+  fn has(&self, name: &str) -> bool
+  fn iter(&self) -> impl Iterator<Item = (&String, &String)>
+  fn signed_url( &self, name: &str, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime, ) -> Result<String>
+  fn verify_signature(url: &str, signing_key: &[u8]) -> Result<()>
+```
+

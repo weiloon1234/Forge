@@ -5,6 +5,7 @@ Consumer-facing guides for building applications with Forge. Each guide covers o
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](getting-started.md) | AppBuilder, 5 process types, service providers, project structure |
+| [CLI Commands](cli-commands.md) | Define commands with arguments, flags, access framework services |
 | [Database](database.md) | Models, queries, relations, projections, lifecycle hooks, migrations |
 | [Auth & Guards](auth.md) | Token/session auth, guards, permissions, policies, extractors, password reset |
 | [Routes & Middleware](routes-and-middleware.md) | Routing, groups, API versioning, middleware stack, CORS, CSRF, rate limiting, SPA |

@@ -1,0 +1,799 @@
+# Database Guide
+
+AST-first query system with typed models, relations, projections, lifecycle hooks, and migrations.
+
+---
+
+## Quick Start
+
+```rust
+#[derive(Model)]
+#[forge(table = "posts")]
+struct Post {
+    id: ModelId<Self>,
+    title: String,
+    body: String,
+    published: bool,
+    created_at: DateTime,
+    updated_at: DateTime,
+}
+
+// Create
+let post = Post::model_create()
+    .set(Post::TITLE, "Hello World")
+    .set(Post::BODY, "My first post")
+    .set(Post::PUBLISHED, true)
+    .save(&*app.database()?)
+    .await?;
+
+// Query
+let posts = Post::model_query()
+    .where_(Post::PUBLISHED.eq(true))
+    .order_by(Post::CREATED_AT.desc())
+    .all(&*app.database()?)
+    .await?;
+
+// Update
+post.update()
+    .set(Post::TITLE, "Updated Title")
+    .save(&*app.database()?)
+    .await?;
+
+// Delete
+post.delete().execute(&*app.database()?).await?;
+```
+
+---
+
+## Models
+
+### Defining a Model
+
+```rust
+#[derive(Model)]
+#[forge(table = "users", lifecycle = UserLifecycle, soft_deletes = true)]
+struct User {
+    id: ModelId<Self>,              // UUIDv7 primary key (auto-generated)
+    email: String,
+    name: String,
+    #[forge(write_mutator = "hash_password")]
+    password: String,               // auto-hashed on write via mutator
+    status: UserStatus,             // AppEnum stored as TEXT
+    login_count: i64,
+    nickname: Option<String>,       // nullable column
+    orders: Loaded<Vec<Order>>,     // eager-loaded relation (not a DB column)
+    order_count: Loaded<i64>,       // relation aggregate (not a DB column)
+    created_at: DateTime,           // auto-managed timestamp
+    updated_at: DateTime,           // auto-managed timestamp
+    deleted_at: Option<DateTime>,   // soft delete marker
+}
+```
+
+**What `#[derive(Model)]` generates:**
+
+| Generated | Example |
+|-----------|---------|
+| Column constants | `User::EMAIL`, `User::NAME`, `User::STATUS` — typed `Column<User, T>` |
+| Query builder | `User::model_query()` → `ModelQuery<User>` |
+| Create builder | `User::model_create()` → `CreateModel<User>` |
+| Bulk create | `User::model_create_many()` → `CreateManyModel<User>` |
+| Update builder | `User::model_update()` → `UpdateModel<User>` |
+| Delete builder | `User::model_delete()` → soft delete, `User::model_force_delete()` → permanent |
+| Restore builder | `User::model_restore()` → restore soft-deleted |
+| Instance methods | `user.update()`, `user.delete()`, `user.force_delete()`, `user.restore()` |
+| Hydration | Builds `User` from `DbRecord` automatically |
+
+### Model Attributes
+
+| Attribute | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `#[forge(table = "...")]` | Yes | — | Database table name |
+| `lifecycle = Type` | No | No hooks | Struct implementing `ModelLifecycle<M>` |
+| `timestamps = true/false` | No | Config default | Auto-manage `created_at`/`updated_at` |
+| `soft_deletes = true/false` | No | Config default | Enable soft deletes via `deleted_at` |
+| `primary_key_strategy = "uuid_v7"` | No | `uuid_v7` | `uuid_v7` (auto) or `manual` |
+
+### Field Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#[forge(write_mutator = "fn_name")]` | Transform value on create/update (e.g., hash password) |
+| `#[forge(read_accessor = "fn_name")]` | Transform value on read |
+| `#[forge(skip)]` | Skip this field in DB operations |
+
+### ModelId\<M\>
+
+Type-safe primary key (UUIDv7):
+
+```rust
+let id = ModelId::<User>::generate();  // generate new
+let user = User::model_query().where_(User::ID.eq(id)).first(&*db).await?;
+```
+
+Serialized as a string (`"01912a4b-7c8d-7000-abcd-ef1234567890"`), stored as UUID in Postgres.
+
+---
+
+## Querying
+
+### Basic Queries
+
+```rust
+let db = app.database()?;
+
+// All rows
+let users = User::model_query().all(&*db).await?;
+
+// First match
+let user = User::model_query()
+    .where_(User::EMAIL.eq("alice@example.com"))
+    .first(&*db)
+    .await?;
+
+// Count
+let total = User::model_query().count(&*db).await?;
+
+// Exists
+let has_admins = User::model_query()
+    .where_(User::STATUS.eq(UserStatus::Active))
+    .exists(&*db)
+    .await?;
+```
+
+### Column Operators
+
+```rust
+User::EMAIL.eq("value")
+User::EMAIL.not_eq("value")
+User::LOGIN_COUNT.gt(10)
+User::LOGIN_COUNT.gte(10)
+User::LOGIN_COUNT.lt(100)
+User::LOGIN_COUNT.lte(100)
+User::EMAIL.like("%@example.com")
+User::EMAIL.not_like("%spam%")
+User::ID.in_list([id1, id2, id3])
+User::NICKNAME.is_null()
+User::NICKNAME.is_not_null()
+```
+
+### Ordering & Limits
+
+```rust
+User::model_query()
+    .order_by(User::CREATED_AT.desc())
+    .order_by(User::NAME.asc())
+    .limit(10)
+    .offset(20)
+    .all(&*db).await?;
+```
+
+### Soft Deletes
+
+```rust
+// Default: excludes soft-deleted rows
+User::model_query().all(&*db).await?;
+
+// Include soft-deleted
+User::model_query().with_trashed().all(&*db).await?;
+
+// Only soft-deleted
+User::model_query().only_trashed().all(&*db).await?;
+```
+
+### Pagination
+
+**Offset-based:**
+
+```rust
+let page = User::model_query()
+    .order_by(User::CREATED_AT.desc())
+    .paginate(&*db, Pagination::new(1, 20))
+    .await?;
+
+page.data;         // Collection<User>
+page.total;        // total matching rows
+page.pagination;   // { page: 1, per_page: 20 }
+```
+
+**Cursor-based (for large datasets):**
+
+```rust
+let result = User::model_query()
+    .order_by(User::ID.asc())
+    .cursor_paginate(&*db, User::ID, CursorPagination::new(20))
+    .await?;
+
+result.data;           // Vec<User>
+result.meta.has_next;  // bool
+result.cursors.next;   // Option<String> — pass as .after() for next page
+```
+
+### Streaming
+
+Process large result sets without loading everything into memory:
+
+```rust
+let mut stream = User::model_query()
+    .order_by(User::ID.asc())
+    .stream(&*db)?;
+
+while let Some(user) = stream.next().await {
+    let user = user?;
+    // process one at a time
+}
+```
+
+### Locking
+
+```rust
+// SELECT ... FOR UPDATE
+let user = User::model_query()
+    .where_(User::ID.eq(id))
+    .for_update()
+    .first(&*db)
+    .await?;
+
+// Skip locked rows (non-blocking)
+let available = User::model_query()
+    .where_(User::STATUS.eq(UserStatus::Pending))
+    .for_update()
+    .skip_locked()
+    .first(&*db)
+    .await?;
+```
+
+### Query Scopes
+
+Reusable query filters:
+
+```rust
+impl User {
+    fn active(q: ModelQuery<Self>) -> ModelQuery<Self> {
+        q.where_(User::STATUS.eq(UserStatus::Active))
+    }
+
+    fn recent(q: ModelQuery<Self>) -> ModelQuery<Self> {
+        q.order_by(User::CREATED_AT.desc()).limit(10)
+    }
+}
+
+let users = User::model_query()
+    .scope(User::active)
+    .scope(User::recent)
+    .all(&*db).await?;
+```
+
+---
+
+## Creating
+
+### Single Row
+
+```rust
+let user = User::model_create()
+    .set(User::EMAIL, "alice@example.com")
+    .set(User::NAME, "Alice")
+    .set(User::PASSWORD, "secret")       // write_mutator auto-hashes
+    .set(User::STATUS, UserStatus::Active)
+    .save(&*db)
+    .await?;
+```
+
+### Bulk Insert
+
+```rust
+let users = User::model_create_many()
+    .row(|r| r.set(User::EMAIL, "a@example.com").set(User::NAME, "Alice"))
+    .row(|r| r.set(User::EMAIL, "b@example.com").set(User::NAME, "Bob"))
+    .row(|r| r.set(User::EMAIL, "c@example.com").set(User::NAME, "Charlie"))
+    .get(&*db)
+    .await?;  // returns Collection<User>
+```
+
+### Upsert (ON CONFLICT)
+
+```rust
+// Insert or update on conflict
+User::model_create()
+    .set(User::EMAIL, "alice@example.com")
+    .set(User::NAME, "Alice Updated")
+    .on_conflict_columns([User::EMAIL])
+    .do_update()
+    .set_excluded(User::NAME)      // use the value from the INSERT
+    .save(&*db)
+    .await?;
+
+// Insert or ignore
+User::model_create()
+    .set(User::EMAIL, "alice@example.com")
+    .on_conflict_columns([User::EMAIL])
+    .do_nothing()
+    .execute(&*db)
+    .await?;
+```
+
+---
+
+## Updating
+
+### By Query
+
+```rust
+User::model_update()
+    .set(User::STATUS, UserStatus::Suspended)
+    .where_(User::LOGIN_COUNT.eq(0))
+    .execute(&*db)
+    .await?;
+```
+
+### Instance Method
+
+```rust
+let updated = user.update()
+    .set(User::NAME, "New Name")
+    .save(&*db)
+    .await?;
+```
+
+### Expression Updates
+
+```rust
+User::model_update()
+    .set_expr(User::LOGIN_COUNT, Expr::column(User::LOGIN_COUNT.column_ref()) + Expr::value(1))
+    .where_(User::ID.eq(user_id))
+    .execute(&*db)
+    .await?;
+```
+
+### Set NULL
+
+```rust
+user.update()
+    .set_null(User::NICKNAME)
+    .save(&*db)
+    .await?;
+```
+
+---
+
+## Deleting
+
+```rust
+// Soft delete (sets deleted_at)
+user.delete().execute(&*db).await?;
+
+// Permanent delete
+user.force_delete().execute(&*db).await?;
+
+// Bulk soft delete
+User::model_delete()
+    .where_(User::STATUS.eq(UserStatus::Banned))
+    .execute(&*db)
+    .await?;
+
+// Restore soft-deleted
+User::model_restore()
+    .where_(User::ID.eq(user_id))
+    .execute(&*db)
+    .await?;
+```
+
+---
+
+## Relations
+
+### Defining Relations
+
+```rust
+#[derive(Model)]
+#[forge(table = "users")]
+struct User {
+    id: ModelId<Self>,
+    name: String,
+    orders: Loaded<Vec<Order>>,         // has_many
+    profile: Loaded<Option<Profile>>,   // has_one
+    order_count: Loaded<i64>,           // aggregate
+}
+
+#[derive(Model)]
+#[forge(table = "orders")]
+struct Order {
+    id: ModelId<Self>,
+    user_id: ModelId<User>,
+    total: i64,
+    author: Loaded<Option<User>>,       // belongs_to
+    items: Loaded<Vec<OrderItem>>,      // has_many (nested)
+}
+
+impl User {
+    fn orders() -> RelationDef<Self, Order> {
+        has_many(Self::ID, Order::USER_ID, |u| u.id, |u, orders| u.orders = Loaded::new(orders))
+    }
+
+    fn profile() -> RelationDef<Self, Profile> {
+        has_one(Self::ID, Profile::USER_ID, |u| u.id, |u, profile| u.profile = Loaded::new(profile))
+    }
+
+    fn order_count() -> RelationAggregateDef<Self, i64> {
+        Self::orders().count(|u, count| u.order_count = Loaded::new(count))
+    }
+
+    fn order_total() -> RelationAggregateDef<Self, Option<i64>> {
+        Self::orders().sum(Order::TOTAL, |u, total| u.order_total = Loaded::new(total))
+    }
+}
+
+impl Order {
+    fn author() -> RelationDef<Self, User> {
+        belongs_to(Self::USER_ID, User::ID, |o| Some(o.user_id), |o, user| o.author = Loaded::new(user))
+    }
+
+    fn items() -> RelationDef<Self, OrderItem> {
+        has_many(Self::ID, OrderItem::ORDER_ID, |o| o.id, |o, items| o.items = Loaded::new(items))
+    }
+}
+```
+
+### Eager Loading
+
+```rust
+// Load relations
+let users = User::model_query()
+    .with(User::orders())
+    .with(User::profile())
+    .with_aggregate(User::order_count())
+    .all(&*db).await?;
+
+// Nested eager loading (unlimited depth)
+let users = User::model_query()
+    .with(User::orders()
+        .with(Order::items())
+        .with(Order::author()))
+    .all(&*db).await?;
+
+// Filtered relations
+let users = User::model_query()
+    .with(User::orders().where_(Order::TOTAL.gt(100)))
+    .all(&*db).await?;
+```
+
+### Many-to-Many
+
+```rust
+impl User {
+    fn roles() -> ManyToManyDef<Self, Role, ()> {
+        many_to_many(
+            Self::ID, "user_roles", "user_id", "role_id", Role::ID,
+            |u| u.id, |u, roles| u.roles = Loaded::new(roles),
+        )
+    }
+}
+
+let users = User::model_query()
+    .with_many_to_many(User::roles())
+    .all(&*db).await?;
+```
+
+### Relation Aggregates
+
+```rust
+// Count, sum, avg, min, max — computed via subquery, no eager load needed
+let users = User::model_query()
+    .with_aggregate(User::order_count())     // i64
+    .with_aggregate(User::order_total())     // Option<i64>
+    .all(&*db).await?;
+
+for user in &users {
+    println!("{}: {} orders, ${} total",
+        user.name,
+        user.order_count.as_ref().unwrap_or(&0),
+        user.order_total.as_ref().flatten().unwrap_or(&0));
+}
+```
+
+### where_has
+
+Filter parent by related records:
+
+```rust
+// Users who have at least one completed order
+let users = User::model_query()
+    .where_has(User::orders(), |q| q.where_(Order::STATUS.eq("completed")))
+    .all(&*db).await?;
+
+// Users with the "admin" role (many-to-many)
+let admins = User::model_query()
+    .where_has_many_to_many(User::roles(), |q| q.where_(Role::NAME.eq("admin")))
+    .all(&*db).await?;
+```
+
+---
+
+## Lifecycle Hooks
+
+### Write Mutators
+
+Transform values automatically on create/update:
+
+```rust
+#[derive(Model)]
+#[forge(table = "users", lifecycle = UserLifecycle)]
+struct User {
+    id: ModelId<Self>,
+    #[forge(write_mutator = "hash_password")]
+    password: String,
+}
+
+impl User {
+    async fn hash_password(ctx: &ModelHookContext<'_>, value: String) -> Result<String> {
+        ctx.app().hash()?.hash(&value)
+    }
+}
+```
+
+Now `User::model_create().set(User::PASSWORD, "plaintext")` automatically hashes before insert.
+
+### Lifecycle Trait
+
+```rust
+struct UserLifecycle;
+
+#[async_trait]
+impl ModelLifecycle<User> for UserLifecycle {
+    async fn creating(ctx: &ModelHookContext<'_>, draft: &mut CreateDraft<User>) -> Result<()> {
+        // Set defaults, validate business rules
+        Ok(())
+    }
+
+    async fn created(ctx: &ModelHookContext<'_>, user: &User, _record: &DbRecord) -> Result<()> {
+        // Send welcome email, dispatch event
+        ctx.dispatch(UserCreatedEvent { user_id: user.id.to_string() }).await?;
+        Ok(())
+    }
+
+    async fn updating(ctx: &ModelHookContext<'_>, current: &User, draft: &mut UpdateDraft<User>) -> Result<()> {
+        // Audit changes
+        Ok(())
+    }
+
+    async fn deleting(ctx: &ModelHookContext<'_>, user: &User, _record: &DbRecord) -> Result<()> {
+        // Cascade cleanup
+        Ok(())
+    }
+}
+```
+
+### Hook Context
+
+```rust
+ctx.app()          // → &AppContext (full framework access)
+ctx.database()     // → &DatabaseManager
+ctx.transaction()  // → &DatabaseTransaction (the active transaction)
+ctx.actor()        // → Option<&Actor> (who triggered this write)
+ctx.executor()     // → &dyn QueryExecutor
+ctx.dispatch(event).await?  // dispatch a domain event
+```
+
+---
+
+## Projections
+
+For queries that don't map 1:1 to a model (aggregates, joins, CTEs):
+
+```rust
+#[derive(Clone, Projection)]
+struct MonthlySales {
+    #[forge(source = "month")]
+    month: String,
+    #[forge(source = "total_revenue")]
+    total_revenue: f64,
+    #[forge(source = "order_count")]
+    order_count: i64,
+}
+
+let report = ProjectionQuery::<MonthlySales>::table("orders")
+    .select_field(MonthlySales::MONTH, Expr::function("to_char", vec![
+        Expr::column(ColumnRef::unqualified("created_at")),
+        Expr::value("YYYY-MM"),
+    ]))
+    .select_field(MonthlySales::TOTAL_REVENUE, Expr::aggregate(AggregateFn::Sum,
+        Expr::column(ColumnRef::unqualified("total"))))
+    .select_field(MonthlySales::ORDER_COUNT, Expr::aggregate(AggregateFn::Count,
+        Expr::column(ColumnRef::unqualified("id"))))
+    .group_by(Expr::function("to_char", vec![
+        Expr::column(ColumnRef::unqualified("created_at")),
+        Expr::value("YYYY-MM"),
+    ]))
+    .order_by(OrderBy::new(Expr::value("month"), OrderDirection::Desc))
+    .all(&*db).await?;
+```
+
+Projections support all query features: joins, CTEs, UNION, window functions, pagination, streaming.
+
+---
+
+## Transactions
+
+### Basic
+
+```rust
+let mut tx = app.begin_transaction().await?;
+
+let user = User::model_create()
+    .set(User::EMAIL, "alice@example.com")
+    .save(&tx)
+    .await?;
+
+Order::model_create()
+    .set(Order::USER_ID, user.id)
+    .set(Order::TOTAL, 100)
+    .execute(&tx)
+    .await?;
+
+tx.commit().await?;  // or tx.rollback().await?
+```
+
+### With After-Commit Callbacks
+
+```rust
+let mut tx = app.begin_transaction().await?;
+
+// ... create order ...
+
+tx.dispatch_after_commit(SendOrderConfirmation { order_id: order.id.to_string() });
+tx.notify_after_commit(&user, &OrderPlacedNotification { /* ... */ });
+tx.after_commit(|app| async move {
+    // custom cleanup
+    Ok(())
+});
+
+tx.commit().await?;
+// All callbacks run only after successful commit
+```
+
+---
+
+## Raw SQL
+
+For queries that can't be expressed with the builders:
+
+```rust
+let db = app.database()?;
+
+// Query (returns rows)
+let rows = db.raw_query(
+    "SELECT id, email FROM users WHERE status = $1 LIMIT $2",
+    &[DbValue::Text("active".into()), DbValue::Int64(10)],
+).await?;
+
+for row in &rows {
+    let email = row.text("email");
+    println!("{email}");
+}
+
+// Execute (returns affected count)
+let affected = db.raw_execute(
+    "UPDATE users SET login_count = login_count + 1 WHERE id = $1",
+    &[DbValue::Uuid(user_id)],
+).await?;
+```
+
+---
+
+## Migrations
+
+### Creating a Migration
+
+```bash
+cargo run -- make:migration create_posts
+```
+
+Creates `database/migrations/YYYYMMDDHHMM_create_posts.rs`:
+
+```rust
+use forge::prelude::*;
+
+pub struct Migration;
+
+#[async_trait]
+impl MigrationFile for Migration {
+    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
+        ctx.raw_execute(
+            "CREATE TABLE posts (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                published BOOLEAN NOT NULL DEFAULT false,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ
+            )",
+            &[],
+        ).await?;
+        Ok(())
+    }
+
+    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
+        ctx.raw_execute("DROP TABLE IF EXISTS posts", &[]).await?;
+        Ok(())
+    }
+}
+```
+
+### Running Migrations
+
+```bash
+cargo run -- db:migrate           # run pending
+cargo run -- db:migrate:status    # show status
+cargo run -- db:rollback          # rollback last batch
+```
+
+### Seeders
+
+```bash
+cargo run -- make:seeder seed_posts
+cargo run -- db:seed              # run all seeders
+```
+
+### Build-Time Discovery
+
+Migrations and seeders are discovered at compile time via `build.rs`:
+
+```rust
+// build.rs
+fn main() -> std::io::Result<()> {
+    forge_build::DatabaseCodegen::new()
+        .migration_dir("database/migrations")
+        .seeder_dir("database/seeders")
+        .generate()
+}
+```
+
+Register in your ServiceProvider:
+
+```rust
+forge::register_generated_database!(registrar);
+```
+
+---
+
+## Debugging
+
+```rust
+// See the compiled SQL
+let sql = User::model_query()
+    .where_(User::STATUS.eq(UserStatus::Active))
+    .to_compiled_sql()?;
+println!("{}", sql.sql);
+println!("{:?}", sql.bindings);
+
+// EXPLAIN
+let plan = User::model_query()
+    .where_(User::EMAIL.eq("test@example.com"))
+    .explain(&*db).await?;
+for line in &plan { println!("{line}"); }
+
+// EXPLAIN ANALYZE
+let plan = User::model_query()
+    .explain_analyze(&*db).await?;
+```
+
+---
+
+## Config
+
+```toml
+# config/database.toml
+[database]
+url = "postgres://forge:secret@127.0.0.1:5432/forge"
+# read_url = ""                    # read replica
+# schema = "public"
+# min_connections = 1
+# max_connections = 10
+# acquire_timeout_ms = 5000
+# log_queries = false              # log all SQL
+# slow_query_threshold_ms = 500    # log slow queries
+
+[database.models]
+# timestamps_default = true        # auto-manage created_at/updated_at
+# soft_deletes_default = false      # auto-manage deleted_at
+```

@@ -4,6 +4,7 @@ Consumer-facing guides for building applications with Forge. Each guide covers o
 
 | Guide | Description |
 |-------|-------------|
+| [Database](database.md) | Models, queries, relations, projections, lifecycle hooks, migrations |
 | [Auth & Guards](auth.md) | Token/session auth, guards, permissions, policies, extractors, password reset |
 | [Routes & Middleware](routes-and-middleware.md) | Routing, groups, API versioning, middleware stack, CORS, CSRF, rate limiting, SPA |
 | [Validation](validation.md) | 38+ built-in rules, custom rules, derive-based validation, OpenAPI integration |
@@ -17,4 +18,4 @@ Consumer-facing guides for building applications with Forge. Each guide covers o
 | [i18n](i18n.md) | Translation catalogs, locale resolution, `t!()` macro, validation messages |
 | [Plugins](plugins.md) | 5 real-world plugin examples: Slack, audit log, storage driver, admin dashboard, webhooks |
 
-Upcoming: Database guide (models, relations, queries, projections, migrations).
+All major modules are now documented.

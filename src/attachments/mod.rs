@@ -34,23 +34,23 @@ impl Attachment {
     pub fn is_image(&self) -> bool {
         self.mime_type
             .as_deref()
-            .map_or(false, |m| m.starts_with("image/"))
+            .is_some_and(|m| m.starts_with("image/"))
     }
 
     pub fn is_video(&self) -> bool {
         self.mime_type
             .as_deref()
-            .map_or(false, |m| m.starts_with("video/"))
+            .is_some_and(|m| m.starts_with("video/"))
     }
 
     pub fn is_audio(&self) -> bool {
         self.mime_type
             .as_deref()
-            .map_or(false, |m| m.starts_with("audio/"))
+            .is_some_and(|m| m.starts_with("audio/"))
     }
 
     pub fn is_document(&self) -> bool {
-        self.mime_type.as_deref().map_or(false, |m| {
+        self.mime_type.as_deref().is_some_and(|m| {
             matches!(
                 m,
                 "application/pdf"

@@ -49,7 +49,7 @@ impl DatatablePaginationMeta {
         let total_pages = if per_page == 0 {
             0
         } else {
-            (total + per_page - 1) / per_page
+            total.div_ceil(per_page)
         };
         Self {
             page,
@@ -97,7 +97,7 @@ impl From<&Actor> for DatatableActorSnapshot {
 impl From<&DatatableActorSnapshot> for Actor {
     fn from(snap: &DatatableActorSnapshot) -> Self {
         Actor::new(&snap.id, GuardId::owned(&snap.guard))
-            .with_roles(snap.roles.iter().map(|r| RoleId::owned(r)))
-            .with_permissions(snap.permissions.iter().map(|p| PermissionId::owned(p)))
+            .with_roles(snap.roles.iter().map(RoleId::owned))
+            .with_permissions(snap.permissions.iter().map(PermissionId::owned))
     }
 }

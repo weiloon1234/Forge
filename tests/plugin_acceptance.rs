@@ -595,3 +595,145 @@ async fn built_in_plugin_cli_commands_install_assets_and_render_scaffolds() {
         "pub const PORTAL_NAME: &str = \"dashboard\";\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1: Direct registration (no ServiceProvider wrapper)
+// ---------------------------------------------------------------------------
+
+const DIRECT_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.direct");
+const DIRECT_GUARD: GuardId = GuardId::new("direct_guard");
+const DIRECT_POLICY: PolicyId = PolicyId::new("direct_policy");
+
+struct DirectRegistrationPlugin;
+
+struct DirectGuard;
+
+#[async_trait]
+impl forge::auth::BearerAuthenticator for DirectGuard {
+    async fn authenticate(&self, token: &str) -> Result<Option<Actor>> {
+        if token == "direct-secret" {
+            Ok(Some(Actor::new("direct-user", DIRECT_GUARD)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+struct DirectPolicy;
+
+#[async_trait]
+impl forge::auth::Policy for DirectPolicy {
+    async fn evaluate(&self, actor: &Actor, _app: &AppContext) -> Result<bool> {
+        Ok(actor.id == "direct-user")
+    }
+}
+
+impl forge::plugin::Plugin for DirectRegistrationPlugin {
+    fn manifest(&self) -> forge::plugin::PluginManifest {
+        forge::plugin::PluginManifest::new(
+            DIRECT_PLUGIN_ID,
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1.0").unwrap(),
+        )
+    }
+
+    fn register(
+        &self,
+        registrar: &mut forge::plugin::PluginRegistrar,
+    ) -> Result<()> {
+        // Direct registration — no ServiceProvider wrapper needed
+        registrar.register_guard(DIRECT_GUARD, DirectGuard);
+        registrar.register_policy(DIRECT_POLICY, DirectPolicy);
+        registrar.register_middleware(forge::MiddlewareConfig::Compression(
+            forge::Compression,
+        ));
+        registrar.register_routes(|r| {
+            r.route(
+                "/direct-plugin",
+                axum::routing::get(|| async { "direct-plugin-ok" }),
+            );
+            Ok(())
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn plugin_direct_registration_works_without_provider_wrapper() {
+    let kernel = App::builder()
+        .register_plugin(DirectRegistrationPlugin)
+        .build_http_kernel()
+        .await
+        .unwrap();
+
+    let app = kernel.app();
+
+    // Guard is registered — verify through auth manager
+    let auth = app.auth().unwrap();
+    let actor = auth
+        .authenticate_token("direct-secret", Some(&DIRECT_GUARD))
+        .await
+        .unwrap();
+    assert_eq!(actor.id, "direct-user");
+
+    // Policy is registered — verify through authorizer
+    let authorizer = app.authorizer().unwrap();
+    let allowed = authorizer.allows_policy(&actor, DIRECT_POLICY).await.unwrap();
+    assert!(allowed);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Shutdown lifecycle
+// ---------------------------------------------------------------------------
+
+const SHUTDOWN_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.shutdown_test");
+
+struct ShutdownPlugin {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl forge::plugin::Plugin for ShutdownPlugin {
+    fn manifest(&self) -> forge::plugin::PluginManifest {
+        forge::plugin::PluginManifest::new(
+            SHUTDOWN_PLUGIN_ID,
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1.0").unwrap(),
+        )
+    }
+
+    fn register(&self, _registrar: &mut forge::plugin::PluginRegistrar) -> Result<()> {
+        Ok(())
+    }
+
+    async fn boot(&self, _app: &AppContext) -> Result<()> {
+        self.log.lock().unwrap().push("booted".to_string());
+        Ok(())
+    }
+
+    async fn shutdown(&self, _app: &AppContext) -> Result<()> {
+        self.log.lock().unwrap().push("shutdown".to_string());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn plugin_shutdown_called_in_reverse_dependency_order() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let kernel = App::builder()
+        .register_plugin(ShutdownPlugin { log: log.clone() })
+        .build_http_kernel()
+        .await
+        .unwrap();
+
+    // Boot should have been called
+    assert_eq!(log.lock().unwrap().as_slice(), &["booted"]);
+
+    // Trigger shutdown manually
+    kernel.app().shutdown_plugins().await.unwrap();
+
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        &["booted", "shutdown"]
+    );
+}

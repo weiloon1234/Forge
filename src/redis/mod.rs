@@ -334,6 +334,23 @@ impl RedisConnection {
     }
 }
 
+/// Convert an app name to a Redis-safe key prefix.
+/// "Super AI" → "super_ai", "My App" → "my_app"
+fn slugify(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut prev_underscore = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch.to_ascii_lowercase());
+            prev_underscore = false;
+        } else if !prev_underscore && !result.is_empty() {
+            result.push('_');
+            prev_underscore = true;
+        }
+    }
+    result.trim_end_matches('_').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{namespaced_value, RedisManager};
@@ -410,21 +427,4 @@ mod tests {
         let error = manager.connection().await.unwrap_err();
         assert_eq!(error.to_string(), "redis is not configured");
     }
-}
-
-/// Convert an app name to a Redis-safe key prefix.
-/// "Super AI" → "super_ai", "My App" → "my_app"
-fn slugify(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
-    let mut prev_underscore = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            result.push(ch.to_ascii_lowercase());
-            prev_underscore = false;
-        } else if !prev_underscore && !result.is_empty() {
-            result.push('_');
-            prev_underscore = true;
-        }
-    }
-    result.trim_end_matches('_').to_string()
 }

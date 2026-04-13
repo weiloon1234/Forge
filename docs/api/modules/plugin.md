@@ -14,6 +14,7 @@ struct PluginAsset
   fn id(&self) -> &PluginAssetId
   fn kind(&self) -> &PluginAssetKind
   fn target_path(&self) -> &Path
+struct PluginContributions
 struct PluginDependency
   fn new<I>(id: I, version_req: VersionReq) -> Self
   fn id(&self) -> &PluginId
@@ -47,12 +48,25 @@ struct PluginRegistrar
   fn config_defaults(&mut self, defaults: Value) -> &mut Self
   fn register_assets<I>(&mut self, assets: I) -> Result<&mut Self>
   fn register_scaffolds<I>(&mut self, scaffolds: I) -> Result<&mut Self>
+  fn register_guard<I, G>(&mut self, id: I, guard: G) -> &mut Self
+  fn register_policy<I, P>(&mut self, id: I, policy: P) -> &mut Self
+  fn register_authenticatable<M>(&mut self) -> &mut Self
+  fn listen_event<E, L>(&mut self, listener: L) -> &mut Self
+  fn register_job<J>(&mut self) -> &mut Self
+  fn register_job_middleware<M>(&mut self, middleware: M) -> &mut Self
+  fn register_notification_channel<I, N>( &mut self, id: I, channel: N, ) -> &mut Self
+  fn register_datatable<D>(&mut self) -> &mut Self
+  fn register_readiness_check<I, C>(&mut self, id: I, check: C) -> &mut Self
+  fn register_storage_driver( &mut self, name: impl Into<String>, factory: StorageDriverFactory, ) -> &mut Self
+  fn register_email_driver( &mut self, name: impl Into<String>, factory: EmailDriverFactory, ) -> &mut Self
+  fn register_middleware(&mut self, config: MiddlewareConfig) -> &mut Self
 struct PluginRegistry
-  fn new(plugins: Vec<PluginManifest>) -> Self
+  fn new( plugins: Vec<PluginManifest>, contributions: HashMap<PluginId, PluginContributions>, ) -> Self
   fn plugins(&self) -> &[PluginManifest]
   fn plugin(&self, id: &PluginId) -> Option<&PluginManifest>
   fn install_assets( &self, options: &PluginInstallOptions, ) -> Result<Vec<PathBuf>>
   fn render_scaffold( &self, options: &PluginScaffoldOptions, ) -> Result<Vec<PathBuf>>
+  fn contributions(&self, id: &PluginId) -> Option<&PluginContributions>
   fn is_empty(&self) -> bool
 struct PluginScaffold
   fn new<I>(id: I) -> Self
@@ -79,5 +93,6 @@ trait Plugin
   fn manifest(&self) -> PluginManifest
   fn register(&self, registrar: &mut PluginRegistrar) -> Result<()>
   fn boot<'life0, 'life1, 'async_trait>(
+  fn shutdown<'life0, 'life1, 'async_trait>(
 ```
 

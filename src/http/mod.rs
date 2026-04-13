@@ -4,7 +4,7 @@ pub mod resource;
 pub mod routes;
 pub(crate) mod spa;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -116,12 +116,14 @@ impl HttpRouteOptions {
     }
 }
 
+struct RouteRegistration {
+    path: String,
+    method_router: MethodRouter<AppContext>,
+    options: HttpRouteOptions,
+}
+
 enum HttpRegistration {
-    Route {
-        path: String,
-        method_router: Box<MethodRouter<AppContext>>,
-        options: HttpRouteOptions,
-    },
+    Route(Box<RouteRegistration>),
     Nest {
         path: String,
         router: HttpRouter,
@@ -134,6 +136,7 @@ enum HttpRegistration {
 pub struct HttpRegistrar {
     registrations: Vec<HttpRegistration>,
     pub(crate) named_routes: routes::RouteRegistry,
+    seen_paths: HashSet<String>,
 }
 
 impl Default for HttpRegistrar {
@@ -147,6 +150,7 @@ impl HttpRegistrar {
         Self {
             registrations: Vec::new(),
             named_routes: routes::RouteRegistry::new(),
+            seen_paths: HashSet::new(),
         }
     }
 
@@ -160,11 +164,19 @@ impl HttpRegistrar {
         method_router: MethodRouter<AppContext>,
         options: HttpRouteOptions,
     ) -> &mut Self {
-        self.registrations.push(HttpRegistration::Route {
-            path: path.to_string(),
-            method_router: Box::new(method_router),
-            options,
-        });
+        let path_owned = path.to_string();
+        if !self.seen_paths.insert(path_owned.clone()) {
+            tracing::warn!(
+                path = %path_owned,
+                "route path registered multiple times — later registration may shadow earlier one"
+            );
+        }
+        self.registrations
+            .push(HttpRegistration::Route(Box::new(RouteRegistration {
+                path: path_owned,
+                method_router,
+                options,
+            })));
         self
     }
 
@@ -224,16 +236,12 @@ impl HttpRegistrar {
         f(&mut sub)?;
         for registration in sub.registrations {
             match registration {
-                HttpRegistration::Route {
-                    path,
-                    method_router,
-                    options,
-                } => {
-                    self.registrations.push(HttpRegistration::Route {
-                        path: format!("{prefix}{path}"),
-                        method_router,
-                        options,
-                    });
+                HttpRegistration::Route(route) => {
+                    self.route_with_options(
+                        &format!("{prefix}{}", route.path),
+                        route.method_router,
+                        route.options,
+                    );
                 }
                 HttpRegistration::Nest { path, router } => {
                     self.registrations.push(HttpRegistration::Nest {
@@ -282,11 +290,11 @@ impl HttpRegistrar {
     ) -> Vec<crate::openapi::spec::DocumentedRoute> {
         let mut docs = Vec::new();
         for registration in &self.registrations {
-            if let HttpRegistration::Route { path, options, .. } = registration {
-                if let Some(ref doc) = options.doc {
+            if let HttpRegistration::Route(route) = registration {
+                if let Some(ref doc) = route.options.doc {
                     docs.push(crate::openapi::spec::DocumentedRoute {
                         method: doc.method.clone().unwrap_or_else(|| "get".into()),
-                        path: path.clone(),
+                        path: route.path.clone(),
                         doc: doc.clone(),
                     });
                 }
@@ -308,12 +316,12 @@ impl HttpRegistrar {
 
         for registration in self.registrations {
             match registration {
-                HttpRegistration::Route {
-                    path,
-                    method_router,
-                    options,
-                } => {
-                    let method_router = *method_router;
+                HttpRegistration::Route(route) => {
+                    let RouteRegistration {
+                        path,
+                        method_router,
+                        options,
+                    } = *route;
                     let mut route_middlewares = Vec::new();
                     // Expand middleware group if specified
                     if let Some(ref group_name) = options.middleware_group_name {
@@ -528,7 +536,7 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
                         if routes.is_empty() {
                             println!("No named routes registered.");
                         } else {
-                            println!("{:<30} {}", "NAME", "PATH");
+                            println!("{:<30} PATH", "NAME");
                             println!("{}", "-".repeat(60));
                             for (name, pattern) in routes {
                                 println!("{:<30} {}", name, pattern);

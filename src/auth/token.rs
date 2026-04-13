@@ -48,7 +48,7 @@ impl TokenManager {
         actor_id: &str,
         name: &str,
     ) -> Result<TokenPair> {
-        self.insert_token_pair(&M::guard().to_string(), actor_id, name, &[])
+        self.insert_token_pair(M::guard().as_ref(), actor_id, name, &[])
             .await
     }
 
@@ -71,7 +71,7 @@ impl TokenManager {
         name: &str,
         abilities: Vec<String>,
     ) -> Result<TokenPair> {
-        self.insert_token_pair(&M::guard().to_string(), actor_id, name, &abilities)
+        self.insert_token_pair(M::guard().as_ref(), actor_id, name, &abilities)
             .await
     }
 

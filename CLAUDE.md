@@ -16,6 +16,7 @@ make fmt-check       # cargo fmt --check
 make test            # cargo test --all-targets
 make clippy          # cargo clippy --all-targets -- -D warnings
 make fixture-check   # Tests blueprint_app + plugin_consumer_app fixtures
+make api-docs        # Regenerate docs/api/ from cargo doc HTML
 ```
 
 Single test: `cargo test --test <test_file_name>` (e.g., `cargo test --test auth_acceptance`)
@@ -32,7 +33,9 @@ MSRV: Rust 1.94. CI tests on 1.94.1 and stable with Postgres 16.
 
 **Database** (`src/database/`): AST-first query system — expressions compile to SQL via dialect-specific compilers. `Model` trait with lifecycle hooks, typed `ModelId<M>` (UUIDv7), relations (`belongs_to`, `has_one`, `has_many`, `many_to_many`), eager loading, projections, CTEs. Build-time codegen via `forge-build` discovers migrations/seeders.
 
-**Registry pattern**: All major systems use typed registries — routes, commands, schedules, validation rules, authenticatables, notification channels, plugins. IDs are semantic typed constants (e.g., `GuardId`, `JobId`, `ChannelId`).
+**Registry pattern**: All major systems use typed registries — routes, commands, schedules, validation rules, authenticatables, notification channels, plugins. IDs are semantic typed constants (e.g., `GuardId`, `JobId`, `ChannelId`). Duplicate registrations are detected (commands/schedules/channels/rules error; routes warn).
+
+**Plugin system** (`src/plugin/`): Compile-time registry with dependency resolution, SemVer validation, and full lifecycle (`register` → `boot` → `shutdown`). Plugins can directly register any framework feature (guards, jobs, events, middleware, etc.) without ServiceProvider wrappers. See `blueprints/19-plugin-system-v2.md`.
 
 ## Key Design Principles
 
@@ -46,6 +49,7 @@ MSRV: Rust 1.94. CI tests on 1.94.1 and stable with Postgres 16.
 - `forge` (root) — main framework crate
 - `forge-build` — build-time codegen for migrations/seeders discovery
 - `forge-macros` — proc macros (`#[derive(Model)]`, `#[derive(Validate)]`, etc.)
+- `tools/forge-api-doc/` — standalone API surface doc generator (parses `cargo doc` HTML)
 - `tests/fixtures/blueprint_app/` — reference consumer app (must stay green)
 - `tests/fixtures/plugin_*/` — plugin test fixtures (must stay green)
 - `blueprints/` — design docs for major systems

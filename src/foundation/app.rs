@@ -243,6 +243,25 @@ impl AppContext {
         crate::http::routes::RouteRegistry::verify_signature(url, &signing_key)
     }
 
+    /// Shut down all registered plugins in reverse dependency order.
+    /// Called automatically during graceful shutdown.
+    pub async fn shutdown_plugins(&self) -> Result<()> {
+        let list = match self.resolve::<PluginShutdownList>() {
+            Ok(list) => list,
+            Err(_) => return Ok(()), // no plugins registered
+        };
+        for plugin in &list.0 {
+            if let Err(e) = plugin.shutdown(self).await {
+                tracing::warn!(
+                    plugin = %plugin.manifest().id(),
+                    error = %e,
+                    "plugin shutdown failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn job_runtime(&self) -> Result<Arc<JobRuntime>> {
         self.resolve::<JobRuntime>()
     }
@@ -395,6 +414,9 @@ impl ModelWriteExecutor for AppTransaction {
         self.actor.as_ref()
     }
 }
+
+/// Plugin instances stored in reverse dependency order for graceful shutdown.
+struct PluginShutdownList(Vec<Arc<dyn Plugin>>);
 
 pub struct App;
 
@@ -577,7 +599,11 @@ impl AppBuilder {
     }
 
     pub async fn run_http_async(self) -> Result<()> {
-        self.build_http_kernel().await?.serve().await
+        let kernel = self.build_http_kernel().await?;
+        let app = kernel.app().clone();
+        let result = kernel.serve().await;
+        app.shutdown_plugins().await?;
+        result
     }
 
     pub fn run_cli(self) -> Result<()> {
@@ -585,7 +611,11 @@ impl AppBuilder {
     }
 
     pub async fn run_cli_async(self) -> Result<()> {
-        self.build_cli_kernel().await?.run().await
+        let kernel = self.build_cli_kernel().await?;
+        let app = kernel.app().clone();
+        let result = kernel.run().await;
+        app.shutdown_plugins().await?;
+        result
     }
 
     pub fn run_scheduler(self) -> Result<()> {
@@ -593,7 +623,11 @@ impl AppBuilder {
     }
 
     pub async fn run_scheduler_async(self) -> Result<()> {
-        self.build_scheduler_kernel().await?.run().await
+        let kernel = self.build_scheduler_kernel().await?;
+        let app = kernel.app().clone();
+        let result = kernel.run().await;
+        app.shutdown_plugins().await?;
+        result
     }
 
     pub fn run_worker(self) -> Result<()> {
@@ -601,7 +635,11 @@ impl AppBuilder {
     }
 
     pub async fn run_worker_async(self) -> Result<()> {
-        self.build_worker_kernel().await?.run().await
+        let kernel = self.build_worker_kernel().await?;
+        let app = kernel.app().clone();
+        let result = kernel.run().await;
+        app.shutdown_plugins().await?;
+        result
     }
 
     pub fn run_websocket(self) -> Result<()> {
@@ -609,7 +647,11 @@ impl AppBuilder {
     }
 
     pub async fn run_websocket_async(self) -> Result<()> {
-        self.build_websocket_kernel().await?.serve().await
+        let kernel = self.build_websocket_kernel().await?;
+        let app = kernel.app().clone();
+        let result = kernel.serve().await;
+        app.shutdown_plugins().await?;
+        result
     }
 
     pub async fn build_http_kernel(self) -> Result<HttpKernel> {
@@ -718,6 +760,10 @@ impl AppBuilder {
         );
         for provider in &prepared_plugins.providers {
             provider.register(&mut registrar).await?;
+        }
+        // Apply plugin direct registrations (guards, jobs, events, etc.)
+        for action in prepared_plugins.registrar_actions {
+            action(&registrar)?;
         }
         for provider in &providers {
             provider.register(&mut registrar).await?;
@@ -906,6 +952,12 @@ impl AppBuilder {
         for plugin in &prepared_plugins.instances {
             plugin.boot(&app).await?;
         }
+        // Store plugin instances in reverse dependency order for shutdown
+        let mut shutdown_order = prepared_plugins.instances.clone();
+        shutdown_order.reverse();
+        app.container()
+            .singleton(PluginShutdownList(shutdown_order))?;
+
         for provider in &providers {
             provider.boot(&app).await?;
         }
@@ -943,11 +995,12 @@ impl AppBuilder {
         let mut boot_routes = prepared_plugins.routes;
         boot_routes.extend(routes);
 
-        let mut boot_commands = Vec::new();
-        boot_commands.push(crate::config::publish::config_publish_cli_registrar());
-        boot_commands.push(crate::config::api_docs::docs_api_cli_registrar());
-        boot_commands.push(crate::config::env_publish::env_publish_cli_registrar());
-        boot_commands.push(crate::http::maintenance_cli_registrar());
+        let mut boot_commands = vec![
+            crate::config::publish::config_publish_cli_registrar(),
+            crate::config::api_docs::docs_api_cli_registrar(),
+            crate::config::env_publish::env_publish_cli_registrar(),
+            crate::http::maintenance_cli_registrar(),
+        ];
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());
             boot_commands.push(crate::auth::builtin_cli_registrar());
@@ -964,13 +1017,16 @@ impl AppBuilder {
         let mut boot_websocket_routes = prepared_plugins.websocket_routes;
         boot_websocket_routes.extend(websocket_routes);
 
+        let mut boot_middlewares = prepared_plugins.middlewares;
+        boot_middlewares.extend(middlewares);
+
         Ok(BootArtifacts {
             app,
             routes: boot_routes,
             commands: boot_commands,
             schedules: boot_schedules,
             websocket_routes: boot_websocket_routes,
-            middlewares,
+            middlewares: boot_middlewares,
             observability,
             spa_dir,
         })

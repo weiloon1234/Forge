@@ -422,7 +422,7 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
                 if let Ok(db) = config.database() {
                     let db_status = if db.url.is_empty() { "not configured" } else { "configured" };
                     println!("  Database:     {}", db_status);
-                    if db.read_url.as_deref().map_or(false, |u| !u.is_empty()) {
+                    if db.read_url.as_deref().is_some_and(|u| !u.is_empty()) {
                         println!("  Read replica: configured");
                     }
                 }

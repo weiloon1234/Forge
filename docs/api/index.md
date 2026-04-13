@@ -19,7 +19,7 @@ Load only the file you need — don't read them all at once.
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 174L |
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 159L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 22L |
-| [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 127L |
+| [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 128L |
 | [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 201L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
@@ -29,7 +29,7 @@ Load only the file you need — don't read them all at once.
 | [metadata](modules/metadata.md) | Key-value metadata for models (HasMetadata) | 21L |
 | [notifications](modules/notifications.md) | Multi-channel notifications: email, database, broadcast | 35L |
 | [openapi](modules/openapi.md) | OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc) | 37L |
-| [plugin](modules/plugin.md) | Compile-time plugin system with dependency validation | 83L |
+| [plugin](modules/plugin.md) | Compile-time plugin system with dependency validation | 98L |
 | [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 40L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 48L |
 | [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 115L |
@@ -39,4 +39,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 144L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 31 modules, 2766 lines across all files.**
+**Total: 31 modules, 2782 lines across all files.**

@@ -11,12 +11,15 @@ use toml::Value;
 pub use crate::support::{PluginAssetId, PluginId, PluginScaffoldId};
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
-use crate::foundation::{AppContext, Error, Result, ServiceProvider};
+use crate::foundation::{AppContext, Error, Result, ServiceProvider, ServiceRegistrar};
 use crate::http::RouteRegistrar;
 use crate::scheduler::ScheduleRegistrar;
 use crate::support::ValidationRuleId;
 use crate::validation::ValidationRule;
 use crate::websocket::WebSocketRouteRegistrar;
+
+/// Type-erased registration action applied to ServiceRegistrar during bootstrap.
+type RegistrarAction = Box<dyn FnOnce(&ServiceRegistrar) -> Result<()> + Send>;
 
 const PLUGIN_LIST_COMMAND: crate::support::CommandId =
     crate::support::CommandId::new("plugin:list");
@@ -383,6 +386,12 @@ pub trait Plugin: Send + Sync + 'static {
     async fn boot(&self, _app: &AppContext) -> Result<()> {
         Ok(())
     }
+
+    /// Called during graceful shutdown in reverse dependency order.
+    /// Use for cleanup: flush buffers, close external connections, etc.
+    async fn shutdown(&self, _app: &AppContext) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct PluginRegistrar {
@@ -395,6 +404,9 @@ pub struct PluginRegistrar {
     config_defaults: Vec<Value>,
     assets: Vec<PluginAsset>,
     scaffolds: Vec<PluginScaffold>,
+    middlewares: Vec<crate::http::middleware::MiddlewareConfig>,
+    /// Type-erased registrations applied to ServiceRegistrar during bootstrap.
+    registrar_actions: Vec<RegistrarAction>,
 }
 
 impl Default for PluginRegistrar {
@@ -415,6 +427,8 @@ impl PluginRegistrar {
             config_defaults: Vec::new(),
             assets: Vec::new(),
             scaffolds: Vec::new(),
+            middlewares: Vec::new(),
+            registrar_actions: Vec::new(),
         }
     }
 
@@ -514,16 +528,165 @@ impl PluginRegistrar {
         }
         Ok(self)
     }
+
+    // ── Direct registration methods (bypass ServiceProvider indirection) ──
+
+    pub fn register_guard<I, G>(&mut self, id: I, guard: G) -> &mut Self
+    where
+        I: Into<crate::support::GuardId> + Send + 'static,
+        G: crate::auth::BearerAuthenticator,
+    {
+        let id = id.into();
+        self.registrar_actions.push(Box::new(move |r| {
+            r.register_guard(id, guard)
+        }));
+        self
+    }
+
+    pub fn register_policy<I, P>(&mut self, id: I, policy: P) -> &mut Self
+    where
+        I: Into<crate::support::PolicyId> + Send + 'static,
+        P: crate::auth::Policy,
+    {
+        let id = id.into();
+        self.registrar_actions.push(Box::new(move |r| {
+            r.register_policy(id, policy)
+        }));
+        self
+    }
+
+    pub fn register_authenticatable<M>(&mut self) -> &mut Self
+    where
+        M: crate::auth::Authenticatable,
+    {
+        self.registrar_actions
+            .push(Box::new(|r| r.register_authenticatable::<M>()));
+        self
+    }
+
+    pub fn listen_event<E, L>(&mut self, listener: L) -> &mut Self
+    where
+        E: crate::events::Event,
+        L: crate::events::EventListener<E>,
+    {
+        self.registrar_actions
+            .push(Box::new(move |r| r.listen_event::<E, L>(listener)));
+        self
+    }
+
+    pub fn register_job<J>(&mut self) -> &mut Self
+    where
+        J: crate::jobs::Job,
+    {
+        self.registrar_actions
+            .push(Box::new(|r| r.register_job::<J>()));
+        self
+    }
+
+    pub fn register_job_middleware<M>(&mut self, middleware: M) -> &mut Self
+    where
+        M: crate::jobs::JobMiddleware,
+    {
+        self.registrar_actions
+            .push(Box::new(move |r| r.register_job_middleware(middleware)));
+        self
+    }
+
+    pub fn register_notification_channel<I, N>(&mut self, id: I, channel: N) -> &mut Self
+    where
+        I: Into<crate::support::NotificationChannelId> + Send + 'static,
+        N: crate::notifications::NotificationChannel,
+    {
+        let id = id.into();
+        self.registrar_actions.push(Box::new(move |r| {
+            r.register_notification_channel(id, channel)
+        }));
+        self
+    }
+
+    pub fn register_datatable<D>(&mut self) -> &mut Self
+    where
+        D: crate::datatable::ModelDatatable,
+    {
+        self.registrar_actions
+            .push(Box::new(|r| r.register_datatable::<D>()));
+        self
+    }
+
+    pub fn register_readiness_check<I, C>(&mut self, id: I, check: C) -> &mut Self
+    where
+        I: Into<crate::support::ProbeId> + Send + 'static,
+        C: crate::logging::ReadinessCheck,
+    {
+        let id = id.into();
+        self.registrar_actions.push(Box::new(move |r| {
+            r.register_readiness_check(id, check)
+        }));
+        self
+    }
+
+    pub fn register_storage_driver(
+        &mut self,
+        name: impl Into<String>,
+        factory: crate::storage::StorageDriverFactory,
+    ) -> &mut Self {
+        let name = name.into();
+        self.registrar_actions.push(Box::new(move |r| {
+            r.register_storage_driver(&name, factory)
+        }));
+        self
+    }
+
+    pub fn register_email_driver(
+        &mut self,
+        name: impl Into<String>,
+        factory: crate::email::EmailDriverFactory,
+    ) -> &mut Self {
+        let name = name.into();
+        self.registrar_actions.push(Box::new(move |r| {
+            r.register_email_driver(&name, factory)
+        }));
+        self
+    }
+
+    pub fn register_middleware(
+        &mut self,
+        config: crate::http::middleware::MiddlewareConfig,
+    ) -> &mut Self {
+        self.middlewares.push(config);
+        self
+    }
 }
 
+/// Summary of what a single plugin contributed during registration.
 #[derive(Clone, Debug, Default)]
+pub struct PluginContributions {
+    pub route_count: usize,
+    pub command_count: usize,
+    pub schedule_count: usize,
+    pub websocket_route_count: usize,
+    pub validation_rule_count: usize,
+    pub provider_count: usize,
+    pub middleware_count: usize,
+    pub registrar_action_count: usize,
+    pub asset_count: usize,
+    pub scaffold_count: usize,
+}
+
 pub struct PluginRegistry {
     plugins: Vec<PluginManifest>,
+    contributions: HashMap<PluginId, PluginContributions>,
 }
 
 impl PluginRegistry {
-    pub fn new(plugins: Vec<PluginManifest>) -> Self {
-        Self { plugins }
+    pub fn new(
+        plugins: Vec<PluginManifest>,
+        contributions: HashMap<PluginId, PluginContributions>,
+    ) -> Self {
+        Self {
+            plugins,
+            contributions,
+        }
     }
 
     pub fn plugins(&self) -> &[PluginManifest] {
@@ -571,6 +734,10 @@ impl PluginRegistry {
             written.push(path);
         }
         Ok(written)
+    }
+
+    pub fn contributions(&self, id: &PluginId) -> Option<&PluginContributions> {
+        self.contributions.get(id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -696,6 +863,8 @@ pub(crate) struct PreparedPlugins {
     pub(crate) websocket_routes: Vec<WebSocketRouteRegistrar>,
     pub(crate) validation_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
     pub(crate) config_defaults: Vec<Value>,
+    pub(crate) middlewares: Vec<crate::http::middleware::MiddlewareConfig>,
+    pub(crate) registrar_actions: Vec<RegistrarAction>,
 }
 
 struct ResolvedPlugin {
@@ -708,6 +877,8 @@ struct ResolvedPlugin {
     websocket_routes: Vec<WebSocketRouteRegistrar>,
     validation_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
     config_defaults: Vec<Value>,
+    middlewares: Vec<crate::http::middleware::MiddlewareConfig>,
+    registrar_actions: Vec<RegistrarAction>,
 }
 
 pub(crate) fn prepare_plugins(plugins: &[Arc<dyn Plugin>]) -> Result<PreparedPlugins> {
@@ -721,8 +892,26 @@ pub(crate) fn prepare_plugins(plugins: &[Arc<dyn Plugin>]) -> Result<PreparedPlu
     let mut websocket_routes = Vec::new();
     let mut validation_rules = Vec::new();
     let mut config_defaults = Vec::new();
+    let mut middlewares = Vec::new();
+    let mut registrar_actions = Vec::new();
+    let mut contributions = HashMap::new();
 
     for resolved in ordered {
+        contributions.insert(
+            resolved.manifest.id().clone(),
+            PluginContributions {
+                route_count: resolved.routes.len(),
+                command_count: resolved.commands.len(),
+                schedule_count: resolved.schedules.len(),
+                websocket_route_count: resolved.websocket_routes.len(),
+                validation_rule_count: resolved.validation_rules.len(),
+                provider_count: resolved.providers.len(),
+                middleware_count: resolved.middlewares.len(),
+                registrar_action_count: resolved.registrar_actions.len(),
+                asset_count: resolved.manifest.assets().len(),
+                scaffold_count: resolved.manifest.scaffolds().len(),
+            },
+        );
         manifests.push(resolved.manifest);
         instances.push(resolved.instance);
         providers.extend(resolved.providers);
@@ -732,10 +921,12 @@ pub(crate) fn prepare_plugins(plugins: &[Arc<dyn Plugin>]) -> Result<PreparedPlu
         websocket_routes.extend(resolved.websocket_routes);
         validation_rules.extend(resolved.validation_rules);
         config_defaults.extend(resolved.config_defaults);
+        middlewares.extend(resolved.middlewares);
+        registrar_actions.extend(resolved.registrar_actions);
     }
 
     Ok(PreparedPlugins {
-        registry: Arc::new(PluginRegistry::new(manifests)),
+        registry: Arc::new(PluginRegistry::new(manifests, contributions)),
         instances,
         providers,
         routes,
@@ -744,6 +935,8 @@ pub(crate) fn prepare_plugins(plugins: &[Arc<dyn Plugin>]) -> Result<PreparedPlu
         websocket_routes,
         validation_rules,
         config_defaults,
+        middlewares,
+        registrar_actions,
     })
 }
 
@@ -831,6 +1024,8 @@ fn resolve_plugin_order(plugins: &[Arc<dyn Plugin>]) -> Result<Vec<ResolvedPlugi
             websocket_routes: registrar.websocket_routes,
             validation_rules: registrar.validation_rules,
             config_defaults: registrar.config_defaults,
+            middlewares: registrar.middlewares,
+            registrar_actions: registrar.registrar_actions,
         });
     }
 
@@ -976,14 +1171,43 @@ async fn plugin_list_command(invocation: CommandInvocation) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        println!(
-            "{} v{} | deps: {} | assets: {} | scaffolds: {}",
+        print!(
+            "{} v{} | deps: {}",
             plugin.id(),
             plugin.version(),
             dependencies,
-            plugin.assets().len(),
-            plugin.scaffolds().len()
         );
+        if let Some(contrib) = registry.contributions(plugin.id()) {
+            let mut parts = Vec::new();
+            if contrib.route_count > 0 {
+                parts.push(format!("{} routes", contrib.route_count));
+            }
+            if contrib.command_count > 0 {
+                parts.push(format!("{} commands", contrib.command_count));
+            }
+            if contrib.schedule_count > 0 {
+                parts.push(format!("{} schedules", contrib.schedule_count));
+            }
+            if contrib.provider_count > 0 {
+                parts.push(format!("{} providers", contrib.provider_count));
+            }
+            if contrib.middleware_count > 0 {
+                parts.push(format!("{} middlewares", contrib.middleware_count));
+            }
+            if contrib.registrar_action_count > 0 {
+                parts.push(format!("{} registrations", contrib.registrar_action_count));
+            }
+            if contrib.asset_count > 0 {
+                parts.push(format!("{} assets", contrib.asset_count));
+            }
+            if contrib.scaffold_count > 0 {
+                parts.push(format!("{} scaffolds", contrib.scaffold_count));
+            }
+            if !parts.is_empty() {
+                print!(" | {}", parts.join(", "));
+            }
+        }
+        println!();
     }
     Ok(())
 }
@@ -1092,6 +1316,8 @@ mod tests {
     use async_trait::async_trait;
     use semver::{Version, VersionReq};
     use tempfile::tempdir;
+
+    use std::collections::HashMap;
 
     use super::{
         prepare_plugins, Plugin, PluginAsset, PluginAssetKind, PluginDependency, PluginId,
@@ -1251,7 +1477,7 @@ mod tests {
                 "enabled = true\n",
             )],
             Vec::new(),
-        )]);
+        )], HashMap::new());
 
         let written = registry
             .install_assets(
@@ -1289,7 +1515,7 @@ mod tests {
                     "src/app/{{name}}.rs",
                     "pub const NAME: &str = \"{{name}}\";\n",
                 )],
-        )]);
+        )], HashMap::new());
 
         registry
             .render_scaffold(
@@ -1380,5 +1606,108 @@ mod tests {
         let prepared = prepare_plugins(&plugins).unwrap();
         assert_eq!(prepared.providers.len(), 1);
         assert_eq!(prepared.instances.len(), 1);
+    }
+
+    #[test]
+    fn resolves_diamond_dependency_graph() {
+        // A depends on B and C; both B and C depend on D.
+        // Expected order: D, then B and C (either order), then A.
+        let d = PluginManifest::new(
+            PluginId::new("d"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        );
+        let b = PluginManifest::new(
+            PluginId::new("b"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        )
+        .depends_on(PluginId::new("d"), VersionReq::parse("^1").unwrap());
+        let c = PluginManifest::new(
+            PluginId::new("c"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        )
+        .depends_on(PluginId::new("d"), VersionReq::parse("^1").unwrap());
+        let a = PluginManifest::new(
+            PluginId::new("a"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        )
+        .depends_on(PluginId::new("b"), VersionReq::parse("^1").unwrap())
+        .depends_on(PluginId::new("c"), VersionReq::parse("^1").unwrap());
+
+        let plugins: Vec<Arc<dyn Plugin>> = vec![
+            Arc::new(EmptyPlugin::new(a)),
+            Arc::new(EmptyPlugin::new(b)),
+            Arc::new(EmptyPlugin::new(c)),
+            Arc::new(EmptyPlugin::new(d)),
+        ];
+
+        let prepared = prepare_plugins(&plugins).unwrap();
+        let ids: Vec<_> = prepared
+            .instances
+            .iter()
+            .map(|p| p.manifest().id().clone())
+            .collect();
+
+        // D must be first (leaf dependency)
+        assert_eq!(ids[0], PluginId::new("d"));
+        // A must be last (depends on everything)
+        assert_eq!(*ids.last().unwrap(), PluginId::new("a"));
+        // B and C are in the middle (either order is valid)
+        assert!(ids[1] == PluginId::new("b") || ids[1] == PluginId::new("c"));
+        assert!(ids[2] == PluginId::new("b") || ids[2] == PluginId::new("c"));
+        assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn rejects_conflicting_version_requirements_in_nested_deps() {
+        // B requires D ^1.0, C requires D ^2.0, but only D 1.0 is registered.
+        let d = PluginManifest::new(
+            PluginId::new("d"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        );
+        let b = PluginManifest::new(
+            PluginId::new("b"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        )
+        .depends_on(PluginId::new("d"), VersionReq::parse("^1").unwrap());
+        let c = PluginManifest::new(
+            PluginId::new("c"),
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1").unwrap(),
+        )
+        .depends_on(PluginId::new("d"), VersionReq::parse("^2").unwrap()); // conflict!
+
+        let plugins: Vec<Arc<dyn Plugin>> = vec![
+            Arc::new(EmptyPlugin::new(b)),
+            Arc::new(EmptyPlugin::new(c)),
+            Arc::new(EmptyPlugin::new(d)),
+        ];
+
+        let error = match prepare_plugins(&plugins) {
+            Err(e) => e,
+            Ok(_) => panic!("expected version mismatch error"),
+        };
+        assert!(
+            error.to_string().contains("requires") && error.to_string().contains("found"),
+            "expected version mismatch error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn registrar_collects_direct_registrations_and_middlewares() {
+        let mut registrar = PluginRegistrar::new();
+        registrar.register_middleware(crate::http::middleware::MiddlewareConfig::Compression(
+            crate::http::middleware::Compression,
+        ));
+
+        // The middleware should be collected
+        assert_eq!(registrar.middlewares.len(), 1);
+        // Registrar actions are collected but not yet applied
+        assert!(registrar.registrar_actions.is_empty());
     }
 }

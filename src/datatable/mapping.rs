@@ -1,7 +1,9 @@
 use std::marker::PhantomData;
 
-use super::value::DatatableValue;
 use super::context::DatatableContext;
+use super::value::DatatableValue;
+
+type MappingCallback<M> = Box<dyn Fn(&M, &DatatableContext) -> DatatableValue + Send + Sync>;
 
 /// A computed output-only field for datatable rows.
 ///
@@ -9,7 +11,7 @@ use super::context::DatatableContext;
 /// They are not automatically sortable or filterable.
 pub struct DatatableMapping<M> {
     pub name: String,
-    callback: Box<dyn Fn(&M, &DatatableContext) -> DatatableValue + Send + Sync>,
+    callback: MappingCallback<M>,
     _marker: PhantomData<M>,
 }
 

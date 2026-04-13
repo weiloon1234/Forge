@@ -126,7 +126,7 @@ fn last_segment_is(ty: &Type, name: &str) -> bool {
         .path
         .segments
         .last()
-        .map_or(false, |s| s.ident == name)
+        .is_some_and(|s| s.ident == name)
 }
 
 /// Check if a type is `UploadedFile`, `Option<UploadedFile>`, or `Vec<UploadedFile>`.

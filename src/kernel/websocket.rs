@@ -801,7 +801,7 @@ impl ConnectionHub {
             {
                 let mut user_conns = self.user_connections.write().await;
                 // Clean up actor-based tracking
-                for (_, actor) in &state.actors {
+                for actor in state.actors.values() {
                     if let Some(set) = user_conns.get_mut(&actor.id) {
                         set.remove(&connection_id);
                         if set.is_empty() {

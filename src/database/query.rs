@@ -85,7 +85,7 @@ impl<T: Serialize> Paginated<T> {
         let last_page = if self.total == 0 {
             1
         } else {
-            (self.total + per_page - 1) / per_page
+            self.total.div_ceil(per_page)
         };
 
         let next = if current_page < last_page {

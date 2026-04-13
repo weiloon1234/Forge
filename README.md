@@ -24,7 +24,7 @@ Forge is a modular Rust backend framework built on **Axum**, **Tokio**, and **SQ
 - **Email** &mdash; multi-driver: SMTP, Mailgun, Postmark, Resend, SES, Log
 - **Storage** &mdash; local + S3, multipart uploads, image processing pipeline
 - **WebSocket** &mdash; channel-based with presence, typed events, replay
-- **Plugin System** &mdash; compile-time registry with dependency validation, assets, scaffolds
+- **Plugin System** &mdash; compile-time registry with dependency resolution, direct registration of any framework feature, shutdown lifecycle, assets, scaffolds
 - **Observability** &mdash; structured logging, readiness/liveness probes, runtime diagnostics, OpenTelemetry
 - **Typed Everything** &mdash; `ModelId<M>`, `GuardId`, `JobId`, `ChannelId`, etc. &mdash; zero raw-string IDs
 
@@ -293,6 +293,8 @@ fn ws_routes(r: &mut WebSocketRegistrar) -> Result<()> {
 
 ## Plugin System
 
+Plugins can register any framework feature directly &mdash; routes, guards, jobs, middleware, event listeners, and more. No ServiceProvider wrapper needed.
+
 ```rust
 struct AnalyticsPlugin;
 
@@ -303,16 +305,26 @@ impl Plugin for AnalyticsPlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<()> {
         registrar.register_routes(analytics::routes);
-        registrar.register_provider(AnalyticsServiceProvider);
+        registrar.register_guard(AnalyticsGuard::Api, AnalyticsAuthenticator);
+        registrar.register_job::<AnalyticsFlushJob>();
+        registrar.listen_event::<PageView, _>(TrackPageView);
+        registrar.register_middleware(MiddlewareConfig::from(AnalyticsHeaders));
+        Ok(())
+    }
+
+    async fn shutdown(&self, app: &AppContext) -> Result<()> {
+        // Flush pending analytics on graceful shutdown
         Ok(())
     }
 }
 
-// Register at bootstrap
+// Register at bootstrap — plugins are loaded in dependency order
 App::builder()
     .register_plugin(AnalyticsPlugin)
     .run_http()?;
 ```
+
+Plugins support dependency resolution (topological sort with cycle detection), SemVer version constraints, config defaults, asset distribution, and scaffold templating. Use `plugin:list` to inspect registered plugins and their contributions.
 
 ## Configuration
 

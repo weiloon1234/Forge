@@ -94,15 +94,12 @@ fn replace_variables(content: &str, variables: &serde_json::Value) -> String {
     let mut search_from = 0;
 
     // Find all {{...}} patterns and replace them
-    loop {
-        let start = match result[search_from..].find("{{") {
-            Some(pos) => search_from + pos,
-            None => break,
+    while let Some(offset) = result[search_from..].find("{{") {
+        let start = search_from + offset;
+        let Some(close_offset) = result[start..].find("}}") else {
+            break;
         };
-        let end = match result[start..].find("}}") {
-            Some(pos) => start + pos + 2,
-            None => break,
-        };
+        let end = start + close_offset + 2;
 
         let key = result[start + 2..end - 2].trim();
         let replacement = resolve_json_path(variables, key);

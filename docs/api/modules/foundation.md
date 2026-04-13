@@ -84,6 +84,7 @@ struct AppContext
   fn route_url(&self, name: &str, params: &[(&str, &str)]) -> Result<String>
   fn signed_route_url( &self, name: &str, params: &[(&str, &str)], expires_at: DateTime, ) -> Result<String>
   fn verify_signed_url(&self, url: &str) -> Result<()>
+  async fn shutdown_plugins(&self) -> Result<()>
 struct AppTransaction
   fn app(&self) -> &AppContext
   fn transaction(&self) -> &DatabaseTransaction

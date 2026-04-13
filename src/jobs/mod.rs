@@ -309,6 +309,7 @@ pub struct JobBatchBuilder {
 
 impl JobBatchBuilder {
     /// Add a job to the batch.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<J: Job>(mut self, job: J) -> Result<Self> {
         let queue = J::QUEUE
             .clone()
@@ -414,6 +415,7 @@ pub struct JobChainBuilder {
 
 impl JobChainBuilder {
     /// Add a job to the end of the chain.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<J: Job>(mut self, job: J) -> Result<Self> {
         let queue = J::QUEUE
             .clone()
@@ -714,15 +716,15 @@ impl Worker {
                     .record_job_outcome(RecordedJobOutcome::Succeeded);
 
                 let duration_ms = Utc::now().timestamp_millis() - started_at;
-                self.record_job_history(
-                    &envelope.job,
-                    &envelope.queue,
-                    "succeeded",
-                    envelope.attempts + 1,
-                    None,
+                self.record_job_history(JobHistoryEntry {
+                    job_id: &envelope.job,
+                    queue: &envelope.queue,
+                    status: "succeeded",
+                    attempt: envelope.attempts + 1,
+                    error: None,
                     started_at,
                     duration_ms,
-                )
+                })
                 .await;
 
                 // --- Batch completion check ---
@@ -790,15 +792,15 @@ impl Worker {
                     .record_job_outcome(RecordedJobOutcome::Retried);
 
                 let duration_ms = Utc::now().timestamp_millis() - started_at;
-                self.record_job_history(
-                    &retry_job_id,
-                    &retry_queue,
-                    "retried",
-                    attempts,
-                    Some("job failed, scheduling retry"),
+                self.record_job_history(JobHistoryEntry {
+                    job_id: &retry_job_id,
+                    queue: &retry_queue,
+                    status: "retried",
+                    attempt: attempts,
+                    error: Some("job failed, scheduling retry"),
                     started_at,
                     duration_ms,
-                )
+                })
                 .await;
 
                 Ok(())
@@ -843,15 +845,15 @@ impl Worker {
                     .record_job_outcome(RecordedJobOutcome::DeadLettered);
 
                 let duration_ms = Utc::now().timestamp_millis() - started_at;
-                self.record_job_history(
-                    &job_name,
-                    &queue_name,
-                    "dead_lettered",
-                    attempts,
-                    Some(&error),
+                self.record_job_history(JobHistoryEntry {
+                    job_id: &job_name,
+                    queue: &queue_name,
+                    status: "dead_lettered",
+                    attempt: attempts,
+                    error: Some(&error),
                     started_at,
                     duration_ms,
-                )
+                })
                 .await;
 
                 Ok(())
@@ -984,17 +986,29 @@ impl Worker {
 
         Ok(())
     }
+}
 
-    async fn record_job_history(
-        &self,
-        job_id: &JobId,
-        queue: &QueueId,
-        status: &str,
-        attempt: u32,
-        error: Option<&str>,
-        started_at: i64,
-        duration_ms: i64,
-    ) {
+struct JobHistoryEntry<'a> {
+    job_id: &'a JobId,
+    queue: &'a QueueId,
+    status: &'a str,
+    attempt: u32,
+    error: Option<&'a str>,
+    started_at: i64,
+    duration_ms: i64,
+}
+
+impl Worker {
+    async fn record_job_history(&self, entry: JobHistoryEntry<'_>) {
+        let JobHistoryEntry {
+            job_id,
+            queue,
+            status,
+            attempt,
+            error,
+            started_at,
+            duration_ms,
+        } = entry;
         if !self.runtime.config.track_history {
             return;
         }

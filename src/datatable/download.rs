@@ -26,7 +26,7 @@ where
     let bytes = build_xlsx_bytes::<M, D>(app, actor, request).await?;
 
     let filename = format!("{}.xlsx", D::ID);
-    Ok(axum::response::Response::builder()
+    axum::response::Response::builder()
         .header(
             "Content-Type",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -36,7 +36,7 @@ where
             format!("attachment; filename=\"{filename}\""),
         )
         .body(axum::body::Body::from(bytes))
-        .map_err(|e| Error::message(format!("failed to build download response: {e}")))?)
+        .map_err(|e| Error::message(format!("failed to build download response: {e}")))
 }
 
 /// Generate XLSX bytes from a datatable query (no pagination).
@@ -148,12 +148,12 @@ fn write_cell(
             if let Some(f) = n.as_f64() {
                 worksheet.write_number(row, col, f)
             } else {
-                worksheet.write_string(row, col, &n.to_string())
+                worksheet.write_string(row, col, n.to_string())
             }
         }
         serde_json::Value::String(s) => worksheet.write_string(row, col, s),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            worksheet.write_string(row, col, &value.to_string())
+            worksheet.write_string(row, col, value.to_string())
         }
     }?;
     Ok(())

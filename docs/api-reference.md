@@ -192,6 +192,9 @@ async fn notify_queued(notifiable: &dyn Notifiable, notification: &dyn Notificat
 fn route_url(name: &str, params: &[(&str, &str)]) -> Result<String>
 fn signed_route_url(name: &str, params: &[(&str, &str)], expires_at: DateTime) -> Result<String>
 fn verify_signed_url(url: &str) -> Result<()>
+
+// Plugin lifecycle
+async fn shutdown_plugins(&self) -> Result<()>
 ```
 
 ### AppTransaction — methods
@@ -2012,6 +2015,7 @@ Compile-time plugin registry with dependency validation.
 | `PluginScaffoldVar` | Template variable with optional default |
 | `PluginRegistrar` | Plugin registration interface |
 | `PluginRegistry` | Installed plugin registry |
+| `PluginContributions` | Per-plugin registration summary (route_count, command_count, etc.) |
 | `PluginInstallOptions` | Asset installation options |
 | `PluginScaffoldOptions` | Scaffold rendering options |
 
@@ -2021,13 +2025,15 @@ Compile-time plugin registry with dependency validation.
 trait Plugin: Send + Sync + 'static {
     fn manifest(&self) -> PluginManifest;
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<()>;
-    async fn boot(&self, app: &AppContext) -> Result<()> { Ok(()) }  // default
+    async fn boot(&self, app: &AppContext) -> Result<()> { Ok(()) }   // default
+    async fn shutdown(&self, app: &AppContext) -> Result<()> { Ok(()) } // default — called in reverse dep order
 }
 ```
 
 ### PluginRegistrar — methods
 
 ```rust
+// Core registration (closures)
 fn new() -> Self
 fn register_provider<P: ServiceProvider>(&mut self, provider: P) -> &mut Self
 fn register_routes<F>(&mut self, registrar: F) -> &mut Self
@@ -2038,17 +2044,49 @@ fn register_validation_rule<I, R>(&mut self, id: I, rule: R) -> &mut Self
 fn config_defaults(&mut self, defaults: Value) -> &mut Self
 fn register_assets<I>(&mut self, assets: I) -> Result<&mut Self>
 fn register_scaffolds<I>(&mut self, scaffolds: I) -> Result<&mut Self>
+
+// Direct registration (no ServiceProvider wrapper needed)
+fn register_guard<I: Into<GuardId>, G: BearerAuthenticator>(&mut self, id: I, guard: G) -> &mut Self
+fn register_policy<I: Into<PolicyId>, P: Policy>(&mut self, id: I, policy: P) -> &mut Self
+fn register_authenticatable<M: Authenticatable>(&mut self) -> &mut Self
+fn listen_event<E: Event, L: EventListener<E>>(&mut self, listener: L) -> &mut Self
+fn register_job<J: Job>(&mut self) -> &mut Self
+fn register_job_middleware<M: JobMiddleware>(&mut self, middleware: M) -> &mut Self
+fn register_notification_channel<I: Into<NotificationChannelId>, N: NotificationChannel>(&mut self, id: I, channel: N) -> &mut Self
+fn register_datatable<D: ModelDatatable>(&mut self) -> &mut Self
+fn register_readiness_check<I: Into<ProbeId>, C: ReadinessCheck>(&mut self, id: I, check: C) -> &mut Self
+fn register_storage_driver(&mut self, name: impl Into<String>, factory: StorageDriverFactory) -> &mut Self
+fn register_email_driver(&mut self, name: impl Into<String>, factory: EmailDriverFactory) -> &mut Self
+fn register_middleware(&mut self, config: MiddlewareConfig) -> &mut Self
 ```
 
 ### PluginRegistry — methods
 
 ```rust
-fn new(plugins: Vec<PluginManifest>) -> Self
+fn new(plugins: Vec<PluginManifest>, contributions: HashMap<PluginId, PluginContributions>) -> Self
 fn plugins(&self) -> &[PluginManifest]
 fn plugin(&self, id: &PluginId) -> Option<&PluginManifest>
+fn contributions(&self, id: &PluginId) -> Option<&PluginContributions>
 fn install_assets(&self, options: &PluginInstallOptions) -> Result<Vec<PathBuf>>
 fn render_scaffold(&self, options: &PluginScaffoldOptions) -> Result<Vec<PathBuf>>
 fn is_empty(&self) -> bool
+```
+
+### PluginContributions — fields
+
+```rust
+pub struct PluginContributions {
+    pub route_count: usize,
+    pub command_count: usize,
+    pub schedule_count: usize,
+    pub websocket_route_count: usize,
+    pub validation_rule_count: usize,
+    pub provider_count: usize,
+    pub middleware_count: usize,
+    pub registrar_action_count: usize,
+    pub asset_count: usize,
+    pub scaffold_count: usize,
+}
 ```
 
 ---

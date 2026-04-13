@@ -47,9 +47,15 @@ pub trait DynDatatable: Send + Sync {
 
 pub struct DatatableAdapter<D>(std::marker::PhantomData<D>);
 
+impl<D> Default for DatatableAdapter<D> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 impl<D> DatatableAdapter<D> {
     pub fn new() -> Self {
-        Self(std::marker::PhantomData)
+        Self::default()
     }
 }
 
@@ -114,16 +120,9 @@ impl DatatableRegistry {
 // Builder (shared-handle pattern)
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub(crate) struct DatatableRegistryBuilder {
     datatables: HashMap<String, Arc<dyn DynDatatable>>,
-}
-
-impl Default for DatatableRegistryBuilder {
-    fn default() -> Self {
-        Self {
-            datatables: HashMap::new(),
-        }
-    }
 }
 
 impl DatatableRegistryBuilder {

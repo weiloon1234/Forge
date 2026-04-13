@@ -98,7 +98,7 @@ fn main() {
                 let filtered = filter_root_items(items);
                 let section = format_module(&doc_root, mod_path, &filtered);
                 if !section.is_empty() {
-                    writeln!(content, "```").unwrap();
+                    writeln!(content, "```rust").unwrap();
                     content.push_str(&section);
                     writeln!(content, "```").unwrap();
                 }
@@ -142,7 +142,7 @@ fn main() {
             if !section.is_empty() {
                 writeln!(content, "## {display}").unwrap();
                 writeln!(content).unwrap();
-                writeln!(content, "```").unwrap();
+                writeln!(content, "```rust").unwrap();
                 content.push_str(&section);
                 writeln!(content, "```").unwrap();
                 writeln!(content).unwrap();

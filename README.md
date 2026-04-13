@@ -1,186 +1,442 @@
-# Forge
+<p align="center">
+  <h1 align="center">Forge</h1>
+  <p align="center">A strongly-typed Rust backend framework built for thin apps and thick infrastructure.</p>
+</p>
 
-Forge is a strongly typed Rust backend framework built around thin application bootstraps and a strong framework kernel.
+<p align="center">
+  <a href="https://crates.io/crates/forge"><img src="https://img.shields.io/crates/v/forge.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/forge"><img src="https://docs.rs/forge/badge.svg" alt="docs.rs"></a>
+  <img src="https://img.shields.io/badge/rust-1.94%2B-orange.svg" alt="MSRV">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
-The core idea is simple:
+---
 
-- Project code focuses on bootstrap, registration, and domain behavior.
-- Forge owns runtime boot, orchestration, infrastructure wiring, and cross-cutting concerns.
+Forge is a modular Rust backend framework built on **Axum**, **Tokio**, and **SQLx**. Your app code focuses on bootstrap, registration, and domain logic. Forge owns the runtime, orchestration, infrastructure wiring, and cross-cutting concerns.
+
+## Features
+
+- **5 Runtime Kernels** &mdash; HTTP, CLI, Scheduler, Worker, WebSocket &mdash; each an independent async runtime
+- **AST-First Database** &mdash; typed models, relations, projections, eager loading, cursor pagination, streaming, upsert, window functions
+- **Auth System** &mdash; bearer tokens, sessions, guards, policies, roles, permissions, password reset, email verification
+- **Validation** &mdash; 38+ built-in rules, custom rules, request validation extractor, file validation
+- **Background Jobs** &mdash; leased at-least-once delivery with batching, chaining, rate limiting
+- **Email** &mdash; multi-driver: SMTP, Mailgun, Postmark, Resend, SES, Log
+- **Storage** &mdash; local + S3, multipart uploads, image processing pipeline
+- **WebSocket** &mdash; channel-based with presence, typed events, replay
+- **Plugin System** &mdash; compile-time registry with dependency validation, assets, scaffolds
+- **Observability** &mdash; structured logging, readiness/liveness probes, runtime diagnostics, OpenTelemetry
+- **Typed Everything** &mdash; `ModelId<M>`, `GuardId`, `JobId`, `ChannelId`, etc. &mdash; zero raw-string IDs
 
 ## Quick Start
 
+Add Forge to your `Cargo.toml`:
+
+```toml
+[dependencies]
+forge = "0.1"
+```
+
+Create a minimal HTTP server:
+
 ```rust
-use async_trait::async_trait;
 use forge::prelude::*;
-
-const MOBILE_RULE: ValidationRuleId = ValidationRuleId::new("mobile");
-
-#[derive(Clone)]
-struct AppServiceProvider;
-
-struct MobileRule;
-
-#[async_trait]
-impl ServiceProvider for AppServiceProvider {}
-
-#[async_trait]
-impl ValidationRule for MobileRule {
-    async fn validate(
-        &self,
-        _context: &RuleContext,
-        value: &str,
-    ) -> std::result::Result<(), ValidationError> {
-        if value.starts_with('+') {
-            Ok(())
-        } else {
-            Err(ValidationError::new("mobile", "invalid mobile"))
-        }
-    }
-}
 
 fn main() -> Result<()> {
     App::builder()
         .load_env()
         .load_config_dir("config")
-        .register_provider(AppServiceProvider)
-        .register_routes(app::portals::router)
-        .register_commands(app::commands::register)
-        .register_schedule(app::schedules::register)
-        .register_validation_rule(MOBILE_RULE, MobileRule)
-        .run_http()?;
+        .register_routes(routes)
+        .run_http()
+}
 
+fn routes(r: &mut HttpRegistrar) -> Result<()> {
+    r.route("/health", get(health));
     Ok(())
 }
 
-mod app {
-    pub mod portals {
-        use forge::prelude::*;
-
-        pub fn router(registrar: &mut HttpRegistrar) -> Result<()> {
-            registrar.route("/health", get(health));
-            Ok(())
-        }
-
-        async fn health() -> impl IntoResponse {
-            StatusCode::OK
-        }
-    }
-
-    pub mod commands {
-        use forge::prelude::*;
-
-        const PING_COMMAND: CommandId = CommandId::new("ping");
-
-        pub fn register(registry: &mut CommandRegistry) -> Result<()> {
-            registry.command(
-                PING_COMMAND,
-                Command::new("ping"),
-                |_invocation| async move { Ok(()) },
-            )?;
-            Ok(())
-        }
-    }
-
-    pub mod schedules {
-        use forge::prelude::*;
-
-        const HEARTBEAT_SCHEDULE: ScheduleId = ScheduleId::new("heartbeat");
-
-        pub fn register(registry: &mut ScheduleRegistry) -> Result<()> {
-            registry.cron(
-                HEARTBEAT_SCHEDULE,
-                CronExpression::parse("*/5 * * * * *")?,
-                |_invocation| async move { Ok(()) },
-            )?;
-            Ok(())
-        }
-    }
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
 }
 ```
 
-## Primary Bootstraps
+## Architecture
 
-- `run_http`: Axum-powered HTTP kernel with validation, auth guards, request IDs, and observability hooks.
-- `run_cli`: typed command kernel built on `clap`.
-- `run_scheduler`: cron and interval scheduler with leader-safe Redis coordination when configured.
-- `run_worker`: background job worker with leased at-least-once delivery.
+```
+Your App                          Forge Framework
+─────────                         ───────────────
+main.rs                           ┌─────────────────────────┐
+  App::builder()                  │  AppBuilder             │
+    .register_provider(...)  ───> │    ├─ ServiceRegistrar   ��
+    .register_routes(...)    ───> │    ├─ HttpRegistrar      │
+    .register_commands(...)  ───> ���    ├─ CommandRegistry     │
+    .register_schedule(...)  ───> │    ├─ ScheduleRegistry    │
+    .run_http()              ───> │    └─ HttpKernel::serve() │
+                                  └─────────────────────────┘
+                                           │
+                                  ┌────────┴────────┐
+                                  │   AppContext     │
+                                  │  ┌────────────┐ │
+                                  │  │ Database    │ │
+                                  │  │ Redis      │ │
+                                  │  │ Auth       │ │
+                                  │  │ Storage    │ │
+                                  │  │ Email      │ │
+                                  │  │ Cache      │ │
+                                  │  │ Jobs       │ │
+                                  │  │ WebSocket  │ │
+                                  │  │ Events     │ │
+                                  │  │ I18n       │ │
+                                  │  │ ...        │ │
+                                  │  └────────────┘ │
+                                  └─────────────────┘
+```
 
-Advanced but first-class bootstraps:
+## Runtime Kernels
 
-- `run_websocket`: typed channel-based websocket kernel.
-- `register_plugin`: compile-time plugin registration with dependency ordering, config defaults, assets, and scaffolds.
+Forge provides 5 independent async runtimes. Each is started from the same `AppBuilder`:
 
-## Framework Status
+```rust
+// HTTP server
+App::builder().register_routes(routes).run_http()?;
 
-- Phase 1: HTTP, validation, CLI, scheduler are implemented.
-- Phase 2: websocket, events, and jobs are implemented.
-- Auth + typing realignment: bearer auth, guards, policies, typed semantic IDs, and request identity are implemented.
-- Observability: readiness, liveness, runtime diagnostics, and typed runtime counters are implemented.
-- Distributed runtime: leased worker processing and cluster-safe scheduler leadership are implemented.
-- Plugins: compile-time plugin registry, dependency validation, config defaults, package assets, and scaffolds are implemented.
-- Database query blueprint (`v1 -> v3`): complete. Forge ships the AST-first Postgres query system described in [query-system-v1-v3](blueprints/01-query-system-v1-v3.md), including generic builders, typed model/projection queries, model-first `create()/update()/query()` APIs, safe-by-default `ModelId<M>` UUIDv7 primary keys serialized as strings, always-on model lifecycle hooks/events on app-backed writes, explicit handwritten relations, recursive eager loading, `where_has`, aggregates, many-to-many, codegen-assisted metadata, raw SQL escape hatches, and batched `ModelQuery::stream()` support for eager-loaded relations and relation aggregates.
-- Database post-blueprint work: Rust migration/seeder lifecycle with build-time discovery and runtime hardening are implemented separately from the query blueprint scope. See [docs/query-blueprint-status.md](docs/query-blueprint-status.md).
-- Date/time kernel: Forge now exposes immutable `DateTime`, `LocalDateTime`, `Date`, `Time`, `Timezone`, and `Clock` types as the public framework date story, with `[app] timezone` controlling parsing and presentation defaults while runtime storage stays UTC-first.
-- Redis app API: `app.redis()` now exposes a safe namespaced Redis wrapper for low-level key/channel operations, with an explicit cross-namespace escape hatch for the rare multi-project integration case, while the internal runtime backend remains framework plumbing.
+// CLI commands
+App::builder().register_commands(commands).run_cli()?;
+
+// Background job worker
+App::builder().run_worker()?;
+
+// Cron + interval scheduler (Redis-safe leadership)
+App::builder().register_schedule(schedules).run_scheduler()?;
+
+// WebSocket server
+App::builder().register_websocket_routes(ws_routes).run_websocket()?;
+```
+
+## Database
+
+Forge ships an AST-first query system. Queries are built as expression trees, then compiled to SQL &mdash; not string concatenation.
+
+### Models
+
+```rust
+#[derive(Model)]
+#[forge(table = "users")]
+struct User {
+    id: ModelId<Self>,
+    name: String,
+    email: String,
+    created_at: DateTime,
+}
+
+// Query
+let users = User::model_query()
+    .where_col(User::EMAIL, "alice@example.com")
+    .first(&db)
+    .await?;
+
+// Create
+User::model_create()
+    .set(User::NAME, "Alice")
+    .set(User::EMAIL, "alice@example.com")
+    .execute(&db)
+    .await?;
+```
+
+### Relations
+
+```rust
+let posts = has_many(User::ID, Post::AUTHOR_ID, |u| u.id, |u, posts| u.posts = Loaded(posts));
+
+let users = User::model_query()
+    .with(posts)
+    .all(&db)
+    .await?;
+```
+
+### Projections, CTEs, Window Functions
+
+```rust
+let report = ProjectionQuery::<MonthlySales>::new()
+    .group_by(MonthlySales::MONTH)
+    .having(MonthlySales::TOTAL, ComparisonOp::Gte, 1000)
+    .all(&db)
+    .await?;
+```
+
+## Auth
+
+```rust
+// Guard + policy registration
+registrar.register_guard(AuthGuard::Api, StaticBearerAuthenticator::new()
+    .token("secret-token", Actor::new("user-1", AuthGuard::Api)));
+registrar.register_policy(PolicyKey::IsAdmin, AdminPolicy);
+
+// Route with auth
+r.route_with_options("/admin", get(admin_handler),
+    HttpRouteOptions::new()
+        .guard(AuthGuard::Api)
+        .permission(Ability::AdminAccess));
+
+// Extract authenticated actor in handler
+async fn admin_handler(CurrentActor(actor): CurrentActor) -> impl IntoResponse {
+    Json(serde_json::json!({ "user": actor.id }))
+}
+```
+
+## Validation
+
+38+ built-in rules with async database checks:
+
+```rust
+#[derive(Deserialize)]
+struct CreateUser {
+    email: String,
+    password: String,
+    password_confirmation: String,
+}
+
+#[async_trait]
+impl RequestValidator for CreateUser {
+    async fn validate(&self, v: &mut Validator) -> Result<()> {
+        v.field("email", &self.email)
+            .bail().required().email()
+            .unique("users", "email")
+            .apply().await?;
+
+        v.field("password", &self.password)
+            .bail().required().min(8)
+            .confirmed("password_confirmation", &self.password_confirmation)
+            .apply().await?;
+
+        Ok(())
+    }
+}
+
+// Use in handler — auto-validates, returns 422 on failure
+async fn create_user(Validated(payload): Validated<CreateUser>) -> impl IntoResponse {
+    // payload is validated
+}
+```
+
+## Background Jobs
+
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+struct SendWelcomeEmail { user_id: String }
+
+#[async_trait]
+impl Job for SendWelcomeEmail {
+    const ID: JobId = JobId::new("send_welcome_email");
+
+    async fn handle(&self, ctx: JobContext) -> Result<()> {
+        let email = ctx.app().email()?;
+        // send email...
+        Ok(())
+    }
+}
+
+// Dispatch
+app.jobs()?.dispatch(SendWelcomeEmail { user_id: "123".into() })?;
+
+// Dispatch with delay
+app.jobs()?.dispatch_later(job, DateTime::now().add_seconds(60).timestamp_millis())?;
+
+// Batch
+app.jobs()?.batch("onboard")
+    .add(SendWelcomeEmail { .. })?
+    .add(CreateDefaultSettings { .. })?
+    .on_complete(NotifyAdmin { .. })?
+    .dispatch()?;
+```
+
+## Middleware
+
+```rust
+App::builder()
+    .register_middleware(MiddlewareConfig::from(
+        Cors::default().allow_any_origin().credential(false)
+    ))
+    .register_middleware(MiddlewareConfig::from(Compression))
+    .register_middleware(MiddlewareConfig::from(
+        SecurityHeaders::default().hsts(31536000).csp("default-src 'self'")
+    ))
+    .register_middleware(MiddlewareConfig::from(
+        RateLimit::per_minute(60).by_ip()
+    ))
+    .run_http()?;
+```
+
+## WebSocket
+
+```rust
+const CHAT: ChannelId = ChannelId::new("chat");
+const MESSAGE: ChannelEventId = ChannelEventId::new("message");
+
+struct ChatHandler;
+
+#[async_trait]
+impl ChannelHandler for ChatHandler {
+    async fn handle(&self, ctx: WebSocketContext, payload: Value) -> Result<()> {
+        ctx.publish(MESSAGE, payload).await
+    }
+}
+
+fn ws_routes(r: &mut WebSocketRegistrar) -> Result<()> {
+    r.channel_with_options(CHAT, ChatHandler,
+        WebSocketChannelOptions::new()
+            .presence(true)
+            .guard(AuthGuard::Api))?;
+    Ok(())
+}
+```
+
+## Plugin System
+
+```rust
+struct AnalyticsPlugin;
+
+impl Plugin for AnalyticsPlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest::new("analytics", Version::new(1, 0, 0), VersionReq::parse(">=0.1").unwrap())
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar) -> Result<()> {
+        registrar.register_routes(analytics::routes);
+        registrar.register_provider(AnalyticsServiceProvider);
+        Ok(())
+    }
+}
+
+// Register at bootstrap
+App::builder()
+    .register_plugin(AnalyticsPlugin)
+    .run_http()?;
+```
+
+## Configuration
+
+TOML-based with environment variable overlay:
+
+```bash
+# Generate a sample config
+cargo run -- config:publish
+
+# Generate signing + encryption keys
+cargo run -- key:generate
+
+# Publish framework migrations
+cargo run -- migrate:publish
+```
+
+Environment variables override config using double-underscore notation:
+
+```bash
+DATABASE__URL=postgres://... SERVER__PORT=8080 cargo run
+```
 
 ## Redis
 
-Forge keeps the internal runtime backend private, but consumer app code can use Redis directly through `AppContext`:
-
 ```rust
-use forge::prelude::*;
-
 async fn remember_login(app: &AppContext, user_id: &str) -> Result<()> {
     let redis = app.redis()?;
     let key = redis.key(format!("logins:{user_id}"));
-    let mut connection = redis.connection().await?;
-
-    connection.set_ex(&key, "1", 3600).await?;
-
+    let mut conn = redis.connection().await?;
+    conn.set_ex(&key, "1", 3600).await?;
     Ok(())
 }
 ```
 
-All `RedisKey` and `RedisChannel` values are automatically prefixed with `redis.namespace`, so apps sharing the same Redis server stay isolated as long as each project sets a distinct namespace.
-
-For the rare case where one Forge app must read another app's keys intentionally, use the explicit namespace helpers instead of turning off namespacing:
+All keys are automatically namespaced. For cross-app access:
 
 ```rust
-let redis = app.redis()?;
 let foreign_key = redis.key_in_namespace("analytics:prod", "daily:users");
-let foreign_channel = redis.channel_in_namespace("analytics:prod", "events");
 ```
+
+## Service Providers
+
+```rust
+struct AppServiceProvider;
+
+#[async_trait]
+impl ServiceProvider for AppServiceProvider {
+    async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+        registrar.singleton::<MyService>(MyService::new())?;
+        registrar.register_guard(AuthGuard::Api, my_authenticator)?;
+        registrar.register_job::<SendWelcomeEmail>()?;
+        registrar.listen_event::<UserCreated, _>(OnUserCreated)?;
+        Ok(())
+    }
+}
+```
+
+## Built-in CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `config:publish` | Publish sample configuration to your project |
+| `key:generate` | Generate signing and encryption keys |
+| `migrate:publish` | Publish framework migration SQL files |
+| `migrate:run` | Run pending migrations |
+| `migrate:rollback` | Rollback the last migration batch |
+| `seed:countries` | Seed 250 built-in country records |
+| `docs:api` | Generate API surface docs |
+| `about` | Display framework version and environment info |
 
 ## Examples
 
-- [examples/blueprint_http.rs](examples/blueprint_http.rs)
-- [examples/blueprint_typed.rs](examples/blueprint_typed.rs)
-- [examples/phase2_websocket.rs](examples/phase2_websocket.rs)
-- [examples/phase25_auth.rs](examples/phase25_auth.rs)
-- [examples/phase3_observability.rs](examples/phase3_observability.rs)
-- [examples/phase3_worker.rs](examples/phase3_worker.rs)
-- [examples/phase3_redis.rs](examples/phase3_redis.rs): public `app.redis()` API with default namespacing and explicit cross-namespace access
-- [examples/phase3_database_generic.rs](examples/phase3_database_generic.rs): generic `Query` builder and AST-first foundation
-- [examples/phase3_database_model.rs](examples/phase3_database_model.rs): typed `ModelQuery` with model-first `create()/update()` builders, safe `ModelId<M>` UUIDv7 primary keys, default timestamps, soft deletes, and model-local lifecycle hooks
-- [examples/phase3_database_relations.rs](examples/phase3_database_relations.rs): canonical v3 relation-tree example with nested `.with(...)`, `where_has`, and relation aggregates
-- [examples/phase3_database_projection.rs](examples/phase3_database_projection.rs): typed projections with CTE, `UNION`, `CASE`, and JSON expressions
-- [examples/phase3_database_many_to_many.rs](examples/phase3_database_many_to_many.rs): explicit many-to-many relations with pivot projection hydration
-- [examples/phase4_database_lifecycle.rs](examples/phase4_database_lifecycle.rs): build-time discovered Rust migrations and seeders with a single provider hook
-- [examples/phase3_plugin.rs](examples/phase3_plugin.rs)
+| Example | Description |
+|---------|-------------|
+| [blueprint_http](examples/blueprint_http.rs) | Minimal HTTP + CLI + scheduler |
+| [blueprint_typed](examples/blueprint_typed.rs) | Typed IDs, auth, events, jobs, WebSocket |
+| [phase2_websocket](examples/phase2_websocket.rs) | WebSocket channels |
+| [phase25_auth](examples/phase25_auth.rs) | Auth guards and policies |
+| [phase3_observability](examples/phase3_observability.rs) | Diagnostics and probes |
+| [phase3_redis](examples/phase3_redis.rs) | Redis with namespacing |
+| [phase3_database_generic](examples/phase3_database_generic.rs) | Generic query builder |
+| [phase3_database_model](examples/phase3_database_model.rs) | Typed model queries |
+| [phase3_database_relations](examples/phase3_database_relations.rs) | Relations and eager loading |
+| [phase3_database_projection](examples/phase3_database_projection.rs) | Projections, CTEs, UNION |
+| [phase3_database_many_to_many](examples/phase3_database_many_to_many.rs) | Many-to-many with pivots |
+| [phase4_database_lifecycle](examples/phase4_database_lifecycle.rs) | Migrations and seeders |
+| [phase3_plugin](examples/phase3_plugin.rs) | Plugin system |
 
-## Local Verification
+## Requirements
+
+- **Rust 1.94+**
+- **PostgreSQL** (primary database target)
+- **Redis** (optional &mdash; required for distributed scheduler, jobs, cache, locks)
+
+## Development
 
 ```bash
+# Full verification (same as CI)
 make verify
+
+# Run tests
+make test
+
+# Postgres acceptance tests
+FORGE_TEST_POSTGRES_URL=postgres://... make test-postgres
+
+# Generate API surface docs
+make api-docs
+
+# Pre-release
 make verify-release
-FORGE_TEST_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/forge make test-postgres
 ```
 
-Those commands cover formatting, tests, clippy, fixture checks, package dry-run verification, and the Postgres-backed database acceptance path.
+## Documentation
 
-## Contributing and Releases
+| Resource | Description |
+|----------|-------------|
+| [API Surface](docs/api/index.md) | Auto-generated public API reference (per module) |
+| [API Reference](docs/api-reference.md) | Hand-curated API reference with context |
+| [Validation Rules](docs/validation-rules.md) | Complete validation rule reference |
+| [CONTRIBUTING](CONTRIBUTING.md) | Contributor workflow and expectations |
+| [CHANGELOG](CHANGELOG.md) | Release history |
+| [Release Checklist](docs/release-checklist.md) | Release procedure |
 
-- Contributor workflow: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
-- Release checklist: [docs/release-checklist.md](docs/release-checklist.md)
-- Query blueprint status: [docs/query-blueprint-status.md](docs/query-blueprint-status.md)
+## License
+
+MIT

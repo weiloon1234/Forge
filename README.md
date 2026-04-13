@@ -586,6 +586,8 @@ make verify-release
 | [Caching & Redis](docs/guides/caching-and-redis.md) | Cache abstraction, namespaced Redis client |
 | [Storage & Imaging](docs/guides/storage-and-imaging.md) | File uploads, local + S3, image processing |
 | [Background Processing](docs/guides/background-processing.md) | Jobs, scheduler, domain events |
+| [WebSocket](docs/guides/websocket.md) | Channels, rooms, presence, broadcasting |
+| [Model Extensions](docs/guides/model-extensions.md) | AppEnum, Attachments, Metadata, Translations, Countries |
 | [i18n](docs/guides/i18n.md) | Translation catalogs, locale resolution |
 | [Plugin Guide](docs/guides/plugins.md) | 5 real-world plugin use cases with full code |
 | [Datatable Guide](docs/guides/datatable.md) | Server-side datatables: filtering, sorting, export |

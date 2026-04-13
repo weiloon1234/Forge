@@ -12,7 +12,9 @@ Consumer-facing guides for building applications with Forge. Each guide covers o
 | [Caching & Redis](caching-and-redis.md) | Cache abstraction (get/put/remember), namespaced Redis client |
 | [Storage & Imaging](storage-and-imaging.md) | File uploads, local + S3, image processing pipeline |
 | [Background Processing](background-processing.md) | Jobs (batch/chain/retry), scheduler (cron/interval), domain events |
+| [WebSocket](websocket.md) | Channels, rooms, presence, broadcasting, client protocol |
+| [Model Extensions](model-extensions.md) | AppEnum, Attachments, Metadata, Translations, Countries |
 | [i18n](i18n.md) | Translation catalogs, locale resolution, `t!()` macro, validation messages |
 | [Plugins](plugins.md) | 5 real-world plugin examples: Slack, audit log, storage driver, admin dashboard, webhooks |
 
-Upcoming guides: Database, WebSocket, Model Extensions (Attachments/Metadata/Countries/Translations/AppEnum).
+Upcoming: Database guide (models, relations, queries, projections, migrations).

@@ -701,13 +701,13 @@ impl DatabaseSession {
     }
 
     pub(crate) async fn acquire_advisory_lock(&self, key: i64) -> Result<()> {
-        self.raw_query("SELECT pg_advisory_lock($1)", &[DbValue::Int64(key)])
+        self.raw_query("SELECT pg_advisory_lock($1)::text", &[DbValue::Int64(key)])
             .await?;
         Ok(())
     }
 
     pub(crate) async fn release_advisory_lock(&self, key: i64) -> Result<()> {
-        self.raw_query("SELECT pg_advisory_unlock($1)", &[DbValue::Int64(key)])
+        self.raw_query("SELECT pg_advisory_unlock($1)::text", &[DbValue::Int64(key)])
             .await?;
         Ok(())
     }

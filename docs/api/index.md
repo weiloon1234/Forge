@@ -32,6 +32,7 @@ Load only the file you need — don't read them all at once.
 | [plugin](modules/plugin.md) | Compile-time plugin system with dependency validation | 98L |
 | [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 40L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 48L |
+| [settings](modules/settings.md) |  | 18L |
 | [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 115L |
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 203L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 35L |
@@ -39,4 +40,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 144L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 31 modules, 2782 lines across all files.**
+**Total: 32 modules, 2800 lines across all files.**

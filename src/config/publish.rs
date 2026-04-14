@@ -611,5 +611,18 @@ CREATE INDEX IF NOT EXISTS idx_countries_status ON countries (status);
 CREATE INDEX IF NOT EXISTS idx_countries_region ON countries (region);
 "#,
         ),
+        (
+            "000000000009_create_settings.sql",
+            r#"-- Forge framework: Settings (key-value store with JSONB values)
+CREATE TABLE IF NOT EXISTS settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    key TEXT NOT NULL,
+    value JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings (key);
+"#,
+        ),
     ]
 }

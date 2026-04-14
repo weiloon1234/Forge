@@ -457,6 +457,6 @@ No special code needed — the framework handles this automatically.
 | [Storage & Imaging](storage-and-imaging.md) | File uploads, image processing |
 | [Caching & Redis](caching-and-redis.md) | Cache abstraction, Redis client |
 | [Datatable](datatable.md) | Server-side data tables |
-| [Model Extensions](model-extensions.md) | Attachments, metadata, translations, countries, enums |
+| [Model Extensions](model-extensions.md) | Attachments, metadata, translations, countries, settings, enums |
 | [i18n](i18n.md) | Internationalization |
 | [Plugins](plugins.md) | Plugin development |

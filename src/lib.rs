@@ -71,6 +71,7 @@ pub mod i18n;
 pub mod imaging;
 pub mod jobs;
 pub mod metadata;
+pub mod settings;
 pub mod translations;
 pub mod kernel;
 pub mod logging;

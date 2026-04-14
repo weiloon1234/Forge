@@ -417,6 +417,93 @@ validator
 
 ---
 
+## Settings — Key-Value Store
+
+A global key-value store backed by JSONB. Values can be strings, numbers, booleans, arrays, or nested objects.
+
+### Basic Usage
+
+```rust
+use forge::settings::Setting;
+
+// Set a value (creates or updates)
+Setting::set(&app, "app.name", json!("My App")).await?;
+Setting::set(&app, "app.maintenance", json!(false)).await?;
+Setting::set(&app, "app.limits", json!({"max_upload": 10485760, "max_users": 100})).await?;
+
+// Get a value
+let name = Setting::get(&app, "app.name").await?;
+// Some(Value::String("My App"))
+
+// Get with a default
+let theme = Setting::get_or(&app, "ui.theme", json!("light")).await?;
+
+// Get as a typed value
+let maintenance: Option<bool> = Setting::get_as(&app, "app.maintenance").await?;
+// Some(false)
+
+// Delete a setting
+Setting::remove(&app, "app.name").await?;
+```
+
+### Querying
+
+```rust
+// Check if a key exists
+if Setting::exists(&app, "app.maintenance").await? {
+    // ...
+}
+
+// List all settings
+let all = Setting::all(&app).await?;
+
+// List by prefix (useful for grouped settings)
+let app_settings = Setting::by_prefix(&app, "app.").await?;
+```
+
+### Setting Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Auto-generated primary key |
+| `key` | String | Unique setting key |
+| `value` | Option\<JSON\> | Any JSON value (string, number, bool, array, object) |
+| `created_at` | Timestamp | Creation time |
+| `updated_at` | Option\<Timestamp\> | Last update time |
+
+### Common Patterns
+
+**Feature flags:**
+
+```rust
+let enabled = Setting::get_as::<bool>(&app, "feature.new_dashboard")
+    .await?
+    .unwrap_or(false);
+```
+
+**Grouped configuration:**
+
+```rust
+// Use dot-notation prefixes to group related settings
+Setting::set(&app, "mail.from_name", json!("My App")).await?;
+Setting::set(&app, "mail.from_address", json!("hello@example.com")).await?;
+
+// Retrieve all mail settings at once
+let mail_settings = Setting::by_prefix(&app, "mail.").await?;
+```
+
+**Structured values:**
+
+```rust
+Setting::set(&app, "business.hours", json!({
+    "monday": {"open": "09:00", "close": "17:00"},
+    "tuesday": {"open": "09:00", "close": "17:00"},
+    "saturday": null
+})).await?;
+```
+
+---
+
 ## Summary
 
 | Extension | Trait | What you add to your model | Storage |
@@ -426,8 +513,9 @@ validator
 | Metadata | `HasMetadata` | Key-value pairs | `metadata` table |
 | Translations | `HasTranslations` | Multi-locale fields | `model_translations` table |
 | Countries | (static methods) | Reference data | `countries` table |
+| Settings | (static methods) | Global key-value store | `settings` table |
 
-All except Countries use polymorphic tables — one table serves all models via `type` + `id` columns. No per-model migrations needed.
+All except Countries and Settings use polymorphic tables — one table serves all models via `type` + `id` columns. No per-model migrations needed.
 
 ### Required Migrations
 
@@ -438,4 +526,5 @@ Run `cargo run -- migrate:publish` to get the framework migration SQL files:
 000000000006_create_metadata.sql
 000000000007_create_model_translations.sql
 000000000008_create_countries.sql
+000000000009_create_settings.sql
 ```

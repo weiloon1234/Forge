@@ -37,7 +37,7 @@ Load only the file you need — don't read them all at once.
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 203L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 35L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
-| [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 144L |
+| [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 146L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 32 modules, 2800 lines across all files.**
+**Total: 32 modules, 2802 lines across all files.**

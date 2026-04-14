@@ -275,7 +275,7 @@ These are available automatically — no registration needed:
 | `config:publish` | Generate sample config file |
 | `env:publish` | Generate `.env.example` |
 | `key:generate` | Generate signing + encryption keys |
-| `migrate:publish` | Publish framework migration SQL files |
+| `migrate:publish` | Publish framework migration files |
 | `db:migrate` | Run pending migrations |
 | `db:migrate:status` | Show migration status |
 | `db:rollback` | Rollback last migration batch |

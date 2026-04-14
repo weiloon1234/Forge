@@ -31,7 +31,7 @@ impl RequestValidator for CreateUser {
 #[async_trait]
 impl forge::validation::FromMultipart for CreateUser {
     async fn from_multipart(
-        multipart: &mut axum::extract::Multipart,
+        multipart: &mut forge::validation::Multipart,
     ) -> forge::foundation::Result<Self> {
         let mut email = None;
         let mut phone = None;

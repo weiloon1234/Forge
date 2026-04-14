@@ -519,12 +519,12 @@ All except Countries and Settings use polymorphic tables — one table serves al
 
 ### Required Migrations
 
-Run `cargo run -- migrate:publish` to get the framework migration SQL files:
+Run `cargo run -- migrate:publish` to get the framework migration files:
 
 ```
-000000000005_create_attachments.sql
-000000000006_create_metadata.sql
-000000000007_create_model_translations.sql
-000000000008_create_countries.sql
-000000000009_create_settings.sql
+000000000005_create_attachments.rs
+000000000006_create_metadata.rs
+000000000007_create_model_translations.rs
+000000000008_create_countries.rs
+000000000009_create_settings.rs
 ```

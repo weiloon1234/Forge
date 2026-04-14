@@ -298,6 +298,10 @@ async fn scheduler_kernel_runs_registered_cron_jobs() {
 
     let executed = scheduler.tick_at(now).await.unwrap();
     assert_eq!(executed, vec![app::ids::HEARTBEAT_SCHEDULE]);
+
+    // The handler runs in a spawned task — yield to let it complete.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     assert!(events
         .lock()
         .unwrap()

@@ -24,6 +24,10 @@ async fn split_bootstrap_builds_public_kernels() {
     let executed = scheduler.run_once_at(now).await.unwrap();
 
     assert_eq!(executed, vec![app::ids::HEARTBEAT_SCHEDULE]);
+
+    // The scheduler handler runs in a spawned task — yield to let it complete.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     assert_eq!(http.app().config().server().unwrap().port, 0);
     assert_eq!(websocket.app().config().websocket().unwrap().path, "/ws");
 

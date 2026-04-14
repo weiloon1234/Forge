@@ -4,7 +4,7 @@ pub mod resource;
 pub mod routes;
 pub(crate) mod spa;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -136,7 +136,6 @@ enum HttpRegistration {
 pub struct HttpRegistrar {
     registrations: Vec<HttpRegistration>,
     pub(crate) named_routes: routes::RouteRegistry,
-    seen_paths: HashSet<String>,
 }
 
 impl Default for HttpRegistrar {
@@ -150,7 +149,6 @@ impl HttpRegistrar {
         Self {
             registrations: Vec::new(),
             named_routes: routes::RouteRegistry::new(),
-            seen_paths: HashSet::new(),
         }
     }
 
@@ -165,12 +163,6 @@ impl HttpRegistrar {
         options: HttpRouteOptions,
     ) -> &mut Self {
         let path_owned = path.to_string();
-        if !self.seen_paths.insert(path_owned.clone()) {
-            tracing::warn!(
-                path = %path_owned,
-                "route path registered multiple times — later registration may shadow earlier one"
-            );
-        }
         self.registrations
             .push(HttpRegistration::Route(Box::new(RouteRegistration {
                 path: path_owned,

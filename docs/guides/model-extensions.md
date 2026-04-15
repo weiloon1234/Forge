@@ -361,8 +361,8 @@ let all = Country::all(&app).await?;
 // Only enabled countries (for dropdowns)
 let enabled = Country::enabled(&app).await?;
 
-// Filter by status
-let disabled = Country::by_status(&app, "disabled").await?;
+// Filter by status (typed enum)
+let disabled = Country::by_status(&app, CountryStatus::Disabled).await?;
 
 // Check existence
 if Country::exists(&app, "US").await? {
@@ -387,7 +387,7 @@ if Country::exists(&app, "US").await? {
 | `timezones` | JSON array | `["Asia/Kuala_Lumpur"]` |
 | `latitude` / `longitude` | Option\<f64\> | `2.5` / `112.5` |
 | `flag_emoji` | Option | `"🇲🇾"` |
-| `status` | String | `"enabled"` or `"disabled"` |
+| `status` | `CountryStatus` | `CountryStatus::Enabled` or `CountryStatus::Disabled` |
 | `conversion_rate` | Option\<f64\> | `4.47` (relative to base currency) |
 
 ### Common Patterns

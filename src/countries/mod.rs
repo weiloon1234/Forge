@@ -5,9 +5,40 @@ use crate::foundation::{AppContext, Error, Result};
 
 const BUILTIN_SEED: &str = include_str!("seed.json");
 
-// ---------------------------------------------------------------------------
-// Country struct (framework-provided model, iso2 as primary key)
-// ---------------------------------------------------------------------------
+/// Country activation status.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountryStatus {
+    Enabled,
+    #[default]
+    Disabled,
+}
+
+impl CountryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "enabled" => Self::Enabled,
+            _ => Self::Disabled,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl std::fmt::Display for CountryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// A country record from the `countries` table.
 ///
@@ -34,7 +65,7 @@ pub struct Country {
     pub independent: Option<bool>,
     pub un_member: Option<bool>,
     pub flag_emoji: Option<String>,
-    pub status: String,
+    pub status: CountryStatus,
     pub conversion_rate: Option<f64>,
 }
 
@@ -61,12 +92,12 @@ impl Country {
     }
 
     /// List countries filtered by status.
-    pub async fn by_status(app: &AppContext, status: &str) -> Result<Vec<Country>> {
+    pub async fn by_status(app: &AppContext, status: CountryStatus) -> Result<Vec<Country>> {
         let db = app.database()?;
         let rows = db
             .raw_query(
                 "SELECT * FROM countries WHERE status = $1 ORDER BY name",
-                &[DbValue::Text(status.to_string())],
+                &[DbValue::Text(status.as_str().to_string())],
             )
             .await?;
         Ok(rows.iter().map(row_to_country).collect())
@@ -74,7 +105,12 @@ impl Country {
 
     /// List only enabled countries.
     pub async fn enabled(app: &AppContext) -> Result<Vec<Country>> {
-        Self::by_status(app, "enabled").await
+        Self::by_status(app, CountryStatus::Enabled).await
+    }
+
+    /// List only disabled countries.
+    pub async fn disabled(app: &AppContext) -> Result<Vec<Country>> {
+        Self::by_status(app, CountryStatus::Disabled).await
     }
 
     /// Check if an ISO2 code is valid (exists in the table).
@@ -284,10 +320,7 @@ fn row_to_country(row: &crate::database::DbRecord) -> Country {
             _ => None,
         },
         flag_emoji: row.optional_text("flag_emoji"),
-        status: {
-            let s = row.text("status");
-            if s.is_empty() { "disabled".to_string() } else { s }
-        },
+        status: CountryStatus::parse(&row.text("status")),
         conversion_rate: match row.get("conversion_rate") {
             Some(DbValue::Float64(v)) => Some(*v),
             _ => None,

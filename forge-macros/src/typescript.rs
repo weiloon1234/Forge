@@ -11,10 +11,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = ident.to_string();
 
     Ok(quote! {
-        ::inventory::submit! {
+        ::forge::inventory::submit! {
             ::forge::typescript::TsType {
                 name: #name,
-                export_fn: |dir| <#ident as ::ts_rs::TS>::export_all_to(dir),
+                export_fn: |dir| <#ident as ::forge::ts_rs::TS>::export_all_to(dir),
             }
         }
     })

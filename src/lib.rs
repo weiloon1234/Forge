@@ -89,6 +89,7 @@ pub mod validation;
 pub mod websocket;
 
 pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, TS, Validate};
+pub use inventory;
 pub use ts_rs;
 
 pub use attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};

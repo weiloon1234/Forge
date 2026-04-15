@@ -196,7 +196,7 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
 
     match db
         .raw_query(
-            "SELECT job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at FROM job_history WHERE status IN ('failed', 'dead_lettered') ORDER BY created_at DESC LIMIT 50",
+            "SELECT job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at FROM job_history WHERE status IN ('dead_lettered', 'retried') ORDER BY created_at DESC LIMIT 50",
             &[],
         )
         .await

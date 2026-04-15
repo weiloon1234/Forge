@@ -719,7 +719,7 @@ impl Worker {
                 self.record_job_history(JobHistoryEntry {
                     job_id: &envelope.job,
                     queue: &envelope.queue,
-                    status: "succeeded",
+                    status: JobHistoryStatus::Succeeded,
                     attempt: envelope.attempts + 1,
                     error: None,
                     started_at,
@@ -795,7 +795,7 @@ impl Worker {
                 self.record_job_history(JobHistoryEntry {
                     job_id: &retry_job_id,
                     queue: &retry_queue,
-                    status: "retried",
+                    status: JobHistoryStatus::Retried,
                     attempt: attempts,
                     error: Some("job failed, scheduling retry"),
                     started_at,
@@ -848,7 +848,7 @@ impl Worker {
                 self.record_job_history(JobHistoryEntry {
                     job_id: &job_name,
                     queue: &queue_name,
-                    status: "dead_lettered",
+                    status: JobHistoryStatus::DeadLettered,
                     attempt: attempts,
                     error: Some(&error),
                     started_at,
@@ -988,10 +988,35 @@ impl Worker {
     }
 }
 
+/// Terminal status for a job recorded in the `job_history` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobHistoryStatus {
+    Succeeded,
+    Retried,
+    DeadLettered,
+}
+
+impl JobHistoryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Retried => "retried",
+            Self::DeadLettered => "dead_lettered",
+        }
+    }
+}
+
+impl std::fmt::Display for JobHistoryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 struct JobHistoryEntry<'a> {
     job_id: &'a JobId,
     queue: &'a QueueId,
-    status: &'a str,
+    status: JobHistoryStatus,
     attempt: u32,
     error: Option<&'a str>,
     started_at: i64,

@@ -7,6 +7,8 @@ Background job queue with leased at-least-once delivery
 ## forge::jobs
 
 ```rust
+enum JobHistoryStatus { Succeeded, Retried, DeadLettered }
+  fn as_str(&self) -> &'static str
 struct JobBatchBuilder
   fn add<J: Job>(self, job: J) -> Result<Self>
   fn on_complete<J: Job>(self, job: J) -> Result<Self>

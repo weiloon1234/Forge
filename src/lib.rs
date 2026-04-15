@@ -148,7 +148,7 @@ pub use http::middleware::{
 pub use http::resource::ApiResource;
 pub use i18n::{I18n, I18nManager, Locale};
 pub use imaging::{ImageFormat, ImageProcessor, Rotation};
-pub use jobs::{spawn_worker, JobMiddleware};
+pub use jobs::{spawn_worker, JobHistoryStatus, JobMiddleware};
 pub use metadata::{HasMetadata, ModelMeta};
 pub use translations::{
     current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,

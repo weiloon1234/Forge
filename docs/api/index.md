@@ -23,7 +23,7 @@ Load only the file you need — don't read them all at once.
 | [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 201L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
-| [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 46L |
+| [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 48L |
 | [kernel](modules/kernel.md) | 5 runtime kernels: HTTP, CLI, Scheduler, Worker, WebSocket | 67L |
 | [logging](modules/logging.md) | Structured logging, observability, health probes, diagnostics | 64L |
 | [metadata](modules/metadata.md) | Key-value metadata for models (HasMetadata) | 21L |
@@ -40,4 +40,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 146L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 32 modules, 2826 lines across all files.**
+**Total: 32 modules, 2828 lines across all files.**

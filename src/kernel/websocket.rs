@@ -196,27 +196,43 @@ impl WebSocketServerState {
         let Ok(auth) = self.app.auth() else {
             return ConnectionIdentity {
                 bearer_token: None,
+                session_id: None,
                 auth_error: Some("auth manager is not available".to_string()),
                 client_ip: None,
             };
         };
 
-        if !headers.contains_key(axum::http::header::AUTHORIZATION) {
-            return ConnectionIdentity::default();
+        // Try bearer token first (Authorization header)
+        if headers.contains_key(axum::http::header::AUTHORIZATION) {
+            return match auth.extract_token(headers) {
+                Ok(token) => ConnectionIdentity {
+                    bearer_token: Some(token),
+                    session_id: None,
+                    auth_error: None,
+                    client_ip: None,
+                },
+                Err(error) => ConnectionIdentity {
+                    bearer_token: None,
+                    session_id: None,
+                    auth_error: Some(error.to_string()),
+                    client_ip: None,
+                },
+            };
         }
 
-        match auth.extract_token(headers) {
-            Ok(token) => ConnectionIdentity {
-                bearer_token: Some(token),
-                auth_error: None,
-                client_ip: None,
-            },
-            Err(error) => ConnectionIdentity {
-                bearer_token: None,
-                auth_error: Some(error.to_string()),
-                client_ip: None,
-            },
+        // Fall back to session cookie
+        if let Ok(sessions) = self.app.sessions() {
+            if let Some(sid) = sessions.extract_session_id(headers) {
+                return ConnectionIdentity {
+                    bearer_token: None,
+                    session_id: Some(sid),
+                    auth_error: None,
+                    client_ip: None,
+                };
+            }
         }
+
+        ConnectionIdentity::default()
     }
 
     async fn authorize_channel(
@@ -264,16 +280,39 @@ impl WebSocketServerState {
             self.record_auth_outcome(auth_outcome_from_error(&error));
             return Err(error);
         }
-        let token = identity
-            .bearer_token
-            .ok_or_else(|| AuthError::unauthorized("missing authorization header"))
-            .inspect_err(|error| self.record_auth_outcome(auth_outcome_from_error(error)))?;
-        let actor = match auth.authenticate_token(&token, Some(&guard_id)).await {
-            Ok(actor) => actor,
-            Err(error) => {
-                self.record_auth_outcome(auth_outcome_from_error(&error));
-                return Err(error);
+
+        // Resolve actor from either bearer token or session cookie
+        let actor = if let Some(session_id) = identity.session_id {
+            let sessions = self
+                .app
+                .sessions()
+                .map_err(|e| AuthError::internal(e.to_string()))
+                .inspect_err(|e| self.record_auth_outcome(auth_outcome_from_error(e)))?;
+            match sessions.validate(&session_id).await {
+                Ok(Some(actor)) => actor.with_guard(guard_id.clone()),
+                Ok(None) => {
+                    let error = AuthError::unauthorized("invalid or expired session");
+                    self.record_auth_outcome(auth_outcome_from_error(&error));
+                    return Err(error);
+                }
+                Err(e) => {
+                    let error = AuthError::internal(e.to_string());
+                    self.record_auth_outcome(auth_outcome_from_error(&error));
+                    return Err(error);
+                }
             }
+        } else if let Some(token) = identity.bearer_token {
+            match auth.authenticate_token(&token, Some(&guard_id)).await {
+                Ok(actor) => actor,
+                Err(error) => {
+                    self.record_auth_outcome(auth_outcome_from_error(&error));
+                    return Err(error);
+                }
+            }
+        } else {
+            let error = AuthError::unauthorized("missing authorization header or session cookie");
+            self.record_auth_outcome(auth_outcome_from_error(&error));
+            return Err(error);
         };
         let permissions = channel.options.permissions_set();
         if let Err(error) = authorizer.authorize_permissions(&actor, &permissions).await {
@@ -1125,6 +1164,7 @@ impl ConnectionState {
 #[derive(Debug, Clone, Default)]
 struct ConnectionIdentity {
     bearer_token: Option<String>,
+    session_id: Option<String>,
     auth_error: Option<String>,
     client_ip: Option<String>,
 }

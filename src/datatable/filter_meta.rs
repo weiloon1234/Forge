@@ -128,7 +128,7 @@ impl DatatableFilterField {
                     EnumKey::String(s) => s.clone(),
                     EnumKey::Int(i) => i.to_string(),
                 };
-                DatatableFilterOption::new(value, opt.label_key.clone())
+                DatatableFilterOption::new(value.clone(), value)
             })
             .collect();
 

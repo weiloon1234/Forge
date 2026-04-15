@@ -16,10 +16,12 @@ use super::{Actor, Authenticatable, BearerAuthenticator};
 const TOKEN_PRUNE_COMMAND: CommandId = CommandId::new("token:prune");
 
 /// A pair of access + refresh tokens returned to the client after login.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
+    #[ts(type = "number")]
     pub expires_in: u64,
     pub token_type: String,
 }

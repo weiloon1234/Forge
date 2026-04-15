@@ -1008,6 +1008,7 @@ impl AppBuilder {
         if !prepared_plugins.registry.is_empty() {
             boot_commands.push(crate::plugin::builtin_cli_registrar());
         }
+        boot_commands.push(crate::typescript::builtin_cli_registrar());
         boot_commands.extend(prepared_plugins.commands);
         boot_commands.extend(commands);
 

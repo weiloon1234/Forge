@@ -7,7 +7,7 @@ Load only the file you need — don't read them all at once.
 
 | Module | Description | Size |
 |--------|-------------|------|
-| [root](root.md) | Crate root: derive macros, re-exports | 15L |
+| [root](root.md) | Crate root: derive macros, re-exports | 16L |
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 26L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 39L |
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 118L |
@@ -37,7 +37,8 @@ Load only the file you need — don't read them all at once.
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 203L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 35L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
+| [typescript](modules/typescript.md) |  | 12L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 146L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 32 modules, 2828 lines across all files.**
+**Total: 33 modules, 2841 lines across all files.**

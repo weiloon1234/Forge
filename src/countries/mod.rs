@@ -6,8 +6,9 @@ use crate::foundation::{AppContext, Error, Result};
 const BUILTIN_SEED: &str = include_str!("seed.json");
 
 /// Country activation status.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum CountryStatus {
     Enabled,
     #[default]

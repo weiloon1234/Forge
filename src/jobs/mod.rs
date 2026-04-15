@@ -989,8 +989,9 @@ impl Worker {
 }
 
 /// Terminal status for a job recorded in the `job_history` table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum JobHistoryStatus {
     Succeeded,
     Retried,

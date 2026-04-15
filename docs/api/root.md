@@ -9,6 +9,7 @@ derive ApiSchema
 derive AppEnum
 derive Model
 derive Projection
+derive TS
 derive Validate
 macro register_generated_database!
 macro t!

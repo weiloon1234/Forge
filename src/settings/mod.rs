@@ -7,8 +7,9 @@ use crate::foundation::{AppContext, Result};
 ///
 /// Each variant maps to a specific form widget. The `parameters` field
 /// on [`Setting`] provides additional constraints and options for the widget.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum SettingType {
     /// Single-line text input. Parameters: `max_length`, `placeholder`.
     #[default]

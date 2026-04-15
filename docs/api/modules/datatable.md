@@ -89,6 +89,7 @@ struct DatatableFilterField
   fn options<I>(self, options: I) -> Self
   fn help(self, help: impl Into<String>) -> Self
   fn nullable(self) -> Self
+  fn enum_select<E: ForgeAppEnum>( name: impl Into<String>, label: impl Into<String>, ) -> Self
 struct DatatableFilterOption
   fn new(value: impl Into<String>, label: impl Into<String>) -> Self
 struct DatatableFilterRow

@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::app_enum::{EnumKey, ForgeAppEnum};
 use crate::support::Collection;
 
 // ---------------------------------------------------------------------------
@@ -109,6 +110,29 @@ impl DatatableFilterField {
     pub fn nullable(mut self) -> Self {
         self.nullable = true;
         self
+    }
+
+    /// Create a select filter with options auto-populated from an `AppEnum`.
+    ///
+    /// Works with both string-backed (`{ Pending, Completed }`) and
+    /// int-backed (`{ Pending = 0, Completed = 1 }`) enums.
+    ///
+    /// ```ignore
+    /// DatatableFilterField::enum_select::<CountryStatus>("status", "Status")
+    /// ```
+    pub fn enum_select<E: ForgeAppEnum>(name: impl Into<String>, label: impl Into<String>) -> Self {
+        let options: Vec<DatatableFilterOption> = E::options()
+            .iter()
+            .map(|opt| {
+                let value = match &opt.value {
+                    EnumKey::String(s) => s.clone(),
+                    EnumKey::Int(i) => i.to_string(),
+                };
+                DatatableFilterOption::new(value, opt.label_key.clone())
+            })
+            .collect();
+
+        Self::select(name, label).options(options)
     }
 }
 

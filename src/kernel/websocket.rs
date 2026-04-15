@@ -296,11 +296,27 @@ impl WebSocketServerState {
 
 async fn websocket_handler(
     ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     State(state): State<WebSocketServerState>,
 ) -> Response {
+    // Support token via query param (?token=xxx) for browser WebSocket connections
+    // which cannot set custom headers.
+    let mut headers = headers;
+    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+        if let Some(query) = uri.query() {
+            for pair in query.split('&') {
+                if let Some(token) = pair.strip_prefix("token=") {
+                    if let Ok(value) = format!("Bearer {token}").parse() {
+                        headers.insert(axum::http::header::AUTHORIZATION, value);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     let mut identity = state.capture_identity(&headers).await;
-    // Capture client IP for anonymous connection tracking
     identity.client_ip = extract_client_ip_from_headers(&headers);
     ws.on_upgrade(move |socket| handle_socket(socket, state, identity))
 }

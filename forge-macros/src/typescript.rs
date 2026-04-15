@@ -3,9 +3,6 @@ use quote::quote;
 use syn::DeriveInput;
 
 /// Expands `#[derive(forge::TS)]` to register the type for TypeScript export.
-///
-/// The type MUST also derive `ts_rs::TS` (or have it derived by another macro).
-/// This macro only adds the `inventory::submit!` registration.
 pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let ident = &input.ident;
     let name = ident.to_string();
@@ -18,4 +15,29 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
     })
+}
+
+/// Additional registration for AppEnum types — includes runtime values.
+pub fn expand_enum_values(input: &DeriveInput) -> TokenStream {
+    let ident = &input.ident;
+    let name = ident.to_string();
+
+    quote! {
+        ::forge::inventory::submit! {
+            ::forge::typescript::TsEnumValues {
+                name: #name,
+                values_fn: || {
+                    <#ident as ::forge::ForgeAppEnum>::options()
+                        .iter()
+                        .map(|opt| {
+                            match &opt.value {
+                                ::forge::EnumKey::String(s) => s.clone(),
+                                ::forge::EnumKey::Int(i) => i.to_string(),
+                            }
+                        })
+                        .collect()
+                },
+            }
+        }
+    }
 }

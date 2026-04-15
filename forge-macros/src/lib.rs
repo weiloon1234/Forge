@@ -20,7 +20,7 @@ pub fn derive_projection(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(AppEnum, attributes(forge))]
 pub fn derive_app_enum(input: TokenStream) -> TokenStream {
-    expand_with_ts(input, app_enum::expand)
+    expand_enum_with_ts(input, app_enum::expand)
 }
 
 #[proc_macro_derive(Validate, attributes(validate))]
@@ -62,6 +62,32 @@ fn expand_with_ts(
                     let combined = quote::quote! {
                         #main_tokens
                         #ts
+                    };
+                    combined.into()
+                }
+                Err(error) => error.to_compile_error().into(),
+            }
+        }
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Like `expand_with_ts`, but also registers enum values for runtime TS export.
+fn expand_enum_with_ts(
+    input: TokenStream,
+    f: fn(syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>,
+) -> TokenStream {
+    match syn::parse::<syn::DeriveInput>(input) {
+        Ok(parsed) => {
+            let ts_tokens = typescript::expand(parsed.clone());
+            let enum_values_tokens = typescript::expand_enum_values(&parsed);
+            match f(parsed) {
+                Ok(main_tokens) => {
+                    let ts = ts_tokens.unwrap_or_default();
+                    let combined = quote::quote! {
+                        #main_tokens
+                        #ts
+                        #enum_values_tokens
                     };
                     combined.into()
                 }

@@ -788,8 +788,8 @@ impl MigrationFile for Entry {
     async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
         ctx.raw_execute(
             "CREATE TABLE IF NOT EXISTS countries (
-                iso2 CHAR(2) PRIMARY KEY,
-                iso3 CHAR(3) NOT NULL,
+                iso2 TEXT PRIMARY KEY,
+                iso3 TEXT NOT NULL,
                 iso_numeric TEXT,
                 name TEXT NOT NULL,
                 official_name TEXT,

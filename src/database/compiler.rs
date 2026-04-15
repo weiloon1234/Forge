@@ -1001,6 +1001,7 @@ impl CompilerState {
             ComparisonOp::Lte => "<=",
             ComparisonOp::Like => "LIKE",
             ComparisonOp::NotLike => "NOT LIKE",
+            ComparisonOp::ILike => "ILIKE",
         }
     }
 

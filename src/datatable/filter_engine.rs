@@ -78,7 +78,7 @@ fn apply_like_any<M: Model>(
         let col_ref = ColumnRef::new(table_name, &col.name).typed(col.db_type());
         conditions.push(Condition::compare(
             Expr::column(col_ref),
-            ComparisonOp::Like,
+            ComparisonOp::ILike,
             Expr::value(DbValue::Text(pattern.clone())),
         ));
     }
@@ -114,7 +114,7 @@ fn build_filter_condition(
             let pattern = format!("%{text}%");
             Ok(Condition::compare(
                 col_expr,
-                ComparisonOp::Like,
+                ComparisonOp::ILike,
                 Expr::value(DbValue::Text(pattern)),
             ))
         }
@@ -216,7 +216,7 @@ fn build_filter_condition(
             let not_null = Condition::IsNotNull(col_ref.clone());
             let like = Condition::compare(
                 Expr::column(col_ref),
-                ComparisonOp::Like,
+                ComparisonOp::ILike,
                 Expr::value(DbValue::Text(pattern)),
             );
             Ok(Condition::and(vec![not_null, like]))

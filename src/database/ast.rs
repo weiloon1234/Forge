@@ -1009,6 +1009,7 @@ pub enum ComparisonOp {
     Lte,
     Like,
     NotLike,
+    ILike,
 }
 
 impl fmt::Display for ComparisonOp {
@@ -1022,6 +1023,7 @@ impl fmt::Display for ComparisonOp {
             Self::Lte => "<=",
             Self::Like => "LIKE",
             Self::NotLike => "NOT LIKE",
+            Self::ILike => "ILIKE",
         })
     }
 }

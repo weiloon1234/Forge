@@ -88,7 +88,7 @@ impl TokenManager {
             .db
             .raw_query(
                 r#"
-                SELECT guard, actor_id, abilities
+                SELECT guard, actor_id::text, abilities
                 FROM personal_access_tokens
                 WHERE access_token_hash = $1
                   AND revoked_at IS NULL
@@ -160,7 +160,7 @@ impl TokenManager {
                     WHERE refresh_token_hash = $1
                       AND revoked_at IS NULL
                       AND refresh_expires_at > NOW()
-                    RETURNING guard, actor_id
+                    RETURNING guard, actor_id::text
                     "#,
                     &[DbValue::Text(hash)],
                 )
@@ -169,7 +169,7 @@ impl TokenManager {
             self.db
                 .raw_query(
                     r#"
-                    SELECT guard, actor_id
+                    SELECT guard, actor_id::text
                     FROM personal_access_tokens
                     WHERE refresh_token_hash = $1
                       AND revoked_at IS NULL

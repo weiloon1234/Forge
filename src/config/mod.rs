@@ -432,6 +432,20 @@ pub struct CryptConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+pub struct TypeScriptConfig {
+    pub output_dir: String,
+}
+
+impl Default for TypeScriptConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: "frontend/shared/types/generated".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct CacheConfig {
     pub driver: CacheDriver,
     pub prefix: String,
@@ -593,6 +607,10 @@ impl ConfigRepository {
 
     pub fn i18n(&self) -> Result<I18nConfig> {
         self.section("i18n")
+    }
+
+    pub fn typescript(&self) -> Result<TypeScriptConfig> {
+        self.section("typescript")
     }
 
     pub fn observability(&self) -> Result<ObservabilityConfig> {

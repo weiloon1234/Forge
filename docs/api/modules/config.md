@@ -35,6 +35,7 @@ struct ConfigRepository
   fn scheduler(&self) -> Result<SchedulerConfig>
   fn logging(&self) -> Result<LoggingConfig>
   fn i18n(&self) -> Result<I18nConfig>
+  fn typescript(&self) -> Result<TypeScriptConfig>
   fn observability(&self) -> Result<ObservabilityConfig>
   fn storage(&self) -> Result<StorageConfig>
   fn email(&self) -> Result<EmailConfig>
@@ -55,6 +56,7 @@ struct SchedulerConfig
 struct ServerConfig
 struct SessionConfig
 struct TokenConfig
+struct TypeScriptConfig
 struct WebSocketConfig
 ```
 

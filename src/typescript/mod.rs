@@ -3,7 +3,20 @@
 //! Types that derive `ApiSchema`, `AppEnum`, or `forge::TS` are automatically
 //! registered for TypeScript export via the `inventory` crate.
 //!
-//! Run `cargo run -- types:export` to export all registered types.
+//! ## Config
+//!
+//! ```toml
+//! # config/typescript.toml
+//! [typescript]
+//! output_dir = "frontend/shared/types/generated"
+//! ```
+//!
+//! ## Usage
+//!
+//! ```bash
+//! cargo run -- types:export              # uses config output_dir
+//! cargo run -- types:export -o some/dir  # overrides config
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +26,6 @@ use crate::foundation::{Error, Result};
 use crate::support::CommandId;
 
 const TYPES_EXPORT_COMMAND: CommandId = CommandId::new("types:export");
-const DEFAULT_OUTPUT_DIR: &str = "frontend/shared/types/generated";
 
 /// A registered TypeScript type exporter.
 ///
@@ -75,15 +87,15 @@ pub fn builtin_cli_registrar() -> CommandRegistrar {
                     clap::Arg::new("output")
                         .long("output")
                         .short('o')
-                        .help("Output directory")
-                        .default_value(DEFAULT_OUTPUT_DIR),
+                        .help("Output directory (overrides config)"),
                 ),
             |invocation| async move {
-                let output = invocation
-                    .matches()
-                    .get_one::<String>("output")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_DIR));
+                let output = if let Some(dir) = invocation.matches().get_one::<String>("output") {
+                    PathBuf::from(dir)
+                } else {
+                    let config = invocation.app().config().typescript().unwrap_or_default();
+                    PathBuf::from(config.output_dir)
+                };
 
                 export_all(&output)
             },

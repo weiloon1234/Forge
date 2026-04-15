@@ -238,7 +238,7 @@ pub(crate) async fn execute_steps(
                 if let Err(error) = rule.validate(&context, value).await {
                     let msg = match message.as_deref() {
                         Some(custom) => custom.to_string(),
-                        None => error.message,
+                        None => validator.resolve_message(field, &error.code, &[], None),
                     };
                     validator.errors.push(FieldError {
                         field: field.to_string(),

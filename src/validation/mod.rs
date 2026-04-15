@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn named_rule_without_with_message_uses_rule_message() {
+    async fn named_rule_without_with_message_uses_resolved_message() {
         let rules = RuleRegistry::new();
         rules
             .register(ValidationRuleId::new("mobile"), MobileRule)
@@ -1034,7 +1034,9 @@ mod tests {
             .unwrap();
         let errors = v.finish().unwrap_err();
         assert_eq!(errors.errors[0].code, "mobile");
-        assert_eq!(errors.errors[0].message, "invalid mobile number");
+        // Without i18n configured, resolve_message falls back to generic message.
+        // With i18n, it would resolve validation.mobile from the locale file.
+        assert_eq!(errors.errors[0].message, "The phone is invalid.");
     }
 
     // --- EachValidator tests ---

@@ -267,6 +267,29 @@ validator
     .await?;
 ```
 
+### Translating Custom Rule Messages
+
+Custom rule error messages go through the same i18n pipeline as built-in rules. The `code` field in `ValidationError` is used as the translation key. Add entries under `validation` in your locale files:
+
+```json
+// locales/en/validation.json
+{
+    "mobile": "The :attribute field must be a valid mobile number."
+}
+
+// locales/zh/validation.json
+{
+    "mobile": ":attribute 必须是有效的手机号码。"
+}
+```
+
+The lookup priority is:
+1. Inline `.with_message()` override
+2. Validator-level `custom_message(field, code, msg)`
+3. i18n `validation.custom.{field}.{code}`
+4. i18n `validation.{code}` (matched by the error's `code` field)
+5. Hardcoded fallback
+
 ---
 
 ## File Upload Validation

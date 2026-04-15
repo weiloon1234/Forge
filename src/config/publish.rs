@@ -808,6 +808,7 @@ impl MigrationFile for Entry {
                 independent BOOLEAN,
                 un_member BOOLEAN,
                 flag_emoji TEXT,
+                conversion_rate DOUBLE PRECISION,
                 status TEXT NOT NULL DEFAULT 'disabled',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ
@@ -854,6 +855,13 @@ impl MigrationFile for Entry {
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 key TEXT NOT NULL,
                 value JSONB,
+                setting_type TEXT NOT NULL DEFAULT 'text',
+                parameters JSONB NOT NULL DEFAULT '{}',
+                group_name TEXT NOT NULL DEFAULT 'general',
+                label TEXT NOT NULL DEFAULT '',
+                description TEXT,
+                sort_order INT NOT NULL DEFAULT 0,
+                is_public BOOLEAN NOT NULL DEFAULT false,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ
             )",
@@ -863,6 +871,18 @@ impl MigrationFile for Entry {
 
         ctx.raw_execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings (key)",
+            &[],
+        )
+        .await?;
+
+        ctx.raw_execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_group ON settings (group_name, sort_order)",
+            &[],
+        )
+        .await?;
+
+        ctx.raw_execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_public ON settings (is_public) WHERE is_public = true",
             &[],
         )
         .await?;

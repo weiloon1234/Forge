@@ -35,6 +35,7 @@ pub struct Country {
     pub un_member: Option<bool>,
     pub flag_emoji: Option<String>,
     pub status: String,
+    pub conversion_rate: Option<f64>,
 }
 
 impl Country {
@@ -286,6 +287,10 @@ fn row_to_country(row: &crate::database::DbRecord) -> Country {
         status: {
             let s = row.text("status");
             if s.is_empty() { "disabled".to_string() } else { s }
+        },
+        conversion_rate: match row.get("conversion_rate") {
+            Some(DbValue::Float64(v)) => Some(*v),
+            _ => None,
         },
     }
 }

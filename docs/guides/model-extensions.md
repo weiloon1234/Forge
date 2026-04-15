@@ -388,6 +388,7 @@ if Country::exists(&app, "US").await? {
 | `latitude` / `longitude` | Option\<f64\> | `2.5` / `112.5` |
 | `flag_emoji` | Option | `"🇲🇾"` |
 | `status` | String | `"enabled"` or `"disabled"` |
+| `conversion_rate` | Option\<f64\> | `4.47` (relative to base currency) |
 
 ### Common Patterns
 
@@ -417,61 +418,215 @@ validator
 
 ---
 
-## Settings — Key-Value Store
+## Settings — Admin-Ready Key-Value Store
 
-A global key-value store backed by JSONB. Values can be strings, numbers, booleans, arrays, or nested objects.
+A typed key-value store with form metadata, designed for admin panel CRUD. Each setting carries its input type, validation parameters, grouping, and display information so the frontend can dynamically render forms.
 
-### Basic Usage
+### Creating Settings (Seeder / Setup)
+
+Use `NewSetting` builder to define settings with full metadata:
 
 ```rust
-use forge::settings::Setting;
+use forge::settings::{NewSetting, Setting, SettingType};
 
-// Set a value (creates or updates)
-Setting::set(&app, "app.name", json!("My App")).await?;
-Setting::set(&app, "app.maintenance", json!(false)).await?;
-Setting::set(&app, "app.limits", json!({"max_upload": 10485760, "max_users": 100})).await?;
+// Text input
+Setting::create(&app, NewSetting::new("app.name", "Application Name")
+    .value(json!("My App"))
+    .setting_type(SettingType::Text)
+    .parameters(json!({"max_length": 255, "placeholder": "Enter app name"}))
+    .group("general")
+    .description("Displayed in browser title and emails")
+    .sort_order(1)
+    .is_public(true)
+).await?;
 
-// Get a value
-let name = Setting::get(&app, "app.name").await?;
-// Some(Value::String("My App"))
+// Boolean toggle
+Setting::create(&app, NewSetting::new("app.maintenance", "Maintenance Mode")
+    .value(json!(false))
+    .setting_type(SettingType::Boolean)
+    .group("general")
+    .sort_order(2)
+).await?;
 
-// Get with a default
-let theme = Setting::get_or(&app, "ui.theme", json!("light")).await?;
+// Select dropdown
+Setting::create(&app, NewSetting::new("app.theme", "Theme")
+    .value(json!("light"))
+    .setting_type(SettingType::Select)
+    .parameters(json!({"options": [
+        {"value": "light", "label": "Light"},
+        {"value": "dark", "label": "Dark"},
+        {"value": "auto", "label": "System"}
+    ]}))
+    .group("appearance")
+    .sort_order(1)
+    .is_public(true)
+).await?;
 
-// Get as a typed value
+// Number input
+Setting::create(&app, NewSetting::new("upload.max_size_kb", "Max Upload Size (KB)")
+    .value(json!(5120))
+    .setting_type(SettingType::Number)
+    .parameters(json!({"min": 512, "max": 102400, "step": 512}))
+    .group("uploads")
+    .sort_order(1)
+).await?;
+
+// Image upload
+Setting::create(&app, NewSetting::new("app.logo", "Site Logo")
+    .setting_type(SettingType::Image)
+    .parameters(json!({
+        "allowed_mimes": ["image/png", "image/jpeg", "image/svg+xml"],
+        "max_size_kb": 2048,
+        "max_width": 512,
+        "max_height": 512
+    }))
+    .group("appearance")
+    .sort_order(2)
+).await?;
+
+// Email input
+Setting::create(&app, NewSetting::new("mail.from_address", "From Address")
+    .value(json!("hello@example.com"))
+    .setting_type(SettingType::Email)
+    .group("mail")
+    .sort_order(1)
+).await?;
+
+// Code editor
+Setting::create(&app, NewSetting::new("app.custom_css", "Custom CSS")
+    .value(json!(""))
+    .setting_type(SettingType::Code)
+    .parameters(json!({"language": "css"}))
+    .group("appearance")
+    .sort_order(10)
+).await?;
+```
+
+### Reading Values
+
+```rust
+// Quick value access (most common)
+let name = Setting::get(&app, "app.name").await?;         // Option<Value>
+let theme = Setting::get_or(&app, "app.theme", json!("light")).await?;
+
+// Typed access
 let maintenance: Option<bool> = Setting::get_as(&app, "app.maintenance").await?;
-// Some(false)
+let max_kb: Option<i64> = Setting::get_as(&app, "upload.max_size_kb").await?;
 
-// Delete a setting
+// Full setting record (includes metadata — for admin detail view)
+let setting = Setting::find(&app, "app.name").await?;
+```
+
+### Updating Values
+
+```rust
+// Update an existing setting's value
+Setting::set(&app, "app.name", json!("New Name")).await?;
+
+// Upsert — creates with defaults if key doesn't exist, updates value if it does
+Setting::upsert(&app, "app.name", json!("New Name")).await?;
+
+// Delete
 Setting::remove(&app, "app.name").await?;
 ```
 
-### Querying
+### Admin Panel Queries
 
 ```rust
-// Check if a key exists
-if Setting::exists(&app, "app.maintenance").await? {
-    // ...
-}
-
-// List all settings
+// All settings grouped and sorted (admin list page)
 let all = Setting::all(&app).await?;
 
-// List by prefix (useful for grouped settings)
+// Settings for a specific group (admin tab/section)
+let mail = Setting::by_group(&app, "mail").await?;
+
+// All distinct group names (admin sidebar/tabs)
+let groups = Setting::groups(&app).await?;
+// ["appearance", "general", "mail", "uploads"]
+
+// Public settings only (safe for frontend API)
+let public = Setting::public(&app).await?;
+
+// By key prefix
 let app_settings = Setting::by_prefix(&app, "app.").await?;
 ```
+
+### Setting Types (`SettingType` enum)
+
+| Type | Form Widget | Parameters |
+|------|-------------|------------|
+| `Text` | Single-line input | `max_length`, `placeholder` |
+| `Textarea` | Multi-line input | `max_length`, `rows` |
+| `Number` | Numeric input | `min`, `max`, `step` |
+| `Boolean` | Toggle/checkbox | — |
+| `Select` | Dropdown | `options: [{value, label}]` |
+| `Multiselect` | Multi-select | `options: [{value, label}]` |
+| `Email` | Email input | — |
+| `Url` | URL input | — |
+| `Color` | Color picker | — |
+| `Date` | Date picker | — |
+| `Datetime` | Datetime picker | — |
+| `File` | File upload | `allowed_mimes`, `max_size_kb` |
+| `Image` | Image upload | `allowed_mimes`, `max_size_kb`, `max_width`, `max_height` |
+| `Json` | JSON editor | — |
+| `Password` | Masked input | — |
+| `Code` | Code editor | `language` |
 
 ### Setting Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | UUID | Auto-generated primary key |
-| `key` | String | Unique setting key |
-| `value` | Option\<JSON\> | Any JSON value (string, number, bool, array, object) |
+| `key` | String | Unique setting key (dot-notation recommended) |
+| `value` | Option\<JSON\> | The stored value (any JSON type) |
+| `setting_type` | `SettingType` | Input widget type for admin forms |
+| `parameters` | JSON | Constraints and options for the input widget |
+| `group_name` | String | Admin panel section/tab grouping |
+| `label` | String | Human-readable display name |
+| `description` | Option\<String\> | Help text shown below the input |
+| `sort_order` | i32 | Ordering within a group |
+| `is_public` | bool | Whether exposed to unauthenticated API |
 | `created_at` | Timestamp | Creation time |
 | `updated_at` | Option\<Timestamp\> | Last update time |
 
 ### Common Patterns
+
+**Admin settings API (list + update):**
+
+```rust
+// GET /admin/settings — list all settings grouped
+async fn list_settings(State(app): State<AppContext>) -> impl IntoResponse {
+    let groups = Setting::groups(&app).await?;
+    let mut result = json!({});
+    for group in groups {
+        let settings = Setting::by_group(&app, &group).await?;
+        result[&group] = json!(settings);
+    }
+    Json(result)
+}
+
+// PUT /admin/settings/:key — update a setting value
+async fn update_setting(
+    State(app): State<AppContext>,
+    Path(key): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    Setting::set(&app, &key, body["value"].clone()).await?;
+    StatusCode::NO_CONTENT
+}
+```
+
+**Public settings API (for frontend config):**
+
+```rust
+// GET /api/settings — only public settings
+async fn public_settings(State(app): State<AppContext>) -> impl IntoResponse {
+    let settings = Setting::public(&app).await?;
+    Json(settings.iter().map(|s| json!({
+        "key": s.key,
+        "value": s.value,
+    })).collect::<Vec<_>>())
+}
+```
 
 **Feature flags:**
 
@@ -479,27 +634,6 @@ let app_settings = Setting::by_prefix(&app, "app.").await?;
 let enabled = Setting::get_as::<bool>(&app, "feature.new_dashboard")
     .await?
     .unwrap_or(false);
-```
-
-**Grouped configuration:**
-
-```rust
-// Use dot-notation prefixes to group related settings
-Setting::set(&app, "mail.from_name", json!("My App")).await?;
-Setting::set(&app, "mail.from_address", json!("hello@example.com")).await?;
-
-// Retrieve all mail settings at once
-let mail_settings = Setting::by_prefix(&app, "mail.").await?;
-```
-
-**Structured values:**
-
-```rust
-Setting::set(&app, "business.hours", json!({
-    "monday": {"open": "09:00", "close": "17:00"},
-    "tuesday": {"open": "09:00", "close": "17:00"},
-    "saturday": null
-})).await?;
 ```
 
 ---
@@ -513,7 +647,7 @@ Setting::set(&app, "business.hours", json!({
 | Metadata | `HasMetadata` | Key-value pairs | `metadata` table |
 | Translations | `HasTranslations` | Multi-locale fields | `model_translations` table |
 | Countries | (static methods) | Reference data | `countries` table |
-| Settings | (static methods) | Global key-value store | `settings` table |
+| Settings | (static methods) | Admin-ready key-value store | `settings` table |
 
 All except Countries and Settings use polymorphic tables — one table serves all models via `type` + `id` columns. No per-model migrations needed.
 

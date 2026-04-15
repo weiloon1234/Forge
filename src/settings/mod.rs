@@ -1,25 +1,186 @@
 use serde::{Deserialize, Serialize};
 
-use crate::database::DbValue;
+use crate::database::{DbType, DbValue};
 use crate::foundation::{AppContext, Result};
 
-// ---------------------------------------------------------------------------
-// Setting struct (framework-provided key-value store)
-// ---------------------------------------------------------------------------
-
-/// A key-value setting record from the `settings` table.
+/// The input type used to render a setting in admin forms.
 ///
-/// Values are stored as JSONB, supporting strings, numbers, booleans,
-/// arrays, and nested objects.
+/// Each variant maps to a specific form widget. The `parameters` field
+/// on [`Setting`] provides additional constraints and options for the widget.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingType {
+    /// Single-line text input. Parameters: `max_length`, `placeholder`.
+    #[default]
+    Text,
+    /// Multi-line text input. Parameters: `max_length`, `rows`.
+    Textarea,
+    /// Numeric input. Parameters: `min`, `max`, `step`.
+    Number,
+    /// Toggle or checkbox.
+    Boolean,
+    /// Single-select dropdown. Parameters: `options` array of `{value, label}`.
+    Select,
+    /// Multi-select input. Parameters: `options` array of `{value, label}`.
+    Multiselect,
+    /// Email address input.
+    Email,
+    /// URL input.
+    Url,
+    /// Color picker. Value stored as hex string (e.g., `"#FF5733"`).
+    Color,
+    /// Date picker. Value stored as ISO date string.
+    Date,
+    /// Datetime picker. Value stored as ISO 8601 string.
+    Datetime,
+    /// File upload. Parameters: `allowed_mimes`, `max_size_kb`.
+    File,
+    /// Image upload. Parameters: `allowed_mimes`, `max_size_kb`, `max_width`, `max_height`.
+    Image,
+    /// JSON editor for structured data.
+    Json,
+    /// Password field (masked input).
+    Password,
+    /// Code editor. Parameters: `language` (e.g., `"css"`, `"html"`, `"javascript"`).
+    Code,
+}
+
+const SETTING_TYPE_VARIANTS: &[(&str, SettingType)] = &[
+    ("text", SettingType::Text),
+    ("textarea", SettingType::Textarea),
+    ("number", SettingType::Number),
+    ("boolean", SettingType::Boolean),
+    ("select", SettingType::Select),
+    ("multiselect", SettingType::Multiselect),
+    ("email", SettingType::Email),
+    ("url", SettingType::Url),
+    ("color", SettingType::Color),
+    ("date", SettingType::Date),
+    ("datetime", SettingType::Datetime),
+    ("file", SettingType::File),
+    ("image", SettingType::Image),
+    ("json", SettingType::Json),
+    ("password", SettingType::Password),
+    ("code", SettingType::Code),
+];
+
+impl SettingType {
+    pub fn as_str(&self) -> &'static str {
+        SETTING_TYPE_VARIANTS
+            .iter()
+            .find(|(_, v)| v == self)
+            .expect("all variants covered")
+            .0
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        SETTING_TYPE_VARIANTS
+            .iter()
+            .find(|(k, _)| *k == s)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// All available setting types.
+    pub fn all() -> &'static [(&'static str, SettingType)] {
+        SETTING_TYPE_VARIANTS
+    }
+}
+
+impl std::fmt::Display for SettingType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A setting record from the `settings` table.
+///
+/// Settings are key-value pairs with type metadata for admin form rendering.
+/// The `setting_type` and `parameters` fields define how the admin panel
+/// should display and validate the input.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Setting {
     pub id: String,
     pub key: String,
     pub value: Option<serde_json::Value>,
+    pub setting_type: SettingType,
+    pub parameters: serde_json::Value,
+    pub group_name: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub sort_order: i32,
+    pub is_public: bool,
+}
+
+/// Data required to create a new setting.
+#[derive(Clone, Debug)]
+pub struct NewSetting {
+    pub key: String,
+    pub value: Option<serde_json::Value>,
+    pub setting_type: SettingType,
+    pub parameters: serde_json::Value,
+    pub group_name: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub sort_order: i32,
+    pub is_public: bool,
+}
+
+impl NewSetting {
+    /// Create a new setting definition with required fields.
+    /// Defaults: `setting_type = Text`, `group_name = "general"`, `sort_order = 0`,
+    /// `is_public = false`, `parameters = {}`.
+    pub fn new(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: None,
+            setting_type: SettingType::Text,
+            parameters: serde_json::json!({}),
+            group_name: "general".to_string(),
+            label: label.into(),
+            description: None,
+            sort_order: 0,
+            is_public: false,
+        }
+    }
+
+    pub fn value(mut self, value: serde_json::Value) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    pub fn setting_type(mut self, setting_type: SettingType) -> Self {
+        self.setting_type = setting_type;
+        self
+    }
+
+    pub fn parameters(mut self, parameters: serde_json::Value) -> Self {
+        self.parameters = parameters;
+        self
+    }
+
+    pub fn group(mut self, group_name: impl Into<String>) -> Self {
+        self.group_name = group_name.into();
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn sort_order(mut self, sort_order: i32) -> Self {
+        self.sort_order = sort_order;
+        self
+    }
+
+    pub fn is_public(mut self, is_public: bool) -> Self {
+        self.is_public = is_public;
+        self
+    }
 }
 
 impl Setting {
-    /// Get a setting by key. Returns `None` if the key doesn't exist.
+    /// Get a setting value by key. Returns `None` if the key doesn't exist.
     pub async fn get(app: &AppContext, key: &str) -> Result<Option<serde_json::Value>> {
         let db = app.database()?;
         let rows = db
@@ -32,26 +193,6 @@ impl Setting {
             Some(DbValue::Json(v)) => Some(v.clone()),
             _ => None,
         }))
-    }
-
-    /// Set a setting value. Creates the key if it doesn't exist, updates if it does.
-    pub async fn set(
-        app: &AppContext,
-        key: &str,
-        value: serde_json::Value,
-    ) -> Result<()> {
-        let db = app.database()?;
-        db.raw_execute(
-            "INSERT INTO settings (key, value, created_at) \
-             VALUES ($1, $2, NOW()) \
-             ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()",
-            &[
-                DbValue::Text(key.to_string()),
-                DbValue::Json(value),
-            ],
-        )
-        .await?;
-        Ok(())
     }
 
     /// Get a setting as a typed value via serde deserialization.
@@ -73,6 +214,83 @@ impl Setting {
         default: serde_json::Value,
     ) -> Result<serde_json::Value> {
         Ok(Self::get(app, key).await?.unwrap_or(default))
+    }
+
+    /// Find a setting record by key (returns full Setting with metadata).
+    pub async fn find(app: &AppContext, key: &str) -> Result<Option<Setting>> {
+        let db = app.database()?;
+        let rows = db
+            .raw_query(
+                "SELECT * FROM settings WHERE key = $1",
+                &[DbValue::Text(key.to_string())],
+            )
+            .await?;
+        Ok(rows.first().map(row_to_setting))
+    }
+
+    /// Update only the value of an existing setting.
+    pub async fn set(app: &AppContext, key: &str, value: serde_json::Value) -> Result<()> {
+        let db = app.database()?;
+        db.raw_execute(
+            "UPDATE settings SET value = $2, updated_at = NOW() WHERE key = $1",
+            &[
+                DbValue::Text(key.to_string()),
+                DbValue::Json(value),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create a new setting from a [`NewSetting`] definition.
+    /// Returns error if the key already exists.
+    pub async fn create(app: &AppContext, new: NewSetting) -> Result<()> {
+        let db = app.database()?;
+        let value_param = match new.value {
+            Some(v) => DbValue::Json(v),
+            None => DbValue::Null(DbType::Json),
+        };
+        let desc_param = match new.description {
+            Some(d) => DbValue::Text(d),
+            None => DbValue::Null(DbType::Text),
+        };
+        db.raw_execute(
+            "INSERT INTO settings (key, value, setting_type, parameters, group_name, label, description, sort_order, is_public, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())",
+            &[
+                DbValue::Text(new.key),
+                value_param,
+                DbValue::Text(new.setting_type.as_str().to_string()),
+                DbValue::Json(new.parameters),
+                DbValue::Text(new.group_name),
+                DbValue::Text(new.label),
+                desc_param,
+                DbValue::Int32(new.sort_order),
+                DbValue::Bool(new.is_public),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Upsert an existing setting's value. Creates with defaults if the key doesn't exist.
+    ///
+    /// On conflict, only the `value` column is updated — existing metadata is preserved.
+    /// On first insert, database defaults apply (`setting_type = "text"`, `group_name = "general"`,
+    /// `label = ""`). Use [`Setting::create`] with [`NewSetting`] for full metadata control.
+    pub async fn upsert(app: &AppContext, key: &str, value: serde_json::Value) -> Result<()> {
+        let db = app.database()?;
+        db.raw_execute(
+            "INSERT INTO settings (key, value, created_at) \
+             VALUES ($1, $2, NOW()) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            &[
+                DbValue::Text(key.to_string()),
+                DbValue::Json(value),
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Delete a setting by key. Returns `true` if the key existed.
@@ -99,11 +317,26 @@ impl Setting {
         Ok(!rows.is_empty())
     }
 
-    /// List all settings, ordered by key.
+    /// List all settings, ordered by group then sort_order.
     pub async fn all(app: &AppContext) -> Result<Vec<Setting>> {
         let db = app.database()?;
         let rows = db
-            .raw_query("SELECT * FROM settings ORDER BY key", &[])
+            .raw_query(
+                "SELECT * FROM settings ORDER BY group_name, sort_order, key",
+                &[],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_setting).collect())
+    }
+
+    /// List settings in a specific group, ordered by sort_order.
+    pub async fn by_group(app: &AppContext, group: &str) -> Result<Vec<Setting>> {
+        let db = app.database()?;
+        let rows = db
+            .raw_query(
+                "SELECT * FROM settings WHERE group_name = $1 ORDER BY sort_order, key",
+                &[DbValue::Text(group.to_string())],
+            )
             .await?;
         Ok(rows.iter().map(row_to_setting).collect())
     }
@@ -114,25 +347,62 @@ impl Setting {
         let pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
         let rows = db
             .raw_query(
-                "SELECT * FROM settings WHERE key LIKE $1 ORDER BY key",
+                "SELECT * FROM settings WHERE key LIKE $1 ESCAPE '\\' ORDER BY group_name, sort_order, key",
                 &[DbValue::Text(pattern)],
             )
             .await?;
         Ok(rows.iter().map(row_to_setting).collect())
     }
-}
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+    /// List only public settings (safe to expose to frontend/unauthenticated API).
+    pub async fn public(app: &AppContext) -> Result<Vec<Setting>> {
+        let db = app.database()?;
+        let rows = db
+            .raw_query(
+                "SELECT * FROM settings WHERE is_public = true ORDER BY group_name, sort_order, key",
+                &[],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_setting).collect())
+    }
+
+    /// List all distinct group names, ordered alphabetically.
+    pub async fn groups(app: &AppContext) -> Result<Vec<String>> {
+        let db = app.database()?;
+        let rows = db
+            .raw_query(
+                "SELECT DISTINCT group_name FROM settings ORDER BY group_name",
+                &[],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.text("group_name")).collect())
+    }
+}
 
 fn row_to_setting(row: &crate::database::DbRecord) -> Setting {
     Setting {
-        id: row.text("id"),
+        id: row.text_or_uuid("id"),
         key: row.text("key"),
         value: match row.get("value") {
             Some(DbValue::Json(v)) => Some(v.clone()),
             _ => None,
+        },
+        setting_type: SettingType::parse(&row.text("setting_type"))
+            .unwrap_or(SettingType::Text),
+        parameters: match row.get("parameters") {
+            Some(DbValue::Json(v)) => v.clone(),
+            _ => serde_json::json!({}),
+        },
+        group_name: row.text("group_name"),
+        label: row.text("label"),
+        description: row.optional_text("description"),
+        sort_order: match row.get("sort_order") {
+            Some(DbValue::Int32(v)) => *v,
+            _ => 0,
+        },
+        is_public: match row.get("is_public") {
+            Some(DbValue::Bool(v)) => *v,
+            _ => false,
         },
     }
 }
@@ -142,14 +412,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn row_to_setting_handles_default() {
-        // Structural test — actual DB tests are in acceptance tests
-        let setting = Setting {
-            id: "test".to_string(),
-            key: "app.name".to_string(),
-            value: Some(serde_json::json!("My App")),
-        };
-        assert_eq!(setting.key, "app.name");
-        assert_eq!(setting.value, Some(serde_json::json!("My App")));
+    fn setting_type_roundtrip() {
+        for (s, st) in SettingType::all() {
+            assert_eq!(st.as_str(), *s);
+            let parsed = SettingType::parse(s).unwrap();
+            assert_eq!(&parsed, st);
+        }
+    }
+
+    #[test]
+    fn setting_type_serde_roundtrip() {
+        let st = SettingType::Select;
+        let json = serde_json::to_string(&st).unwrap();
+        assert_eq!(json, "\"select\"");
+        let parsed: SettingType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SettingType::Select);
+    }
+
+    #[test]
+    fn new_setting_builder() {
+        let s = NewSetting::new("app.name", "Application Name")
+            .value(serde_json::json!("My App"))
+            .setting_type(SettingType::Text)
+            .group("general")
+            .description("The name of your application")
+            .sort_order(1)
+            .is_public(true)
+            .parameters(serde_json::json!({"max_length": 255}));
+
+        assert_eq!(s.key, "app.name");
+        assert_eq!(s.label, "Application Name");
+        assert_eq!(s.setting_type, SettingType::Text);
+        assert_eq!(s.group_name, "general");
+        assert_eq!(s.sort_order, 1);
+        assert!(s.is_public);
     }
 }

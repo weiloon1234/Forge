@@ -7,7 +7,7 @@ const BUILTIN_SEED: &str = include_str!("seed.json");
 
 /// Country activation status.
 #[derive(Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS)]
-#[ts(export, rename_all = "snake_case")]
+#[ts(export)]
 pub enum CountryStatus {
     Enabled,
     #[default]

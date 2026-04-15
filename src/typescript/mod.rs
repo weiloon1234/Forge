@@ -54,24 +54,21 @@ pub fn export_all(dir: &Path) -> Result<()> {
         names.push(ts_type.name);
     }
 
-    // Append runtime values arrays for AppEnum types
+    // Rewrite AppEnum files entirely — ts-rs may generate wrong casing,
+    // so we regenerate from ForgeAppEnum::options() which is always correct.
     for enum_vals in inventory::iter::<TsEnumValues> {
         let file_path = dir.join(format!("{}.ts", enum_vals.name));
-        if file_path.exists() {
-            let values = (enum_vals.values_fn)();
-            let values_str = values
-                .iter()
-                .map(|v| format!("\"{}\"", v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let line = format!(
-                "\nexport const {}Values: {}[] = [{}];\n",
-                enum_vals.name, enum_vals.name, values_str
-            );
-            let mut content = std::fs::read_to_string(&file_path).map_err(Error::other)?;
-            content.push_str(&line);
-            std::fs::write(&file_path, content).map_err(Error::other)?;
-        }
+        let values = (enum_vals.values_fn)();
+        let type_union = values.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(" | ");
+        let array_items = values.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(", ");
+        let content = format!(
+            "// Auto-generated from AppEnum. Do not edit.\n\n\
+             export type {} = {};\n\n\
+             export const {}Values: {}[] = [{}];\n",
+            enum_vals.name, type_union,
+            enum_vals.name, enum_vals.name, array_items
+        );
+        std::fs::write(&file_path, content).map_err(Error::other)?;
     }
 
     names.sort();

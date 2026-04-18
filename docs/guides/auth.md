@@ -362,14 +362,14 @@ Unauthorized and forbidden auth failures now return stable machine-friendly code
 
 ```json
 {
-  "message": "Unauthorized",
+  "message": "Authentication credentials are required.",
   "status": 401,
   "code": "missing_auth_credentials",
   "message_key": "auth.missing_auth_credentials"
 }
 ```
 
-This keeps server responses consistent while giving clients a translation-friendly key for UI copy.
+This keeps server responses consistent while giving clients a translation-friendly key for UI copy. The generic `Error` path now preserves both `error_code` and `message_key` for auth-originated failures too.
 
 ---
 

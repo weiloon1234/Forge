@@ -20,6 +20,7 @@ pub enum Error {
         status: u16,
         message: String,
         error_code: Option<String>,
+        message_key: Option<String>,
     },
 
     /// Validation errors with per-field detail. Maps to HTTP 422.
@@ -50,6 +51,7 @@ impl Error {
             status,
             message: message.into(),
             error_code: None,
+            message_key: None,
         }
     }
 
@@ -63,6 +65,22 @@ impl Error {
             status,
             message: message.into(),
             error_code: Some(code.into()),
+            message_key: None,
+        }
+    }
+
+    /// Create an HTTP error with optional machine-readable metadata.
+    pub fn http_with_metadata(
+        status: u16,
+        message: impl Into<String>,
+        error_code: Option<String>,
+        message_key: Option<String>,
+    ) -> Self {
+        Self::Http {
+            status,
+            message: message.into(),
+            error_code,
+            message_key,
         }
     }
 
@@ -92,9 +110,13 @@ impl Error {
 
     pub fn payload(&self) -> serde_json::Value {
         let status = self.status_code();
-        let error_code = match self {
-            Error::Http { error_code, .. } => error_code.clone(),
-            _ => None,
+        let (error_code, message_key) = match self {
+            Error::Http {
+                error_code,
+                message_key,
+                ..
+            } => (error_code.clone(), message_key.clone()),
+            _ => (None, None),
         };
 
         let mut payload = serde_json::json!({
@@ -104,6 +126,9 @@ impl Error {
 
         if let Some(error_code) = error_code {
             payload["error_code"] = serde_json::Value::String(error_code);
+        }
+        if let Some(message_key) = message_key {
+            payload["message_key"] = serde_json::Value::String(message_key);
         }
 
         payload
@@ -117,6 +142,8 @@ pub struct ErrorResponse {
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<crate::validation::FieldError>>,
 }
@@ -134,6 +161,10 @@ impl IntoResponse for Error {
             status: status.as_u16(),
             error_code: match &self {
                 Error::Http { error_code, .. } => error_code.clone(),
+                _ => None,
+            },
+            message_key: match &self {
+                Error::Http { message_key, .. } => message_key.clone(),
                 _ => None,
             },
             errors: None,
@@ -155,10 +186,29 @@ impl From<crate::auth::AuthError> for Error {
         let status = error.status_code().as_u16();
         let message = error.message().to_string();
         let error_code = error.code().map(|code| code.as_str().to_string());
-        Self::Http {
-            status,
-            message,
-            error_code,
-        }
+        let message_key = error.code().map(|code| code.translation_key().to_string());
+        Self::http_with_metadata(status, message, error_code, message_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::auth::{AuthError, AuthErrorCode};
+
+    use super::Error;
+
+    #[test]
+    fn auth_error_conversion_preserves_message_metadata() {
+        let error = Error::from(AuthError::unauthorized_code(
+            AuthErrorCode::MissingAuthCredentials,
+        ));
+        let payload = error.payload();
+
+        assert_eq!(
+            payload["message"],
+            "Authentication credentials are required."
+        );
+        assert_eq!(payload["error_code"], "missing_auth_credentials");
+        assert_eq!(payload["message_key"], "auth.missing_auth_credentials");
     }
 }

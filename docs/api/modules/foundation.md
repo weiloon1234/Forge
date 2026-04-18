@@ -12,6 +12,7 @@ enum Error { Message, Http, Validation, NotFound, Other }
   fn message(message: impl Into<String>) -> Self
   fn http(status: u16, message: impl Into<String>) -> Self
   fn http_with_code( status: u16, message: impl Into<String>, code: impl Into<String>, ) -> Self
+  fn http_with_metadata( status: u16, message: impl Into<String>, error_code: Option<String>, message_key: Option<String>, ) -> Self
   fn not_found(message: impl Into<String>) -> Self
   fn other<E>(error: E) -> Self
   fn payload(&self) -> Value

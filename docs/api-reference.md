@@ -77,7 +77,7 @@ Core bootstrapping: app builder, context, DI container, error handling.
 
 | Name | Variants |
 |------|----------|
-| `Error` | `Message(String)`, `Http { status, message, error_code }`, `Validation(ValidationErrors)`, `NotFound(String)`, `Other(anyhow::Error)` |
+| `Error` | `Message(String)`, `Http { status, message, error_code, message_key }`, `Validation(ValidationErrors)`, `NotFound(String)`, `Other(anyhow::Error)` |
 
 ### Traits
 
@@ -100,6 +100,7 @@ type Result<T> = std::result::Result<T, Error>;
 Error::message(message: impl Into<String>) -> Self           // 500
 Error::http(status: u16, message: impl Into<String>) -> Self  // custom status
 Error::http_with_code(status, message, code) -> Self           // custom + error_code
+Error::http_with_metadata(status, message, error_code, message_key) -> Self
 Error::not_found(message: impl Into<String>) -> Self           // 404
 Error::other<E: Into<anyhow::Error>>(error: E) -> Self         // 500
 ```

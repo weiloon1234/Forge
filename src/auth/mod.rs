@@ -249,8 +249,21 @@ impl AuthErrorCode {
 
     pub const fn default_message(self) -> &'static str {
         match self {
-            Self::MissingRequiredPermission | Self::MaxConnectionsPerUserExceeded => "Forbidden",
-            _ => "Unauthorized",
+            Self::InvalidBearerToken => "The bearer token is invalid.",
+            Self::InvalidRefreshToken => "The refresh token is invalid or expired.",
+            Self::MissingSessionCookie => "The session cookie is missing.",
+            Self::InvalidSession => "The session is invalid or has expired.",
+            Self::MissingAuthorizationHeader => "The Authorization header is missing.",
+            Self::InvalidAuthorizationHeader => "The Authorization header is invalid.",
+            Self::InvalidAuthorizationScheme => "The Authorization scheme is invalid.",
+            Self::MissingBearerToken => "The bearer token is missing.",
+            Self::MissingAuthCredentials => "Authentication credentials are required.",
+            Self::MissingRequiredPermission => "You do not have permission to perform this action.",
+            Self::AuthenticatedActorNotFound => "The authenticated actor could not be resolved.",
+            Self::AuthenticatedModelNotFound => "The authenticated model could not be resolved.",
+            Self::MaxConnectionsPerUserExceeded => {
+                "You have reached the maximum number of allowed connections."
+            }
         }
     }
 }

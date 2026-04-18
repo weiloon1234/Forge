@@ -398,7 +398,10 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
         serde_json::from_str(anonymous_error.to_text().unwrap()).unwrap();
     assert_eq!(anonymous_error.channel, SYSTEM_CHANNEL);
     assert_eq!(anonymous_error.event, ERROR_EVENT);
-    assert_eq!(anonymous_error.payload["message"], "Unauthorized");
+    assert_eq!(
+        anonymous_error.payload["message"],
+        "Authentication credentials are required."
+    );
     assert_eq!(anonymous_error.payload["code"], "missing_auth_credentials");
     assert_eq!(
         anonymous_error.payload["message_key"],
@@ -424,7 +427,10 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
     let guest_error = guest.next().await.unwrap().unwrap();
     let guest_error: ServerMessage = serde_json::from_str(guest_error.to_text().unwrap()).unwrap();
     assert_eq!(guest_error.event, ERROR_EVENT);
-    assert_eq!(guest_error.payload["message"], "Forbidden");
+    assert_eq!(
+        guest_error.payload["message"],
+        "You do not have permission to perform this action."
+    );
     assert_eq!(guest_error.payload["code"], "missing_required_permission");
     assert_eq!(
         guest_error.payload["message_key"],

@@ -520,6 +520,11 @@ mod tests {
     fn invalid_refresh_token_error_uses_standardized_auth_code() {
         let payload = invalid_refresh_token_error().payload();
         assert_eq!(payload["status"], 401);
+        assert_eq!(
+            payload["message"],
+            "The refresh token is invalid or expired."
+        );
         assert_eq!(payload["error_code"], "invalid_refresh_token");
+        assert_eq!(payload["message_key"], "auth.invalid_refresh_token");
     }
 }

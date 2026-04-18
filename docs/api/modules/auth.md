@@ -126,6 +126,9 @@ struct TokenPair
 struct TokenResponse
   fn new(tokens: TokenPair) -> Self
   fn into_inner(self) -> TokenPair
+struct WsTokenResponse
+  fn new(token: impl Into<String>) -> Self
+  fn into_inner(self) -> String
 trait HasToken: Authenticatable
   fn token_actor_id(&self) -> String
   fn create_token<'life0, 'life1, 'async_trait>(

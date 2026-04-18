@@ -151,6 +151,7 @@ mod tests {
             "RefreshTokenRequest.ts",
             "TokenPair.ts",
             "TokenResponse.ts",
+            "WsTokenResponse.ts",
         ] {
             assert!(
                 dir.path().join(file).exists(),
@@ -218,6 +219,12 @@ mod tests {
         assert!(
             !datatable_pagination_meta.contains("bigint"),
             "did not expect bigint in DatatablePaginationMeta.ts:\n{datatable_pagination_meta}"
+        );
+
+        let index = fs::read_to_string(dir.path().join("index.ts")).unwrap();
+        assert!(
+            index.contains("export type { WsTokenResponse } from \"./WsTokenResponse\";"),
+            "expected index.ts to re-export WsTokenResponse:\n{index}"
         );
     }
 }

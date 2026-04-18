@@ -328,6 +328,13 @@ Refreshing now preserves the original token name and scoped abilities automatica
 context.publish("auth.tokens", TokenResponse::new(tokens)).await?;
 ```
 
+If a portal only needs a short-lived WebSocket auth token string, Forge now also provides a tiny typed wrapper:
+
+```rust
+let ws_token = "ws_abc123";
+context.publish("auth.ws_token", WsTokenResponse::new(ws_token)).await?;
+```
+
 ### Revoking Tokens
 
 ```rust

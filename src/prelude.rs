@@ -5,6 +5,7 @@ pub use crate::auth::{
     session::SessionManager,
     token::{
         HasToken, RefreshTokenRequest, TokenAuthenticator, TokenManager, TokenPair, TokenResponse,
+        WsTokenResponse,
     },
     AccessScope, Actor, Auth, AuthError, AuthErrorCode, AuthManager, Authenticatable,
     AuthenticatableRegistry, AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor,

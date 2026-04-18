@@ -70,6 +70,51 @@ impl From<TokenPair> for TokenResponse {
     }
 }
 
+/// Small typed wrapper for short-lived WebSocket auth token payloads.
+///
+/// ```ignore
+/// context.publish("auth.ws_token", WsTokenResponse::new(ws_token)).await?;
+/// ```
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    ts_rs::TS,
+    forge_macros::TS,
+    forge_macros::ApiSchema,
+)]
+#[ts(export)]
+pub struct WsTokenResponse {
+    pub token: String,
+}
+
+impl WsTokenResponse {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+        }
+    }
+
+    pub fn into_inner(self) -> String {
+        self.token
+    }
+}
+
+impl From<String> for WsTokenResponse {
+    fn from(token: String) -> Self {
+        Self::new(token)
+    }
+}
+
+impl From<&str> for WsTokenResponse {
+    fn from(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
 /// Manages personal access tokens: issuance, validation, refresh, and revocation.
 ///
 /// Stored as a singleton in the container, accessible via `app.tokens()`.
@@ -481,7 +526,9 @@ pub trait HasToken: super::Authenticatable {
 
 #[cfg(test)]
 mod tests {
-    use super::{invalid_refresh_token_error, token_abilities_from_row, TokenRowMetadata};
+    use super::{
+        invalid_refresh_token_error, token_abilities_from_row, TokenRowMetadata, WsTokenResponse,
+    };
     use crate::database::{DbRecord, DbValue};
 
     #[test]
@@ -526,5 +573,17 @@ mod tests {
         );
         assert_eq!(payload["error_code"], "invalid_refresh_token");
         assert_eq!(payload["message_key"], "auth.invalid_refresh_token");
+    }
+
+    #[test]
+    fn ws_token_response_wraps_token_values() {
+        let response = WsTokenResponse::new("ws_123");
+        assert_eq!(response.token, "ws_123");
+        assert_eq!(response.clone().into_inner(), "ws_123");
+        assert_eq!(WsTokenResponse::from("ws_456").token, "ws_456");
+        assert_eq!(
+            WsTokenResponse::from(String::from("ws_789")).token,
+            "ws_789"
+        );
     }
 }

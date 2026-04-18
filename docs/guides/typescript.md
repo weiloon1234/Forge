@@ -155,6 +155,7 @@ These types are auto-exported by the framework (no configuration needed):
 | `TokenPair` | `forge::auth::token` | `{ access_token, refresh_token, ... }` |
 | `RefreshTokenRequest` | `forge::auth::token` | `{ refresh_token }` |
 | `TokenResponse` | `forge::auth::token` | `{ tokens: TokenPair }` |
+| `WsTokenResponse` | `forge::auth::token` | `{ token }` |
 | `MessageResponse` | `forge::http::response` | `{ message }` |
 | `DatatableRequest` | `forge::datatable::request` | typed filters + sorts + pagination |
 | `DatatableJsonResponse` | `forge::datatable::response` | typed columns + filters + applied filters + sorts |
@@ -179,6 +180,7 @@ frontend/shared/types/generated/
 ├── RefreshTokenRequest.ts      ← from framework
 ├── TokenPair.ts                ← from framework
 ├── TokenResponse.ts            ← from framework
+├── WsTokenResponse.ts          ← from framework
 └── ...
 ```
 
@@ -195,6 +197,7 @@ export type { OrderStatus } from "./OrderStatus";
 export type { RefreshTokenRequest } from "./RefreshTokenRequest";
 export type { TokenPair } from "./TokenPair";
 export type { TokenResponse } from "./TokenResponse";
+export type { WsTokenResponse } from "./WsTokenResponse";
 ```
 
 ---

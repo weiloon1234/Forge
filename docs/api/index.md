@@ -10,7 +10,7 @@ Load only the file you need — don't read them all at once.
 | [root](root.md) | Crate root: derive macros, re-exports | 16L |
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 26L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 39L |
-| [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 136L |
+| [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 139L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 26L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
 | [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 62L |
@@ -41,4 +41,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 33 modules, 2894 lines across all files.**
+**Total: 33 modules, 2897 lines across all files.**

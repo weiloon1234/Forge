@@ -144,11 +144,7 @@ pub(crate) fn fallback_message(field: &str, code: &str, params: &[(&str, &str)])
         "exists" => format!("The selected {} is invalid.", field),
         "app_enum" => format!("The selected {} is invalid.", field),
         "image" => format!("The {} must be an image.", field),
-        "max_file_size" => format!(
-            "The {} must not exceed {}KB.",
-            field,
-            get_param("max")
-        ),
+        "max_file_size" => format!("The {} must not exceed {}KB.", field, get_param("max")),
         "max_dimensions" => format!(
             "The {} dimensions must not exceed {}x{} pixels.",
             field,

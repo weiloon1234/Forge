@@ -18,9 +18,20 @@ struct HttpRegistrar
   fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self
   fn merge(&mut self, router: HttpRouter) -> &mut Self
   fn group( &mut self, prefix: &str, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>, ) -> Result<&mut Self>
+  fn group_with_options( &mut self, prefix: &str, options: HttpRouteOptions, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>, ) -> Result<&mut Self>
   fn api_version( &mut self, version: u32, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>, ) -> Result<&mut Self>
+  fn resource( &mut self, name: &str, path: &str, routes: HttpResourceRoutes, ) -> &mut Self
+  fn resource_with_options( &mut self, name: &str, path: &str, routes: HttpResourceRoutes, options: HttpRouteOptions, ) -> &mut Self
   fn into_router(self, app: AppContext) -> Router
   fn into_router_with_middlewares( self, app: AppContext, middlewares: Vec<MiddlewareConfig>, ) -> Router
+struct HttpResourceRoutes
+  fn new() -> Self
+  fn index(self, route: MethodRouter<AppContext>) -> Self
+  fn store(self, route: MethodRouter<AppContext>) -> Self
+  fn show(self, route: MethodRouter<AppContext>) -> Self
+  fn update(self, route: MethodRouter<AppContext>) -> Self
+  fn destroy(self, route: MethodRouter<AppContext>) -> Self
+  fn id_param(self, id_param: impl Into<String>) -> Self
 struct HttpRouteOptions
   fn new() -> Self
   fn guard<I>(self, guard: I) -> Self
@@ -30,6 +41,12 @@ struct HttpRouteOptions
   fn middleware_group(self, name: impl Into<String>) -> Self
   fn rate_limit(self, rate_limit: RateLimit) -> Self
   fn document(self, doc: RouteDoc) -> Self
+  fn tag(self, tag: &str) -> Self
+  fn summary(self, summary: &str) -> Self
+  fn description(self, description: &str) -> Self
+  fn request<T: ApiSchema>(self) -> Self
+  fn response<T: ApiSchema>(self, status: u16) -> Self
+  fn deprecated(self) -> Self
 ```
 
 ## forge::http::cookie
@@ -184,6 +201,14 @@ trait ApiResource
   fn make(item: &T) -> Value
   fn collection(items: &[T]) -> Vec<Value>
   fn paginated(paginated: &Paginated<T>, base_url: &str) -> Value
+```
+
+## forge::http::response
+
+```rust
+struct MessageResponse
+  fn new(message: impl Into<String>) -> Self
+  fn ok() -> Self
 ```
 
 ## forge::http::routes

@@ -2611,7 +2611,8 @@ where
         with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
                 let prepared =
-                    prepare_create_many_for_execution(&create_many, app, transaction, actor).await?;
+                    prepare_create_many_for_execution(&create_many, app, transaction, actor)
+                        .await?;
                 transaction
                     .execute_compiled_with(
                         &prepared.compiled_sql(false)?,
@@ -2631,7 +2632,8 @@ where
         with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
                 let prepared =
-                    prepare_create_many_for_execution(&create_many, app, transaction, actor).await?;
+                    prepare_create_many_for_execution(&create_many, app, transaction, actor)
+                        .await?;
                 let records = transaction
                     .query_records_with(&prepared.compiled_sql(true)?, create_many.options.clone())
                     .await?;
@@ -2860,7 +2862,8 @@ where
         let update = self.clone();
         with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
-                let prepared = prepare_update_for_execution(&update, app, transaction, actor).await?;
+                let prepared =
+                    prepare_update_for_execution(&update, app, transaction, actor).await?;
                 transaction
                     .execute_compiled_with(&prepared.compiled_sql(false)?, update.options.clone())
                     .await
@@ -2876,7 +2879,8 @@ where
         let update = self.clone();
         with_model_write_transaction(executor, |app, transaction, actor| {
             Box::pin(async move {
-                let prepared = prepare_update_for_execution(&update, app, transaction, actor).await?;
+                let prepared =
+                    prepare_update_for_execution(&update, app, transaction, actor).await?;
                 let records = transaction
                     .query_records_with(&prepared.compiled_sql(true)?, update.options.clone())
                     .await?;
@@ -3312,8 +3316,9 @@ where
                     on_conflict: create_many.on_conflict.clone(),
                     options: create_many.options.clone(),
                 };
-                created
-                    .extend(create_model_records_in_transaction(&create, app, transaction, actor).await?);
+                created.extend(
+                    create_model_records_in_transaction(&create, app, transaction, actor).await?,
+                );
             }
             Ok(created)
         })
@@ -3385,9 +3390,9 @@ where
     update.validate()?;
     let update = update.clone();
     with_model_write_transaction(executor, |app, transaction, actor| {
-        Box::pin(
-            async move { update_model_records_in_transaction(&update, app, transaction, actor).await },
-        )
+        Box::pin(async move {
+            update_model_records_in_transaction(&update, app, transaction, actor).await
+        })
     })
     .await
 }
@@ -3478,7 +3483,9 @@ where
     delete.validate()?;
     let delete = delete.clone();
     with_model_write_transaction(executor, |app, transaction, actor| {
-        Box::pin(async move { delete_model_rows_in_transaction(&delete, app, transaction, actor).await })
+        Box::pin(
+            async move { delete_model_rows_in_transaction(&delete, app, transaction, actor).await },
+        )
     })
     .await
 }

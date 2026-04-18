@@ -147,7 +147,8 @@ impl AttachmentUploadBuilder {
     }
 
     pub fn resize(mut self, width: u32, height: u32) -> Self {
-        self.image_transforms.push(ImageTransform::Resize(width, height));
+        self.image_transforms
+            .push(ImageTransform::Resize(width, height));
         self
     }
 
@@ -164,8 +165,7 @@ impl AttachmentUploadBuilder {
     }
 
     pub fn quality(mut self, quality: u8) -> Self {
-        self.image_transforms
-            .push(ImageTransform::Quality(quality));
+        self.image_transforms.push(ImageTransform::Quality(quality));
         self
     }
 
@@ -322,11 +322,7 @@ pub trait HasAttachments: Send + Sync {
             .await
     }
 
-    async fn attachment(
-        &self,
-        app: &AppContext,
-        collection: &str,
-    ) -> Result<Option<Attachment>> {
+    async fn attachment(&self, app: &AppContext, collection: &str) -> Result<Option<Attachment>> {
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -345,11 +341,7 @@ pub trait HasAttachments: Send + Sync {
         Ok(rows.first().map(row_to_attachment))
     }
 
-    async fn attachments(
-        &self,
-        app: &AppContext,
-        collection: &str,
-    ) -> Result<Vec<Attachment>> {
+    async fn attachments(&self, app: &AppContext, collection: &str) -> Result<Vec<Attachment>> {
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -500,4 +492,3 @@ fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
         },
     }
 }
-

@@ -4,8 +4,7 @@ use sha2::Sha256;
 /// Compute HMAC-SHA256 of a message using the given key.
 /// Returns lowercase hex-encoded digest.
 pub fn hmac_sha256_hex(key: &[u8], message: &str) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(message.as_bytes());
     let result = mac.finalize().into_bytes();
     crate::support::sha256::hex_encode(&result)

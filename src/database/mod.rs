@@ -34,7 +34,7 @@ pub use projection::{Projection, ProjectionField, ProjectionFieldInfo, Projectio
 pub use query::{
     Case, CreateManyModel, CreateModel, CreateRow, Cte, CursorInfo, CursorMeta, CursorPaginated,
     CursorPagination, DeleteModel, JsonExprBuilder, ModelQuery, Paginated, PaginatedResponse,
-    PaginationLinks, PaginationMeta, Pagination, ProjectionQuery, Query, RestoreModel, Sql,
+    Pagination, PaginationLinks, PaginationMeta, ProjectionQuery, Query, RestoreModel, Sql,
     UpdateModel, Window, WindowBuilder,
 };
 pub use relation::{

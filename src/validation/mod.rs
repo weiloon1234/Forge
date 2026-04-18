@@ -8,10 +8,10 @@ mod rules;
 mod types;
 mod validator;
 
-pub use context::{RuleContext, RuleRegistry, ValidationRule};
-pub use extractor::{RequestValidator, Validated};
-pub use field::{EachValidator, FieldValidator};
 pub use axum::extract::Multipart;
+pub use context::{RuleContext, RuleRegistry, ValidationRule};
+pub use extractor::{JsonValidated, RequestValidator, Validated};
+pub use field::{EachValidator, FieldValidator};
 pub use from_multipart::FromMultipart;
 pub use types::{FieldError, ValidationError, ValidationErrors};
 pub use validator::Validator;

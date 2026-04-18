@@ -9,8 +9,9 @@ use crate::support::{Collection, Date, DateTime};
 // Filter operation/value/input
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum DatatableFilterOp {
     Eq,
     NotEq,
@@ -31,8 +32,9 @@ pub enum DatatableFilterOp {
     LikeAny,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum DatatableFilterValue {
     Text(String),
     Bool(bool),
@@ -40,7 +42,8 @@ pub enum DatatableFilterValue {
     Values(Vec<String>),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableFilterInput {
     pub field: String,
     pub op: DatatableFilterOp,
@@ -51,9 +54,11 @@ pub struct DatatableFilterInput {
 // Sort input
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableSortInput {
     pub field: String,
+    #[ts(type = "\"asc\" | \"desc\"")]
     pub direction: OrderDirection,
 }
 
@@ -69,7 +74,8 @@ const fn default_per_page() -> u64 {
     20
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableRequest {
     #[serde(default = "default_page")]
     pub page: u64,
@@ -163,10 +169,7 @@ impl DatatableRequest {
             }
         }
 
-        let page: u64 = params
-            .get("page")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
+        let page: u64 = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
         let per_page: u64 = params
             .get("per_page")
             .and_then(|v| v.parse().ok())

@@ -10,7 +10,7 @@ Load only the file you need — don't read them all at once.
 | [root](root.md) | Crate root: derive macros, re-exports | 16L |
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 26L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 39L |
-| [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 118L |
+| [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 136L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 26L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
 | [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 62L |
@@ -19,8 +19,8 @@ Load only the file you need — don't read them all at once.
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 175L |
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 159L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 22L |
-| [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 128L |
-| [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 201L |
+| [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 129L |
+| [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 226L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
 | [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 48L |
@@ -28,7 +28,7 @@ Load only the file you need — don't read them all at once.
 | [logging](modules/logging.md) | Structured logging, observability, health probes, diagnostics | 64L |
 | [metadata](modules/metadata.md) | Key-value metadata for models (HasMetadata) | 21L |
 | [notifications](modules/notifications.md) | Multi-channel notifications: email, database, broadcast | 35L |
-| [openapi](modules/openapi.md) | OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc) | 37L |
+| [openapi](modules/openapi.md) | OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc) | 38L |
 | [plugin](modules/plugin.md) | Compile-time plugin system with dependency validation | 98L |
 | [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 40L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 48L |
@@ -38,7 +38,7 @@ Load only the file you need — don't read them all at once.
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 35L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
 | [typescript](modules/typescript.md) |  | 13L |
-| [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 146L |
+| [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 147L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 33 modules, 2845 lines across all files.**
+**Total: 33 modules, 2891 lines across all files.**

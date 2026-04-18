@@ -17,11 +17,7 @@ pub struct PasswordResetManager {
 impl PasswordResetManager {
     pub(crate) fn new(database: Arc<DatabaseManager>, expiry_minutes: u64) -> Self {
         Self {
-            store: TokenStore::new(
-                database,
-                Duration::from_secs(expiry_minutes * 60),
-                "reset",
-            ),
+            store: TokenStore::new(database, Duration::from_secs(expiry_minutes * 60), "reset"),
         }
     }
 
@@ -30,20 +26,14 @@ impl PasswordResetManager {
     /// Returns the plaintext token (to be sent to the user).
     /// The token hash is stored in the database.
     pub async fn create_token<M: Authenticatable>(&self, email: &str) -> Result<String> {
-        self.store
-            .create_token(email, M::guard().to_string())
-            .await
+        self.store.create_token(email, M::guard().to_string()).await
     }
 
     /// Validate a password reset token.
     ///
     /// Returns `Ok(())` if the token is valid and not expired.
     /// Deletes the token after successful validation (single use).
-    pub async fn validate_token<M: Authenticatable>(
-        &self,
-        email: &str,
-        token: &str,
-    ) -> Result<()> {
+    pub async fn validate_token<M: Authenticatable>(&self, email: &str, token: &str) -> Result<()> {
         self.store
             .validate_token(email, token, M::guard().to_string())
             .await

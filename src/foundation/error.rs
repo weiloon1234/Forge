@@ -89,6 +89,25 @@ impl Error {
             Error::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
+
+    pub fn payload(&self) -> serde_json::Value {
+        let status = self.status_code();
+        let error_code = match self {
+            Error::Http { error_code, .. } => error_code.clone(),
+            _ => None,
+        };
+
+        let mut payload = serde_json::json!({
+            "message": self.to_string(),
+            "status": status.as_u16(),
+        });
+
+        if let Some(error_code) = error_code {
+            payload["error_code"] = serde_json::Value::String(error_code);
+        }
+
+        payload
+    }
 }
 
 /// The standard JSON error response body.
@@ -110,15 +129,13 @@ impl IntoResponse for Error {
         }
 
         let status = self.status_code();
-        let error_code = match &self {
-            Error::Http { error_code, .. } => error_code.clone(),
-            _ => None,
-        };
-        let message = self.to_string();
         let body = ErrorResponse {
-            message,
+            message: self.to_string(),
             status: status.as_u16(),
-            error_code,
+            error_code: match &self {
+                Error::Http { error_code, .. } => error_code.clone(),
+                _ => None,
+            },
             errors: None,
         };
         (status, Json(body)).into_response()
@@ -135,15 +152,13 @@ impl From<crate::validation::ValidationErrors> for Error {
 /// Allow `AuthError` to be converted into `Error`.
 impl From<crate::auth::AuthError> for Error {
     fn from(error: crate::auth::AuthError) -> Self {
-        let (status, message) = match &error {
-            crate::auth::AuthError::Unauthorized(msg) => (401, msg.clone()),
-            crate::auth::AuthError::Forbidden(msg) => (403, msg.clone()),
-            crate::auth::AuthError::Internal(msg) => (500, msg.clone()),
-        };
+        let status = error.status_code().as_u16();
+        let message = error.message().to_string();
+        let error_code = error.code().map(|code| code.as_str().to_string());
         Self::Http {
             status,
             message,
-            error_code: None,
+            error_code,
         }
     }
 }

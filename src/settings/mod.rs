@@ -7,7 +7,9 @@ use crate::foundation::{AppContext, Result};
 ///
 /// Each variant maps to a specific form widget. The `parameters` field
 /// on [`Setting`] provides additional constraints and options for the widget.
-#[derive(Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS,
+)]
 #[ts(export)]
 pub enum SettingType {
     /// Single-line text input. Parameters: `max_length`, `placeholder`.
@@ -233,10 +235,7 @@ impl Setting {
         let db = app.database()?;
         db.raw_execute(
             "UPDATE settings SET value = $2, updated_at = NOW() WHERE key = $1",
-            &[
-                DbValue::Text(key.to_string()),
-                DbValue::Json(value),
-            ],
+            &[DbValue::Text(key.to_string()), DbValue::Json(value)],
         )
         .await?;
         Ok(())
@@ -284,10 +283,7 @@ impl Setting {
             "INSERT INTO settings (key, value, created_at) \
              VALUES ($1, $2, NOW()) \
              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-            &[
-                DbValue::Text(key.to_string()),
-                DbValue::Json(value),
-            ],
+            &[DbValue::Text(key.to_string()), DbValue::Json(value)],
         )
         .await?;
         Ok(())
@@ -387,8 +383,7 @@ fn row_to_setting(row: &crate::database::DbRecord) -> Setting {
             Some(DbValue::Json(v)) => Some(v.clone()),
             _ => None,
         },
-        setting_type: SettingType::parse(&row.text("setting_type"))
-            .unwrap_or(SettingType::Text),
+        setting_type: SettingType::parse(&row.text("setting_type")).unwrap_or(SettingType::Text),
         parameters: match row.get("parameters") {
             Some(DbValue::Json(v)) => v.clone(),
             _ => serde_json::json!({}),

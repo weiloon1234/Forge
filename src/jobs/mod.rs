@@ -54,7 +54,9 @@ impl JobMiddlewareRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: JobMiddlewareRegistryHandle) -> JobMiddlewareRegistry {
-        let mut builder = handle.lock().expect("job middleware registry lock poisoned");
+        let mut builder = handle
+            .lock()
+            .expect("job middleware registry lock poisoned");
         JobMiddlewareRegistry {
             middlewares: std::mem::take(&mut builder.middlewares),
         }
@@ -220,11 +222,8 @@ impl JobDispatcher {
     {
         // Unique job check: skip dispatch if a duplicate exists within the window
         if let Some(unique_duration) = job.unique_for() {
-            let unique_suffix = job
-                .unique_key()
-                .unwrap_or_else(|| J::ID.to_string());
-            let unique_redis_key =
-                format!("jobs:unique:{}:{}", J::ID, unique_suffix);
+            let unique_suffix = job.unique_key().unwrap_or_else(|| J::ID.to_string());
+            let unique_redis_key = format!("jobs:unique:{}:{}", J::ID, unique_suffix);
             let ttl_secs = unique_duration.as_secs().max(1);
             let is_new = self
                 .runtime
@@ -560,7 +559,9 @@ impl Worker {
 
             match worker.runtime.claim_job().await {
                 Ok(Some(lease)) => {
-                    worker.diagnostics.record_job_outcome(RecordedJobOutcome::Leased);
+                    worker
+                        .diagnostics
+                        .record_job_outcome(RecordedJobOutcome::Leased);
                     let w = worker.clone();
                     tokio::spawn(async move {
                         if let Err(error) = w.process_claimed_job(lease).await {
@@ -619,10 +620,7 @@ impl Worker {
         if let Some((max_per_window, window)) = registration.handler.check_rate_limit(&envelope) {
             let window_secs = window.as_secs().max(1);
             let window_bucket = Utc::now().timestamp() / window_secs as i64;
-            let rate_key = format!(
-                "jobs:rate:{}:{}",
-                envelope.job, window_bucket
-            );
+            let rate_key = format!("jobs:rate:{}:{}", envelope.job, window_bucket);
             let current_count = self
                 .runtime
                 .backend
@@ -637,8 +635,7 @@ impl Worker {
                     scheduled_at: requeue_at,
                     ..envelope
                 };
-                let payload =
-                    serde_json::to_string(&requeue_envelope).map_err(Error::other)?;
+                let payload = serde_json::to_string(&requeue_envelope).map_err(Error::other)?;
                 let requeue_token = next_delivery_token();
                 self.runtime
                     .retry_job(
@@ -676,8 +673,7 @@ impl Worker {
 
         let (heartbeat, shutdown_heartbeat) =
             self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
-        let default_timeout =
-            Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
+        let default_timeout = Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
         let execution = registration
             .handler
             .execute(
@@ -1140,16 +1136,14 @@ impl JobRegistryBuilder {
         let mut queues: Vec<QueueId> = queues.into_iter().collect();
         // Sort by configured priority (lower = higher priority, default = 5)
         queues.sort_by_key(|q| {
-            config.queue_priorities
+            config
+                .queue_priorities
                 .get(q.as_ref())
                 .copied()
                 .unwrap_or(5)
         });
 
-        JobRegistrySnapshot {
-            jobs,
-            queues,
-        }
+        JobRegistrySnapshot { jobs, queues }
     }
 }
 
@@ -1355,7 +1349,6 @@ where
                 attempts,
             });
         }
-
     }
 
     fn check_rate_limit(&self, envelope: &JobEnvelope) -> Option<(u32, Duration)> {
@@ -1511,7 +1504,12 @@ mod tests {
 
     fn build_runtime_and_dispatcher(
         namespace: &str,
-    ) -> (RuntimeBackend, Arc<JobRuntime>, Arc<RuntimeDiagnostics>, JobDispatcher) {
+    ) -> (
+        RuntimeBackend,
+        Arc<JobRuntime>,
+        Arc<RuntimeDiagnostics>,
+        JobDispatcher,
+    ) {
         let backend = RuntimeBackend::memory(namespace);
         let mut registry = JobRegistryBuilder::default();
         registry.register::<FailingJob>().unwrap();
@@ -1547,9 +1545,15 @@ mod tests {
 
         let batch_id = dispatcher
             .batch("test")
-            .add(StepJob { tag: tag.into(), name: "a".into() })
+            .add(StepJob {
+                tag: tag.into(),
+                name: "a".into(),
+            })
             .unwrap()
-            .add(StepJob { tag: tag.into(), name: "b".into() })
+            .add(StepJob {
+                tag: tag.into(),
+                name: "b".into(),
+            })
             .unwrap()
             .on_complete(CompletionJob {
                 tag: tag.into(),
@@ -1586,7 +1590,10 @@ mod tests {
 
         dispatcher
             .batch("simple")
-            .add(StepJob { tag: tag.into(), name: "x".into() })
+            .add(StepJob {
+                tag: tag.into(),
+                name: "x".into(),
+            })
             .unwrap()
             .dispatch()
             .await
@@ -1610,11 +1617,20 @@ mod tests {
 
         dispatcher
             .chain()
-            .add(StepJob { tag: tag.into(), name: "first".into() })
+            .add(StepJob {
+                tag: tag.into(),
+                name: "first".into(),
+            })
             .unwrap()
-            .add(StepJob { tag: tag.into(), name: "second".into() })
+            .add(StepJob {
+                tag: tag.into(),
+                name: "second".into(),
+            })
             .unwrap()
-            .add(StepJob { tag: tag.into(), name: "third".into() })
+            .add(StepJob {
+                tag: tag.into(),
+                name: "third".into(),
+            })
             .unwrap()
             .dispatch()
             .await

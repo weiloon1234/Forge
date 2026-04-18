@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::support::Collection;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumKey {

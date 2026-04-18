@@ -1,6 +1,6 @@
+use super::types::{EnumKey, EnumKeyKind, EnumMeta, EnumOption};
 use crate::database::DbType;
 use crate::support::Collection;
-use super::types::{EnumKey, EnumKeyKind, EnumMeta, EnumOption};
 
 pub trait ForgeAppEnum: Sized + Clone + Send + Sync + 'static {
     /// The database type this enum stores as.

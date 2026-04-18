@@ -519,20 +519,16 @@ where
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> std::result::Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<CsrfToken>()
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({
-                        "message": "CSRF middleware not active on this route",
-                        "status": 500
-                    })),
-                )
-                    .into_response()
-            })
+        parts.extensions.get::<CsrfToken>().cloned().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "message": "CSRF middleware not active on this route",
+                    "status": 500
+                })),
+            )
+                .into_response()
+        })
     }
 }
 
@@ -606,7 +602,10 @@ async fn csrf_middleware(
             return csrf_forbidden("CSRF token missing from request header");
         };
 
-        if !crate::support::hmac::constant_time_eq(cookie_token.as_bytes(), request_token.as_bytes()) {
+        if !crate::support::hmac::constant_time_eq(
+            cookie_token.as_bytes(),
+            request_token.as_bytes(),
+        ) {
             return csrf_forbidden("CSRF token mismatch");
         }
 
@@ -927,7 +926,10 @@ async fn rate_limit_info(state: &RateLimitState, key_identifier: &str) -> RateLi
 ///
 /// Returns `Some(Response)` with a 429 status if the limit is exceeded, `None` otherwise.
 /// The response includes standard rate-limit headers.
-pub(crate) async fn enforce_rate_limit(state: &RateLimitState, key_identifier: &str) -> Option<Response> {
+pub(crate) async fn enforce_rate_limit(
+    state: &RateLimitState,
+    key_identifier: &str,
+) -> Option<Response> {
     let info = rate_limit_info(state, key_identifier).await;
 
     if info.current > info.limit {
@@ -1163,7 +1165,10 @@ async fn maintenance_middleware(
     next: Next,
 ) -> Response {
     // Check if maintenance mode is active and get the stored bypass secret
-    let stored_secret = match state.app.resolve::<crate::support::runtime::RuntimeBackend>() {
+    let stored_secret = match state
+        .app
+        .resolve::<crate::support::runtime::RuntimeBackend>()
+    {
         Ok(backend) => backend
             .get_value("maintenance:active")
             .await
@@ -1197,8 +1202,7 @@ async fn maintenance_middleware(
         if let Some(query) = request.uri().query() {
             for param in query.split('&') {
                 if let Some(value) = param.strip_prefix("bypass=") {
-                    if crate::support::hmac::constant_time_eq(value.as_bytes(), secret.as_bytes())
-                    {
+                    if crate::support::hmac::constant_time_eq(value.as_bytes(), secret.as_bytes()) {
                         return next.run(request).await;
                     }
                 }

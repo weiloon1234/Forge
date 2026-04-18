@@ -44,12 +44,7 @@ impl TokenStore {
         Ok(plaintext)
     }
 
-    pub async fn validate_token(
-        &self,
-        email: &str,
-        token: &str,
-        guard: String,
-    ) -> Result<()> {
+    pub async fn validate_token(&self, email: &str, token: &str, guard: String) -> Result<()> {
         let hash = crate::support::sha256_hex_str(token);
         let expiry_seconds = self.expiry.as_secs() as i64;
 
@@ -67,9 +62,7 @@ impl TokenStore {
 
         let invalid_msg = format!("invalid or expired {} token", self.kind);
 
-        let row = rows
-            .first()
-            .ok_or_else(|| Error::message(&invalid_msg))?;
+        let row = rows.first().ok_or_else(|| Error::message(&invalid_msg))?;
 
         let stored_hash = match row.get("token_hash") {
             Some(DbValue::Text(h)) => h.clone(),

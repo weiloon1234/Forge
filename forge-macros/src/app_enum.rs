@@ -75,7 +75,9 @@ fn parse_enum_args(attrs: &[syn::Attribute]) -> syn::Result<EnumArgs> {
     Ok(EnumArgs { id })
 }
 
-fn parse_variant_attrs(variant: &Variant) -> syn::Result<(Option<String>, Option<String>, Vec<String>)> {
+fn parse_variant_attrs(
+    variant: &Variant,
+) -> syn::Result<(Option<String>, Option<String>, Vec<String>)> {
     let mut key = None;
     let mut label_key = None;
     let mut aliases = Vec::new();
@@ -91,7 +93,10 @@ fn parse_variant_attrs(variant: &Variant) -> syn::Result<(Option<String>, Option
             } else if meta.path.is_ident("label_key") {
                 let value: syn::LitStr = meta.value()?.parse()?;
                 if label_key.is_some() {
-                    return Err(syn::Error::new(value.span(), "duplicate `label_key` attribute"));
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "duplicate `label_key` attribute",
+                    ));
                 }
                 label_key = Some(value.value());
             } else if meta.path.is_ident("aliases") {
@@ -99,17 +104,30 @@ fn parse_variant_attrs(variant: &Variant) -> syn::Result<(Option<String>, Option
                 match &lit {
                     Expr::Array(arr) => {
                         for elem in &arr.elems {
-                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = elem {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(s), ..
+                            }) = elem
+                            {
                                 aliases.push(s.value());
                             } else {
-                                return Err(syn::Error::new(elem.span(), "alias must be a string literal"));
+                                return Err(syn::Error::new(
+                                    elem.span(),
+                                    "alias must be a string literal",
+                                ));
                             }
                         }
                     }
-                    _ => return Err(syn::Error::new(lit.span(), "aliases must be an array of string literals")),
+                    _ => {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "aliases must be an array of string literals",
+                        ))
+                    }
                 }
             } else {
-                return Err(meta.error("unsupported forge variant attribute; expected key, label_key, or aliases"));
+                return Err(meta.error(
+                    "unsupported forge variant attribute; expected key, label_key, or aliases",
+                ));
             }
             Ok(())
         })?;
@@ -128,16 +146,25 @@ fn extract_discriminant(variant: &Variant) -> syn::Result<Option<i32>> {
     };
 
     match expr {
-        Expr::Lit(ExprLit { lit: Lit::Int(lit_int), .. }) => {
-            let val: i64 = lit_int
-                .base10_parse::<i64>()
-                .map_err(|_| syn::Error::new(lit_int.span(), "discriminant must be a literal integer"))?;
+        Expr::Lit(ExprLit {
+            lit: Lit::Int(lit_int),
+            ..
+        }) => {
+            let val: i64 = lit_int.base10_parse::<i64>().map_err(|_| {
+                syn::Error::new(lit_int.span(), "discriminant must be a literal integer")
+            })?;
             if val < i32::MIN as i64 || val > i32::MAX as i64 {
-                return Err(syn::Error::new(lit_int.span(), "discriminant exceeds i32 range"));
+                return Err(syn::Error::new(
+                    lit_int.span(),
+                    "discriminant exceeds i32 range",
+                ));
             }
             Ok(Some(val as i32))
         }
-        _ => Err(syn::Error::new(expr.span(), "discriminant must be a literal integer")),
+        _ => Err(syn::Error::new(
+            expr.span(),
+            "discriminant must be a literal integer",
+        )),
     }
 }
 
@@ -151,12 +178,19 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     // Must be an enum
     let data = match &input.data {
         Data::Enum(data) => data,
-        _ => return Err(syn::Error::new_spanned(&ident, "AppEnum can only be derived on enums")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &ident,
+                "AppEnum can only be derived on enums",
+            ))
+        }
     };
 
     // Parse enum-level attributes
     let enum_args = parse_enum_args(&input.attrs)?;
-    let enum_id = enum_args.id.unwrap_or_else(|| to_snake_case(&ident.to_string()));
+    let enum_id = enum_args
+        .id
+        .unwrap_or_else(|| to_snake_case(&ident.to_string()));
 
     // Classify storage mode and validate
     let has_any_discriminant = data.variants.iter().any(|v| v.discriminant.is_some());
@@ -178,7 +212,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     for variant in &data.variants {
         // Only unit variants
         if !matches!(&variant.fields, Fields::Unit) {
-            return Err(syn::Error::new_spanned(variant, "AppEnum only supports unit variants"));
+            return Err(syn::Error::new_spanned(
+                variant,
+                "AppEnum only supports unit variants",
+            ));
         }
 
         let (key_override, label_key_override, aliases) = parse_variant_attrs(variant)?;
@@ -191,13 +228,14 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             ));
         }
 
-        let discriminant = if is_int_backed {
-            Some(extract_discriminant(variant)?.ok_or_else(|| {
-                syn::Error::new_spanned(variant, "expected integer discriminant")
-            })?)
-        } else {
-            None
-        };
+        let discriminant =
+            if is_int_backed {
+                Some(extract_discriminant(variant)?.ok_or_else(|| {
+                    syn::Error::new_spanned(variant, "expected integer discriminant")
+                })?)
+            } else {
+                None
+            };
 
         let key_str = if is_int_backed {
             discriminant.unwrap().to_string()
@@ -213,7 +251,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             ));
         }
 
-        let label_key_str = label_key_override.unwrap_or_else(|| to_title_text(&variant.ident.to_string()));
+        let label_key_str =
+            label_key_override.unwrap_or_else(|| to_title_text(&variant.ident.to_string()));
 
         variant_infos.push(VariantInfo {
             ident: variant.ident.clone(),
@@ -600,7 +639,10 @@ fn generate_api_schema_impl(
     let (type_str, enum_values) = if is_int_backed {
         let values: Vec<i32> = variants
             .iter()
-            .map(|v| v.discriminant.expect("int-backed variant missing discriminant"))
+            .map(|v| {
+                v.discriminant
+                    .expect("int-backed variant missing discriminant")
+            })
             .collect();
         ("integer", quote! { #(#values),* })
     } else {

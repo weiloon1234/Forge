@@ -411,6 +411,28 @@ async fn create_user(
 }
 ```
 
+### JSON-only validated requests
+
+Use `JsonValidated<T>` when an endpoint should only accept JSON and should reject multipart bodies automatically:
+
+```rust
+#[derive(Deserialize, ApiSchema, Validate)]
+pub struct CreateSession {
+    #[validate(required, email)]
+    pub email: String,
+    #[validate(required, min(8))]
+    pub password: String,
+}
+
+async fn login(
+    JsonValidated(payload): JsonValidated<CreateSession>,
+) -> impl IntoResponse {
+    Json(MessageResponse::ok())
+}
+```
+
+This is the common path for JSON DTOs. `Validated<T>` remains the mixed extractor for DTOs that intentionally support both JSON and multipart.
+
 ### Route with OpenAPI documentation
 
 ```rust

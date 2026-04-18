@@ -153,6 +153,11 @@ These types are auto-exported by the framework (no configuration needed):
 |------|--------|------------|
 | `CountryStatus` | `forge::countries` | `"enabled" \| "disabled"` |
 | `TokenPair` | `forge::auth::token` | `{ access_token, refresh_token, ... }` |
+| `RefreshTokenRequest` | `forge::auth::token` | `{ refresh_token }` |
+| `TokenResponse` | `forge::auth::token` | `{ tokens: TokenPair }` |
+| `MessageResponse` | `forge::http::response` | `{ message }` |
+| `DatatableRequest` | `forge::datatable::request` | typed filters + sorts + pagination |
+| `DatatableJsonResponse` | `forge::datatable::response` | typed columns + filters + applied filters + sorts |
 | `JobHistoryStatus` | `forge::jobs` | `"succeeded" \| "retried" \| "dead_lettered"` |
 | `SettingType` | `forge::settings` | `"text" \| "textarea" \| "number" \| ...` |
 
@@ -166,7 +171,12 @@ frontend/shared/types/generated/
 ├── CreateOrderRequest.ts       ← from project
 ├── OrderStatus.ts              ← from project
 ├── CountryStatus.ts            ← from framework
+├── DatatableJsonResponse.ts    ← from framework
+├── DatatableRequest.ts         ← from framework
+├── MessageResponse.ts          ← from framework
+├── RefreshTokenRequest.ts      ← from framework
 ├── TokenPair.ts                ← from framework
+├── TokenResponse.ts            ← from framework
 └── ...
 ```
 
@@ -176,8 +186,13 @@ The barrel `index.ts` re-exports all types:
 // Auto-generated barrel. Do not edit.
 export type { CreateOrderRequest } from "./CreateOrderRequest";
 export type { CountryStatus } from "./CountryStatus";
+export type { DatatableJsonResponse } from "./DatatableJsonResponse";
+export type { DatatableRequest } from "./DatatableRequest";
+export type { MessageResponse } from "./MessageResponse";
 export type { OrderStatus } from "./OrderStatus";
+export type { RefreshTokenRequest } from "./RefreshTokenRequest";
 export type { TokenPair } from "./TokenPair";
+export type { TokenResponse } from "./TokenResponse";
 ```
 
 ---

@@ -27,7 +27,10 @@ impl DistributedLock {
         let owner = uuid::Uuid::now_v7().to_string();
         let ttl_secs = ttl.as_secs().max(1);
 
-        let acquired = self.backend.set_nx_value(&lock_key, &owner, ttl_secs).await?;
+        let acquired = self
+            .backend
+            .set_nx_value(&lock_key, &owner, ttl_secs)
+            .await?;
         if acquired {
             Ok(Some(LockGuard {
                 backend: self.backend.clone(),

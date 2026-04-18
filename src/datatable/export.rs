@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::foundation::Result;
+use async_trait::async_trait;
 
 /// Abstract contract for delivering generated datatable exports.
 ///
@@ -7,11 +7,7 @@ use crate::foundation::Result;
 /// their own (e.g., email with XLSX attachment) via the service registrar.
 #[async_trait]
 pub trait DatatableExportDelivery: Send + Sync + 'static {
-    async fn deliver(
-        &self,
-        export: GeneratedDatatableExport,
-        recipient: &str,
-    ) -> Result<()>;
+    async fn deliver(&self, export: GeneratedDatatableExport, recipient: &str) -> Result<()>;
 }
 
 /// A generated XLSX export ready for delivery.
@@ -27,11 +23,7 @@ pub struct NoopExportDelivery;
 
 #[async_trait]
 impl DatatableExportDelivery for NoopExportDelivery {
-    async fn deliver(
-        &self,
-        _export: GeneratedDatatableExport,
-        _recipient: &str,
-    ) -> Result<()> {
+    async fn deliver(&self, _export: GeneratedDatatableExport, _recipient: &str) -> Result<()> {
         // No-op: log or ignore
         Ok(())
     }

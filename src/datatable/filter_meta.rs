@@ -1,4 +1,5 @@
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 use crate::app_enum::{EnumKey, ForgeAppEnum};
 use crate::support::Collection;
@@ -7,8 +8,9 @@ use crate::support::Collection;
 // Filter kind
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum DatatableFilterKind {
     Text,
     Select,
@@ -21,7 +23,8 @@ pub enum DatatableFilterKind {
 // Select option
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableFilterOption {
     pub value: String,
     pub label: String,
@@ -40,18 +43,44 @@ impl DatatableFilterOption {
 // Filter field
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableFilterField {
     pub name: String,
     pub kind: DatatableFilterKind,
     pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub placeholder: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub help: Option<String>,
     pub nullable: bool,
-    #[serde(default)]
+    #[ts(type = "{ items: DatatableFilterOption[] }")]
     pub options: Collection<DatatableFilterOption>,
+}
+
+impl Serialize for DatatableFilterField {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct(
+            "DatatableFilterField",
+            5 + usize::from(self.placeholder.is_some()) + usize::from(self.help.is_some()),
+        )?;
+
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("label", &self.label)?;
+        if let Some(placeholder) = &self.placeholder {
+            state.serialize_field("placeholder", placeholder)?;
+        }
+        if let Some(help) = &self.help {
+            state.serialize_field("help", help)?;
+        }
+        state.serialize_field("nullable", &self.nullable)?;
+        state.serialize_field("options", &self.options)?;
+        state.end()
+    }
 }
 
 impl DatatableFilterField {
@@ -140,7 +169,8 @@ impl DatatableFilterField {
 // Filter row (layout)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableFilterRow {
     pub fields: Vec<DatatableFilterField>,
 }
@@ -156,5 +186,47 @@ impl DatatableFilterRow {
         Self {
             fields: vec![left, right],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::DatatableFilterField;
+
+    #[test]
+    fn serializes_optional_metadata_only_when_present() {
+        let filter = DatatableFilterField::text("status", "Status");
+        assert_eq!(
+            serde_json::to_value(&filter).unwrap(),
+            json!({
+                "name": "status",
+                "kind": "text",
+                "label": "Status",
+                "nullable": false,
+                "options": {
+                    "items": []
+                }
+            })
+        );
+
+        let filter = DatatableFilterField::text("status", "Status")
+            .placeholder("Search status")
+            .help("Filters by status");
+        assert_eq!(
+            serde_json::to_value(&filter).unwrap(),
+            json!({
+                "name": "status",
+                "kind": "text",
+                "label": "Status",
+                "placeholder": "Search status",
+                "help": "Filters by status",
+                "nullable": false,
+                "options": {
+                    "items": []
+                }
+            })
+        );
     }
 }

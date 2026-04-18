@@ -17,14 +17,16 @@ mod tests {
     // Test enums
     // -----------------------------------------------------------------------
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
+    #[ts(export)]
     enum OrderStatus {
         Pending,
         Reviewing,
         Completed,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
+    #[ts(export)]
     enum OrderStatusWithOverrides {
         Pending,
         #[forge(key = "in_review")]
@@ -33,21 +35,24 @@ mod tests {
         Completed,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
+    #[ts(export)]
     enum UserStatus {
         Pending = 0,
         Verified = 1,
         Suspended = 2,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
+    #[ts(export)]
     #[forge(id = "custom_status")]
     enum CustomIdEnum {
         Alpha,
         Beta,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
+    #[ts(export)]
     enum AliasedEnum {
         #[forge(aliases = ["awaiting", "queued"])]
         Pending,
@@ -69,7 +74,10 @@ mod tests {
 
     #[test]
     fn string_backed_key_returns_snake_case() {
-        assert_eq!(OrderStatus::Pending.key(), EnumKey::String("pending".into()));
+        assert_eq!(
+            OrderStatus::Pending.key(),
+            EnumKey::String("pending".into())
+        );
         assert_eq!(
             OrderStatus::Reviewing.key(),
             EnumKey::String("reviewing".into())
@@ -82,7 +90,10 @@ mod tests {
 
     #[test]
     fn string_backed_parse_key_valid() {
-        assert_eq!(OrderStatus::parse_key("pending"), Some(OrderStatus::Pending));
+        assert_eq!(
+            OrderStatus::parse_key("pending"),
+            Some(OrderStatus::Pending)
+        );
         assert_eq!(
             OrderStatus::parse_key("reviewing"),
             Some(OrderStatus::Reviewing)
@@ -307,18 +318,27 @@ mod tests {
 
     #[test]
     fn alias_parse_key() {
-        assert_eq!(AliasedEnum::parse_key("awaiting"), Some(AliasedEnum::Pending));
+        assert_eq!(
+            AliasedEnum::parse_key("awaiting"),
+            Some(AliasedEnum::Pending)
+        );
         assert_eq!(AliasedEnum::parse_key("queued"), Some(AliasedEnum::Pending));
     }
 
     #[test]
     fn alias_key_returns_canonical() {
-        assert_eq!(AliasedEnum::Pending.key(), EnumKey::String("pending".into()));
+        assert_eq!(
+            AliasedEnum::Pending.key(),
+            EnumKey::String("pending".into())
+        );
     }
 
     #[test]
     fn alias_parse_canonical_still_works() {
-        assert_eq!(AliasedEnum::parse_key("pending"), Some(AliasedEnum::Pending));
+        assert_eq!(
+            AliasedEnum::parse_key("pending"),
+            Some(AliasedEnum::Pending)
+        );
     }
 
     // -----------------------------------------------------------------------

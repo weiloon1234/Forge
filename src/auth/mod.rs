@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::AuthConfig;
-use crate::database::{Model, QueryExecutor};
+use crate::database::{ColumnRef, ComparisonOp, DbType, DbValue, Expr, Model, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
-use crate::support::{GuardId, PermissionId, PolicyId, RoleId};
+use crate::support::{GuardId, ModelId, PermissionId, PolicyId, RoleId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AccessScope {
@@ -192,23 +192,127 @@ impl Actor {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthErrorCode {
+    InvalidBearerToken,
+    MissingSessionCookie,
+    InvalidSession,
+    MissingAuthorizationHeader,
+    InvalidAuthorizationHeader,
+    InvalidAuthorizationScheme,
+    MissingBearerToken,
+    MissingAuthCredentials,
+    MissingRequiredPermission,
+    AuthenticatedActorNotFound,
+    AuthenticatedModelNotFound,
+    MaxConnectionsPerUserExceeded,
+}
+
+impl AuthErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidBearerToken => "invalid_bearer_token",
+            Self::MissingSessionCookie => "missing_session_cookie",
+            Self::InvalidSession => "invalid_session",
+            Self::MissingAuthorizationHeader => "missing_authorization_header",
+            Self::InvalidAuthorizationHeader => "invalid_authorization_header",
+            Self::InvalidAuthorizationScheme => "invalid_authorization_scheme",
+            Self::MissingBearerToken => "missing_bearer_token",
+            Self::MissingAuthCredentials => "missing_auth_credentials",
+            Self::MissingRequiredPermission => "missing_required_permission",
+            Self::AuthenticatedActorNotFound => "authenticated_actor_not_found",
+            Self::AuthenticatedModelNotFound => "authenticated_model_not_found",
+            Self::MaxConnectionsPerUserExceeded => "max_connections_per_user_exceeded",
+        }
+    }
+
+    pub const fn translation_key(self) -> &'static str {
+        match self {
+            Self::InvalidBearerToken => "auth.invalid_bearer_token",
+            Self::MissingSessionCookie => "auth.missing_session_cookie",
+            Self::InvalidSession => "auth.invalid_session",
+            Self::MissingAuthorizationHeader => "auth.missing_authorization_header",
+            Self::InvalidAuthorizationHeader => "auth.invalid_authorization_header",
+            Self::InvalidAuthorizationScheme => "auth.invalid_authorization_scheme",
+            Self::MissingBearerToken => "auth.missing_bearer_token",
+            Self::MissingAuthCredentials => "auth.missing_auth_credentials",
+            Self::MissingRequiredPermission => "auth.missing_required_permission",
+            Self::AuthenticatedActorNotFound => "auth.authenticated_actor_not_found",
+            Self::AuthenticatedModelNotFound => "auth.authenticated_model_not_found",
+            Self::MaxConnectionsPerUserExceeded => "auth.max_connections_per_user_exceeded",
+        }
+    }
+
+    pub const fn default_message(self) -> &'static str {
+        match self {
+            Self::MissingRequiredPermission | Self::MaxConnectionsPerUserExceeded => "Forbidden",
+            _ => "Unauthorized",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthErrorMessage {
+    message: String,
+    code: Option<AuthErrorCode>,
+}
+
+impl AuthErrorMessage {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    pub fn from_code(code: AuthErrorCode) -> Self {
+        Self {
+            message: code.default_message().to_string(),
+            code: Some(code),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn code(&self) -> Option<AuthErrorCode> {
+        self.code
+    }
+}
+
+impl std::fmt::Display for AuthErrorMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthError {
     #[error("{0}")]
-    Unauthorized(String),
+    Unauthorized(AuthErrorMessage),
     #[error("{0}")]
-    Forbidden(String),
+    Forbidden(AuthErrorMessage),
     #[error("{0}")]
     Internal(String),
 }
 
 impl AuthError {
     pub fn unauthorized(message: impl Into<String>) -> Self {
-        Self::Unauthorized(message.into())
+        Self::Unauthorized(AuthErrorMessage::new(message))
+    }
+
+    pub fn unauthorized_code(code: AuthErrorCode) -> Self {
+        Self::Unauthorized(AuthErrorMessage::from_code(code))
     }
 
     pub fn forbidden(message: impl Into<String>) -> Self {
-        Self::Forbidden(message.into())
+        Self::Forbidden(AuthErrorMessage::new(message))
+    }
+
+    pub fn forbidden_code(code: AuthErrorCode) -> Self {
+        Self::Forbidden(AuthErrorMessage::from_code(code))
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -222,18 +326,39 @@ impl AuthError {
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    pub fn code(&self) -> Option<AuthErrorCode> {
+        match self {
+            Self::Unauthorized(message) | Self::Forbidden(message) => message.code(),
+            Self::Internal(_) => None,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Unauthorized(message) | Self::Forbidden(message) => message.message(),
+            Self::Internal(message) => message,
+        }
+    }
+
+    pub fn payload(&self) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "message": self.message(),
+            "status": self.status_code().as_u16(),
+        });
+
+        if let Some(code) = self.code() {
+            payload["code"] = serde_json::Value::String(code.as_str().to_string());
+            payload["message_key"] = serde_json::Value::String(code.translation_key().to_string());
+        }
+
+        payload
+    }
 }
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        (
-            self.status_code(),
-            Json(serde_json::json!({
-                "message": self.to_string(),
-                "status": self.status_code().as_u16(),
-            })),
-        )
-            .into_response()
+        (self.status_code(), Json(self.payload())).into_response()
     }
 }
 
@@ -267,7 +392,66 @@ pub trait Authenticatable: Model + Sized + Send + Sync + 'static {
     /// any custom resolution logic.
     async fn resolve_from_actor<E>(actor: &Actor, executor: &E) -> Result<Option<Self>>
     where
-        E: QueryExecutor;
+        E: QueryExecutor,
+    {
+        resolve_authenticatable_from_primary_key::<Self, E>(actor, executor).await
+    }
+}
+
+async fn resolve_authenticatable_from_primary_key<M, E>(
+    actor: &Actor,
+    executor: &E,
+) -> Result<Option<M>>
+where
+    M: Authenticatable,
+    E: QueryExecutor,
+{
+    let table = M::table_meta();
+    let primary_key = table.primary_key_column_info().ok_or_else(|| {
+        Error::message(format!(
+            "model `{}` is missing primary key column metadata",
+            std::any::type_name::<M>()
+        ))
+    })?;
+
+    let Some(actor_id) = actor_id_to_primary_key_value::<M>(&actor.id, primary_key.db_type)? else {
+        return Ok(None);
+    };
+
+    let column = ColumnRef::new(table.name(), table.primary_key_name()).typed(primary_key.db_type);
+    M::model_query()
+        .where_(crate::database::Condition::compare(
+            Expr::column(column),
+            ComparisonOp::Eq,
+            Expr::value(actor_id),
+        ))
+        .first(executor)
+        .await
+}
+
+fn actor_id_to_primary_key_value<M>(actor_id: &str, db_type: DbType) -> Result<Option<DbValue>>
+where
+    M: Model,
+{
+    let value = match db_type {
+        DbType::Uuid => match ModelId::<M>::parse_str(actor_id) {
+            Ok(id) => Some(DbValue::Uuid(id.into_uuid())),
+            Err(_) => None,
+        },
+        DbType::Text => Some(DbValue::Text(actor_id.to_string())),
+        DbType::Int16 => actor_id.parse::<i16>().ok().map(DbValue::Int16),
+        DbType::Int32 => actor_id.parse::<i32>().ok().map(DbValue::Int32),
+        DbType::Int64 => actor_id.parse::<i64>().ok().map(DbValue::Int64),
+        unsupported => {
+            return Err(Error::message(format!(
+            "default Authenticatable resolution does not support primary key type `{:?}` for `{}`",
+            unsupported,
+            std::any::type_name::<M>()
+        )))
+        }
+    };
+
+    Ok(value)
 }
 
 pub(crate) type GuardRegistryHandle = Arc<Mutex<GuardRegistryBuilder>>;
@@ -416,9 +600,7 @@ impl AuthenticatableRegistryBuilder {
         Ok(())
     }
 
-    pub(crate) fn freeze_shared(
-        handle: AuthenticatableRegistryHandle,
-    ) -> AuthenticatableRegistry {
+    pub(crate) fn freeze_shared(handle: AuthenticatableRegistryHandle) -> AuthenticatableRegistry {
         let mut builder = handle
             .lock()
             .expect("authenticatable registry lock poisoned");
@@ -465,10 +647,7 @@ pub struct AuthManager {
 }
 
 impl AuthManager {
-    pub(crate) fn new(
-        config: AuthConfig,
-        guards: HashMap<GuardId, GuardAuthenticator>,
-    ) -> Self {
+    pub(crate) fn new(config: AuthConfig, guards: HashMap<GuardId, GuardAuthenticator>) -> Self {
         Self {
             config,
             guards: Arc::new(guards),
@@ -505,17 +684,19 @@ impl AuthManager {
                     .authenticate(&token)
                     .await
                     .map_err(|error| AuthError::internal(error.to_string()))?
-                    .ok_or_else(|| AuthError::unauthorized("invalid bearer token"))?
+                    .ok_or_else(|| {
+                        AuthError::unauthorized_code(AuthErrorCode::InvalidBearerToken)
+                    })?
             }
             GuardAuthenticator::Session(session_manager) => {
-                let session_id = session_manager
-                    .extract_session_id(headers)
-                    .ok_or_else(|| AuthError::unauthorized("missing session cookie"))?;
+                let session_id = session_manager.extract_session_id(headers).ok_or_else(|| {
+                    AuthError::unauthorized_code(AuthErrorCode::MissingSessionCookie)
+                })?;
                 session_manager
                     .validate(&session_id)
                     .await
                     .map_err(|error| AuthError::internal(error.to_string()))?
-                    .ok_or_else(|| AuthError::unauthorized("invalid or expired session"))?
+                    .ok_or_else(|| AuthError::unauthorized_code(AuthErrorCode::InvalidSession))?
             }
         };
 
@@ -543,7 +724,9 @@ impl AuthManager {
                     .await
                     .map_err(|error| AuthError::internal(error.to_string()))?
                 else {
-                    return Err(AuthError::unauthorized("invalid bearer token"));
+                    return Err(AuthError::unauthorized_code(
+                        AuthErrorCode::InvalidBearerToken,
+                    ));
                 };
                 Ok(actor.with_guard(guard_id))
             }
@@ -555,11 +738,13 @@ impl AuthManager {
 
     pub fn extract_token(&self, headers: &HeaderMap) -> std::result::Result<String, AuthError> {
         let Some(value) = headers.get(header::AUTHORIZATION) else {
-            return Err(AuthError::unauthorized("missing authorization header"));
+            return Err(AuthError::unauthorized_code(
+                AuthErrorCode::MissingAuthorizationHeader,
+            ));
         };
         let value = value
             .to_str()
-            .map_err(|_| AuthError::unauthorized("invalid authorization header"))?;
+            .map_err(|_| AuthError::unauthorized_code(AuthErrorCode::InvalidAuthorizationHeader))?;
         let prefix = self.config.bearer_prefix.trim();
         let expected = format!("{prefix} ");
         if !value
@@ -567,13 +752,15 @@ impl AuthManager {
             .map(|actual| actual.eq_ignore_ascii_case(&expected))
             .unwrap_or(false)
         {
-            return Err(AuthError::unauthorized(format!(
-                "authorization header must start with `{prefix}`"
-            )));
+            return Err(AuthError::unauthorized_code(
+                AuthErrorCode::InvalidAuthorizationScheme,
+            ));
         }
         let token = value[expected.len()..].trim();
         if token.is_empty() {
-            return Err(AuthError::unauthorized("bearer token is missing"));
+            return Err(AuthError::unauthorized_code(
+                AuthErrorCode::MissingBearerToken,
+            ));
         }
         Ok(token.to_string())
     }
@@ -611,7 +798,9 @@ impl Authorizer {
         if self.allows_permissions(actor, permissions) {
             Ok(())
         } else {
-            Err(AuthError::forbidden("missing required permission"))
+            Err(AuthError::forbidden_code(
+                AuthErrorCode::MissingRequiredPermission,
+            ))
         }
     }
 
@@ -679,7 +868,10 @@ where
             .get::<Actor>()
             .cloned()
             .map(Self)
-            .ok_or_else(|| AuthError::unauthorized("authenticated actor not found").into_response())
+            .ok_or_else(|| {
+                AuthError::unauthorized_code(AuthErrorCode::AuthenticatedActorNotFound)
+                    .into_response()
+            })
     }
 }
 
@@ -760,7 +952,8 @@ where
             .await
             .map_err(|e| AuthError::internal(e.to_string()).into_response())?
             .ok_or_else(|| {
-                AuthError::unauthorized("authenticated model not found").into_response()
+                AuthError::unauthorized_code(AuthErrorCode::AuthenticatedModelNotFound)
+                    .into_response()
             })?;
 
         Ok(Self(model))
@@ -789,8 +982,11 @@ mod tests {
         GuardRegistryBuilder, PermissionId, PolicyRegistryBuilder, StaticBearerAuthenticator,
     };
     use crate::config::ConfigRepository;
+    use crate::database::{
+        ColumnInfo, DbRecord, DbType, DbValue, QueryExecutionOptions, QueryExecutor, TableMeta,
+    };
     use crate::foundation::{AppContext, Container};
-    use crate::support::{GuardId, PolicyId, RoleId};
+    use crate::support::{GuardId, ModelId, PolicyId, RoleId};
     use crate::validation::RuleRegistry;
 
     struct AllowEverythingPolicy;
@@ -913,10 +1109,7 @@ mod tests {
             GuardId::new("api")
         }
 
-        async fn resolve_from_actor<E>(
-            _actor: &Actor,
-            _executor: &E,
-        ) -> crate::Result<Option<Self>>
+        async fn resolve_from_actor<E>(_actor: &Actor, _executor: &E) -> crate::Result<Option<Self>>
         where
             E: crate::database::QueryExecutor,
         {
@@ -940,14 +1133,88 @@ mod tests {
             GuardId::new("admin")
         }
 
-        async fn resolve_from_actor<E>(
-            _actor: &Actor,
-            _executor: &E,
-        ) -> crate::Result<Option<Self>>
+        async fn resolve_from_actor<E>(_actor: &Actor, _executor: &E) -> crate::Result<Option<Self>>
         where
             E: crate::database::QueryExecutor,
         {
             Ok(Some(FakeAdmin))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct AutoResolvedUser {
+        id: ModelId<Self>,
+        email: String,
+    }
+
+    impl crate::database::Model for AutoResolvedUser {
+        type Lifecycle = crate::database::NoModelLifecycle;
+
+        fn table_meta() -> &'static TableMeta<Self> {
+            static COLUMNS: [ColumnInfo; 2] = [
+                ColumnInfo::new("id", DbType::Uuid),
+                ColumnInfo::new("email", DbType::Text),
+            ];
+            static TABLE: std::sync::OnceLock<TableMeta<AutoResolvedUser>> =
+                std::sync::OnceLock::new();
+            TABLE.get_or_init(|| {
+                TableMeta::new(
+                    "auto_resolved_users",
+                    &COLUMNS,
+                    "id",
+                    crate::database::ModelPrimaryKeyStrategy::UuidV7,
+                    crate::database::ModelBehavior::new(
+                        crate::database::ModelFeatureSetting::Default,
+                        crate::database::ModelFeatureSetting::Default,
+                    ),
+                    |record| {
+                        Ok(AutoResolvedUser {
+                            id: record.decode("id")?,
+                            email: record.decode("email")?,
+                        })
+                    },
+                )
+            })
+        }
+    }
+
+    #[async_trait]
+    impl super::Authenticatable for AutoResolvedUser {
+        fn guard() -> GuardId {
+            GuardId::new("api")
+        }
+    }
+
+    struct FakeExecutor {
+        expected_id: uuid::Uuid,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for FakeExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> crate::Result<Vec<DbRecord>> {
+            match bindings.first() {
+                Some(DbValue::Uuid(value)) if *value == self.expected_id => {
+                    let mut record = DbRecord::new();
+                    record.insert("id", DbValue::Uuid(*value));
+                    record.insert("email", DbValue::Text("auto@example.com".to_string()));
+                    Ok(vec![record])
+                }
+                _ => Ok(Vec::new()),
+            }
+        }
+
+        async fn raw_execute_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> crate::Result<u64> {
+            Ok(0)
         }
     }
 
@@ -983,5 +1250,21 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("does not match authenticatable guard"));
+    }
+
+    #[tokio::test]
+    async fn authenticatable_default_resolution_uses_uuid_primary_key() {
+        let id = uuid::Uuid::now_v7();
+        let actor = Actor::new(id.to_string(), GuardId::new("api"));
+        let executor = FakeExecutor { expected_id: id };
+
+        let resolved =
+            <AutoResolvedUser as super::Authenticatable>::resolve_from_actor(&actor, &executor)
+                .await
+                .unwrap()
+                .expect("auto-resolved user should be found");
+
+        assert_eq!(resolved.id.as_uuid(), &id);
+        assert_eq!(resolved.email, "auto@example.com");
     }
 }

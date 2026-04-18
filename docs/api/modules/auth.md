@@ -17,9 +17,18 @@ enum AccessScope { Public, Guarded }
   fn with_permissions<I, P>(self, permissions: I) -> Self
 enum AuthError { Unauthorized, Forbidden, Internal }
   fn unauthorized(message: impl Into<String>) -> Self
+  fn unauthorized_code(code: AuthErrorCode) -> Self
   fn forbidden(message: impl Into<String>) -> Self
+  fn forbidden_code(code: AuthErrorCode) -> Self
   fn internal(message: impl Into<String>) -> Self
   fn status_code(&self) -> StatusCode
+  fn code(&self) -> Option<AuthErrorCode>
+  fn message(&self) -> &str
+  fn payload(&self) -> Value
+enum AuthErrorCode { InvalidBearerToken, MissingSessionCookie, InvalidSession, MissingAuthorizationHeader, InvalidAuthorizationHeader, InvalidAuthorizationScheme, MissingBearerToken, MissingAuthCredentials, MissingRequiredPermission, AuthenticatedActorNotFound, AuthenticatedModelNotFound, MaxConnectionsPerUserExceeded }
+  const fn as_str(self) -> &'static str
+  const fn translation_key(self) -> &'static str
+  const fn default_message(self) -> &'static str
 struct Actor
   fn new<I, G>(id: I, guard: G) -> Self
   fn with_guard<I>(self, guard: I) -> Self
@@ -29,6 +38,11 @@ struct Actor
   fn has_role<I>(&self, role: I) -> bool
   fn has_permission<I>(&self, permission: I) -> bool
   async fn resolve<M>(&self, app: &AppContext) -> Result<Option<M>>
+struct AuthErrorMessage
+  fn new(message: impl Into<String>) -> Self
+  fn from_code(code: AuthErrorCode) -> Self
+  fn message(&self) -> &str
+  fn code(&self) -> Option<AuthErrorCode>
 struct AuthManager
   fn default_guard(&self) -> &GuardId
   async fn authenticate_headers( &self, headers: &HeaderMap, guard: Option<&GuardId>, ) -> Result<Actor, AuthError>
@@ -95,6 +109,7 @@ struct SessionManager
 ## forge::auth::token
 
 ```rust
+struct RefreshTokenRequest
 struct TokenAuthenticator
   fn new(manager: Arc<TokenManager>) -> Self
 struct TokenManager
@@ -108,6 +123,9 @@ struct TokenManager
   async fn revoke_all<M: Authenticatable>( &self, actor_id: &str, ) -> Result<u64>
   async fn prune(&self, older_than_days: u64) -> Result<u64>
 struct TokenPair
+struct TokenResponse
+  fn new(tokens: TokenPair) -> Self
+  fn into_inner(self) -> TokenPair
 trait HasToken: Authenticatable
   fn token_actor_id(&self) -> String
   fn create_token<'life0, 'life1, 'async_trait>(

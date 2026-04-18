@@ -214,12 +214,24 @@ impl RuntimeBackend {
     ) -> Result<()> {
         match self {
             Self::Redis(runtime) => {
-                create_batch_redis(runtime, batch_id, total, on_complete_payload, on_complete_queue)
-                    .await
+                create_batch_redis(
+                    runtime,
+                    batch_id,
+                    total,
+                    on_complete_payload,
+                    on_complete_queue,
+                )
+                .await
             }
             Self::Memory(runtime) => {
-                create_batch_memory(runtime, batch_id, total, on_complete_payload, on_complete_queue)
-                    .await
+                create_batch_memory(
+                    runtime,
+                    batch_id,
+                    total,
+                    on_complete_payload,
+                    on_complete_queue,
+                )
+                .await
             }
         }
     }

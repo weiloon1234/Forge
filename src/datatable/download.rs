@@ -113,7 +113,9 @@ where
             let value = if let Some(mapping) = mapping_index.get(col.name.as_str()) {
                 mapping.compute(model, ctx).into()
             } else {
-                obj.get(&col.name).cloned().unwrap_or(serde_json::Value::Null)
+                obj.get(&col.name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
             };
 
             write_cell(worksheet, row, col_pos, &value)

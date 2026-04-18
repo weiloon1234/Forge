@@ -444,10 +444,13 @@ macro_rules! impl_field_rules {
         }
 
         pub fn app_enum<E: ::forge::app_enum::ForgeAppEnum>(mut self) -> Self {
-            let keys: Vec<String> = E::keys().into_iter().map(|k| match k {
-                ::forge::app_enum::EnumKey::String(s) => s,
-                ::forge::app_enum::EnumKey::Int(n) => n.to_string(),
-            }).collect();
+            let keys: Vec<String> = E::keys()
+                .into_iter()
+                .map(|k| match k {
+                    ::forge::app_enum::EnumKey::String(s) => s,
+                    ::forge::app_enum::EnumKey::Int(n) => n.to_string(),
+                })
+                .collect();
             self.steps.push(FieldStep {
                 rule: FieldRule::AppEnum { valid_keys: keys },
                 message: None,

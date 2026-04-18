@@ -64,6 +64,7 @@ mod app {
 
     pub mod portals {
         use super::*;
+        use forge::Validate;
 
         #[derive(Debug, Deserialize)]
         pub struct CreateUser {
@@ -96,14 +97,20 @@ mod app {
             ) -> forge::foundation::Result<Self> {
                 let mut email = None;
                 let mut phone = None;
-                while let Some(field) = multipart.next_field().await
-                    .map_err(|e| forge::foundation::Error::message(format!("multipart error: {e}")))?
-                {
+                while let Some(field) = multipart.next_field().await.map_err(|e| {
+                    forge::foundation::Error::message(format!("multipart error: {e}"))
+                })? {
                     match field.name().unwrap_or("") {
-                        "email" => email = Some(field.text().await
-                            .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?),
-                        "phone" => phone = Some(field.text().await
-                            .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?),
+                        "email" => {
+                            email = Some(field.text().await.map_err(|e| {
+                                forge::foundation::Error::message(format!("field error: {e}"))
+                            })?)
+                        }
+                        "phone" => {
+                            phone = Some(field.text().await.map_err(|e| {
+                                forge::foundation::Error::message(format!("field error: {e}"))
+                            })?)
+                        }
                         _ => {}
                     }
                 }
@@ -114,9 +121,18 @@ mod app {
             }
         }
 
+        #[derive(Debug, Deserialize, Validate)]
+        pub struct CreateJsonUser {
+            #[validate(required, email)]
+            pub email: String,
+            #[validate(required, min(8))]
+            pub password: String,
+        }
+
         pub fn router(registrar: &mut HttpRegistrar) -> Result<()> {
             registrar.route("/health", get(health));
             registrar.route("/users", post(create_user));
+            registrar.route("/json-users", post(create_json_user));
             Ok(())
         }
 
@@ -135,6 +151,17 @@ mod app {
                 Json(serde_json::json!({
                     "email": payload.email,
                     "phone": payload.phone,
+                })),
+            )
+        }
+
+        async fn create_json_user(
+            JsonValidated(payload): JsonValidated<CreateJsonUser>,
+        ) -> impl IntoResponse {
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "email": payload.email,
                 })),
             )
         }
@@ -259,6 +286,57 @@ async fn run_http_async_serves_routes_and_validation() {
         .await
         .unwrap();
     assert_eq!(valid.status(), reqwest::StatusCode::CREATED);
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn run_http_async_supports_json_only_validated_requests() {
+    let config_dir = tempdir().unwrap();
+    let port = free_port();
+    write_config(config_dir.path(), port);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let task = tokio::spawn({
+        let builder = build_app(config_dir.path(), events);
+        async move { builder.run_http_async().await.unwrap() }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}");
+
+    for _ in 0..30 {
+        if client.get(format!("{url}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let valid = client
+        .post(format!("{url}/json-users"))
+        .json(&serde_json::json!({
+            "email": "json@example.com",
+            "password": "supersecret",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), reqwest::StatusCode::CREATED);
+
+    let multipart = client
+        .post(format!("{url}/json-users"))
+        .multipart(
+            reqwest::multipart::Form::new()
+                .text("email", "json@example.com")
+                .text("password", "supersecret"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        multipart.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
 
     task.abort();
 }

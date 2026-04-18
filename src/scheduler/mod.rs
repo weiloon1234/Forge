@@ -83,15 +83,25 @@ impl CronExpression {
     pub fn daily_at(time: &str) -> Result<Self> {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() != 2 {
-            return Err(Error::message(format!("invalid time format '{time}', expected HH:MM")));
+            return Err(Error::message(format!(
+                "invalid time format '{time}', expected HH:MM"
+            )));
         }
-        let hour: u32 = parts[0].parse().map_err(|_| Error::message("invalid hour"))?;
-        let minute: u32 = parts[1].parse().map_err(|_| Error::message("invalid minute"))?;
+        let hour: u32 = parts[0]
+            .parse()
+            .map_err(|_| Error::message("invalid hour"))?;
+        let minute: u32 = parts[1]
+            .parse()
+            .map_err(|_| Error::message("invalid minute"))?;
         if hour > 23 {
-            return Err(Error::message(format!("invalid hour {hour}, expected 0-23")));
+            return Err(Error::message(format!(
+                "invalid hour {hour}, expected 0-23"
+            )));
         }
         if minute > 59 {
-            return Err(Error::message(format!("invalid minute {minute}, expected 0-59")));
+            return Err(Error::message(format!(
+                "invalid minute {minute}, expected 0-59"
+            )));
         }
         Self::parse(format!("0 {minute} {hour} * * *"))
     }
@@ -414,12 +424,24 @@ mod tests {
     #[test]
     fn convenience_registry_methods_work() {
         let mut registry = ScheduleRegistry::new();
-        registry.every_minute(ScheduleId::new("a"), |_| async { Ok(()) }).unwrap();
-        registry.every_five_minutes(ScheduleId::new("b"), |_| async { Ok(()) }).unwrap();
-        registry.hourly(ScheduleId::new("c"), |_| async { Ok(()) }).unwrap();
-        registry.daily(ScheduleId::new("d"), |_| async { Ok(()) }).unwrap();
-        registry.daily_at(ScheduleId::new("e"), "14:30", |_| async { Ok(()) }).unwrap();
-        registry.weekly(ScheduleId::new("f"), |_| async { Ok(()) }).unwrap();
+        registry
+            .every_minute(ScheduleId::new("a"), |_| async { Ok(()) })
+            .unwrap();
+        registry
+            .every_five_minutes(ScheduleId::new("b"), |_| async { Ok(()) })
+            .unwrap();
+        registry
+            .hourly(ScheduleId::new("c"), |_| async { Ok(()) })
+            .unwrap();
+        registry
+            .daily(ScheduleId::new("d"), |_| async { Ok(()) })
+            .unwrap();
+        registry
+            .daily_at(ScheduleId::new("e"), "14:30", |_| async { Ok(()) })
+            .unwrap();
+        registry
+            .weekly(ScheduleId::new("f"), |_| async { Ok(()) })
+            .unwrap();
         assert_eq!(registry.tasks.len(), 6);
     }
 

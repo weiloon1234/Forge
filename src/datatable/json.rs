@@ -9,9 +9,7 @@ use super::column::DatatableColumn;
 use super::context::DatatableContext;
 use super::datatable_trait::ModelDatatable;
 use super::mapping::DatatableMapping;
-use super::response::{
-    DatatableColumnMeta, DatatableJsonResponse, DatatablePaginationMeta,
-};
+use super::response::{DatatableColumnMeta, DatatableJsonResponse, DatatablePaginationMeta};
 
 /// Build a paginated JSON response for a model-backed datatable.
 pub async fn build_json_response<M, D>(
@@ -53,8 +51,11 @@ where
     let filters = D::available_filters(&ctx).await?;
 
     // 9. Build pagination meta
-    let pagination_meta =
-        DatatablePaginationMeta::new(paginated.pagination.page, paginated.pagination.per_page, paginated.total);
+    let pagination_meta = DatatablePaginationMeta::new(
+        paginated.pagination.page,
+        paginated.pagination.per_page,
+        paginated.total,
+    );
 
     Ok(DatatableJsonResponse {
         rows,

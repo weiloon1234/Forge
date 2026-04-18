@@ -14,6 +14,7 @@ enum Error { Message, Http, Validation, NotFound, Other }
   fn http_with_code( status: u16, message: impl Into<String>, code: impl Into<String>, ) -> Self
   fn not_found(message: impl Into<String>) -> Self
   fn other<E>(error: E) -> Self
+  fn payload(&self) -> Value
 struct App
   fn builder() -> AppBuilder
 struct AppBuilder

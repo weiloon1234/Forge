@@ -46,9 +46,7 @@ pub trait ModelDatatable: Send + Sync + 'static {
     }
 
     /// Frontend filter metadata (controls, labels, options).
-    async fn available_filters(
-        _ctx: &DatatableContext,
-    ) -> Result<Vec<DatatableFilterRow>> {
+    async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
         Ok(Vec::new())
     }
 

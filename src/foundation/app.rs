@@ -182,11 +182,15 @@ impl AppContext {
         self.resolve::<crate::auth::session::SessionManager>()
     }
 
-    pub fn password_resets(&self) -> Result<Arc<crate::auth::password_reset::PasswordResetManager>> {
+    pub fn password_resets(
+        &self,
+    ) -> Result<Arc<crate::auth::password_reset::PasswordResetManager>> {
         self.resolve::<crate::auth::password_reset::PasswordResetManager>()
     }
 
-    pub fn email_verification(&self) -> Result<Arc<crate::auth::email_verification::EmailVerificationManager>> {
+    pub fn email_verification(
+        &self,
+    ) -> Result<Arc<crate::auth::email_verification::EmailVerificationManager>> {
         self.resolve::<crate::auth::email_verification::EmailVerificationManager>()
     }
 
@@ -869,15 +873,26 @@ impl AppBuilder {
         // Auto-register built-in notification channels (consumer-registered ones take precedence)
         let ncr_handle = registrar.notification_channel_registry();
         {
-            let mut ncr = ncr_handle.lock().expect("notification channel registry lock poisoned");
+            let mut ncr = ncr_handle
+                .lock()
+                .expect("notification channel registry lock poisoned");
             if !ncr.contains(&crate::notifications::NOTIFY_EMAIL) {
-                ncr.register(crate::notifications::NOTIFY_EMAIL, Arc::new(crate::notifications::EmailNotificationChannel))?;
+                ncr.register(
+                    crate::notifications::NOTIFY_EMAIL,
+                    Arc::new(crate::notifications::EmailNotificationChannel),
+                )?;
             }
             if !ncr.contains(&crate::notifications::NOTIFY_DATABASE) {
-                ncr.register(crate::notifications::NOTIFY_DATABASE, Arc::new(crate::notifications::DatabaseNotificationChannel))?;
+                ncr.register(
+                    crate::notifications::NOTIFY_DATABASE,
+                    Arc::new(crate::notifications::DatabaseNotificationChannel),
+                )?;
             }
             if !ncr.contains(&crate::notifications::NOTIFY_BROADCAST) {
-                ncr.register(crate::notifications::NOTIFY_BROADCAST, Arc::new(crate::notifications::BroadcastNotificationChannel))?;
+                ncr.register(
+                    crate::notifications::NOTIFY_BROADCAST,
+                    Arc::new(crate::notifications::BroadcastNotificationChannel),
+                )?;
             }
         }
         let notification_channel_registry = Arc::new(
@@ -887,9 +902,9 @@ impl AppBuilder {
         // Cache manager (needs redis before it's moved into container)
         let cache_config = app.config().cache()?;
         let cache_store: Arc<dyn crate::cache::CacheStore> = match cache_config.driver {
-            crate::config::CacheDriver::Memory => {
-                Arc::new(crate::cache::MemoryCacheStore::new(cache_config.max_entries))
-            }
+            crate::config::CacheDriver::Memory => Arc::new(crate::cache::MemoryCacheStore::new(
+                cache_config.max_entries,
+            )),
             crate::config::CacheDriver::Redis => Arc::new(crate::cache::RedisCacheStore::new(
                 redis.clone(),
                 cache_config.prefix.clone(),
@@ -897,10 +912,11 @@ impl AppBuilder {
         };
         let cache_manager = Arc::new(crate::cache::CacheManager::new(cache_store));
 
-        let password_reset_manager = Arc::new(crate::auth::password_reset::PasswordResetManager::new(
-            database.clone(),
-            60, // 60 minutes expiry
-        ));
+        let password_reset_manager =
+            Arc::new(crate::auth::password_reset::PasswordResetManager::new(
+                database.clone(),
+                60, // 60 minutes expiry
+            ));
 
         let email_verification_manager = Arc::new(
             crate::auth::email_verification::EmailVerificationManager::new(

@@ -10,8 +10,10 @@ use super::request::{DatatableFilterInput, DatatableSortInput};
 // JSON response
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableJsonResponse {
+    #[ts(type = "Array<Record<string, unknown>>")]
     pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
     pub columns: Vec<DatatableColumnMeta>,
     pub filters: Vec<DatatableFilterRow>,
@@ -24,7 +26,8 @@ pub struct DatatableJsonResponse {
 // Column metadata (sent to frontend)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableColumnMeta {
     pub name: String,
     pub label: String,
@@ -36,7 +39,8 @@ pub struct DatatableColumnMeta {
 // Pagination metadata
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatablePaginationMeta {
     pub page: u64,
     pub per_page: u64,
@@ -64,7 +68,8 @@ impl DatatablePaginationMeta {
 // Export accepted response
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableExportAccepted {
     pub datatable_id: String,
     pub recipient: String,
@@ -75,7 +80,8 @@ pub struct DatatableExportAccepted {
 // Actor snapshot (serializable for queued jobs)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
 pub struct DatatableActorSnapshot {
     pub id: String,
     pub guard: String,
@@ -89,7 +95,11 @@ impl From<&Actor> for DatatableActorSnapshot {
             id: actor.id.clone(),
             guard: actor.guard.as_str().to_string(),
             roles: actor.roles.iter().map(|r| r.as_str().to_string()).collect(),
-            permissions: actor.permissions.iter().map(|p| p.as_str().to_string()).collect(),
+            permissions: actor
+                .permissions
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
         }
     }
 }

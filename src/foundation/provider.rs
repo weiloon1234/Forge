@@ -8,15 +8,17 @@ use crate::auth::{
 };
 use crate::config::ConfigRepository;
 use crate::database::{MigrationFile, MigrationRegistryHandle, SeederFile, SeederRegistryHandle};
+use crate::datatable::registry::{DatatableRegistryBuilder, DatatableRegistryHandle};
 use crate::email::{EmailDriverFactory, EmailDriverRegistryHandle};
 use crate::events::{Event, EventListener, EventRegistryHandle};
 use crate::foundation::{Container, Result};
 use crate::jobs::{Job, JobMiddleware, JobMiddlewareRegistryHandle, JobRegistryHandle};
 use crate::logging::{ReadinessCheck, ReadinessRegistryHandle};
+use crate::notifications::{
+    NotificationChannel, NotificationChannelRegistryBuilder, NotificationChannelRegistryHandle,
+};
 use crate::storage::{StorageDriverFactory, StorageDriverRegistryHandle};
 use crate::support::{GuardId, MigrationId, PolicyId, ProbeId, SeederId};
-use crate::datatable::registry::{DatatableRegistryHandle, DatatableRegistryBuilder};
-use crate::notifications::{NotificationChannel, NotificationChannelRegistryHandle, NotificationChannelRegistryBuilder};
 
 #[derive(Clone)]
 pub struct ServiceRegistrar {
@@ -195,7 +197,6 @@ impl ServiceRegistrar {
             .register::<M>()
     }
 
-
     pub fn register_readiness_check<I, C>(&self, id: I, check: C) -> Result<()>
     where
         I: Into<ProbeId>,
@@ -221,11 +222,7 @@ impl ServiceRegistrar {
             .register(name.to_string(), factory)
     }
 
-    pub fn register_notification_channel<I, N>(
-        &self,
-        id: I,
-        channel: N,
-    ) -> Result<()>
+    pub fn register_notification_channel<I, N>(&self, id: I, channel: N) -> Result<()>
     where
         I: Into<crate::support::NotificationChannelId>,
         N: NotificationChannel,

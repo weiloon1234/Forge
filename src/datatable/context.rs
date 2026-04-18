@@ -28,7 +28,9 @@ impl<'a> DatatableContext<'a> {
             actor,
             request,
             locale: None,
-            timezone: app.timezone().unwrap_or_else(|_| crate::support::Timezone::utc()),
+            timezone: app
+                .timezone()
+                .unwrap_or_else(|_| crate::support::Timezone::utc()),
         }
     }
 

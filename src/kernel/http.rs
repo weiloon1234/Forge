@@ -52,11 +52,7 @@ impl HttpKernel {
                 crate::logging::set_openapi_spec("API", "1.0.0", &documented);
             }
             crate::logging::register_openapi_route(&mut registrar, &obs_config, options)?;
-            crate::logging::register_observability_routes(
-                &mut registrar,
-                &obs_config,
-                options,
-            )?;
+            crate::logging::register_observability_routes(&mut registrar, &obs_config, options)?;
         }
 
         // Store the named route registry in the container for URL generation

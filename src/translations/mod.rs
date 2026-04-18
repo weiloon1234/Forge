@@ -10,13 +10,11 @@ tokio::task_local! {
 
 /// Resolve the current locale: task_local request locale → i18n default → "en".
 pub fn current_locale(app: &AppContext) -> String {
-    CURRENT_LOCALE
-        .try_with(|l| l.clone())
-        .unwrap_or_else(|_| {
-            app.i18n()
-                .map(|m| m.default_locale().to_string())
-                .unwrap_or_else(|_| "en".to_string())
-        })
+    CURRENT_LOCALE.try_with(|l| l.clone()).unwrap_or_else(|_| {
+        app.i18n()
+            .map(|m| m.default_locale().to_string())
+            .unwrap_or_else(|_| "en".to_string())
+    })
 }
 
 /// A single translation record from the `model_translations` table.
@@ -255,4 +253,3 @@ pub trait HasTranslations: Send + Sync {
         .await
     }
 }
-

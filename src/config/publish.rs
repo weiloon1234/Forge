@@ -420,7 +420,11 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
                 println!("  Signing key:  {}", signing);
 
                 if let Ok(db) = config.database() {
-                    let db_status = if db.url.is_empty() { "not configured" } else { "configured" };
+                    let db_status = if db.url.is_empty() {
+                        "not configured"
+                    } else {
+                        "configured"
+                    };
                     println!("  Database:     {}", db_status);
                     if db.read_url.as_deref().is_some_and(|u| !u.is_empty()) {
                         println!("  Read replica: configured");
@@ -428,7 +432,11 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
                 }
 
                 if let Ok(redis) = config.redis() {
-                    let redis_status = if redis.url.is_empty() { "not configured" } else { "configured" };
+                    let redis_status = if redis.url.is_empty() {
+                        "not configured"
+                    } else {
+                        "configured"
+                    };
                     println!("  Redis:        {}", redis_status);
                 }
 

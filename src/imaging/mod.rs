@@ -134,8 +134,8 @@ impl ImageProcessor {
             .and_then(|e| e.to_str())
             .and_then(ImageFormat::from_extension);
 
-        let img = image::open(path)
-            .map_err(|e| Error::Message(format!("Failed to open image: {e}")))?;
+        let img =
+            image::open(path).map_err(|e| Error::Message(format!("Failed to open image: {e}")))?;
 
         Ok(Self {
             image: img,
@@ -150,9 +150,7 @@ impl ImageProcessor {
             .with_guessed_format()
             .map_err(|e| Error::Message(format!("Failed to guess image format: {e}")))?;
 
-        let format = reader
-            .format()
-            .and_then(|f| ImageFormat::try_from(f).ok());
+        let format = reader.format().and_then(|f| ImageFormat::try_from(f).ok());
 
         let img = reader
             .decode()
@@ -186,9 +184,9 @@ impl ImageProcessor {
 
     /// Resize to exact dimensions, ignoring aspect ratio.
     pub fn resize(mut self, width: u32, height: u32) -> Self {
-        self.image =
-            self.image
-                .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+        self.image = self
+            .image
+            .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
         self
     }
 

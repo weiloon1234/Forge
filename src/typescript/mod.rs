@@ -50,7 +50,8 @@ pub fn export_all(dir: &Path) -> Result<()> {
 
     let mut names: Vec<&str> = Vec::new();
     for ts_type in inventory::iter::<TsType> {
-        (ts_type.export_fn)(dir).map_err(|e| Error::message(format!("ts export `{}`: {e}", ts_type.name)))?;
+        (ts_type.export_fn)(dir)
+            .map_err(|e| Error::message(format!("ts export `{}`: {e}", ts_type.name)))?;
         names.push(ts_type.name);
     }
 
@@ -59,14 +60,21 @@ pub fn export_all(dir: &Path) -> Result<()> {
     for enum_vals in inventory::iter::<TsEnumValues> {
         let file_path = dir.join(format!("{}.ts", enum_vals.name));
         let values = (enum_vals.values_fn)();
-        let type_union = values.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(" | ");
-        let array_items = values.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(", ");
+        let type_union = values
+            .iter()
+            .map(|v| format!("\"{}\"", v))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let array_items = values
+            .iter()
+            .map(|v| format!("\"{}\"", v))
+            .collect::<Vec<_>>()
+            .join(", ");
         let content = format!(
             "// Auto-generated from AppEnum. Do not edit.\n\n\
              export type {} = {};\n\n\
              export const {}Values: {}[] = [{}];\n",
-            enum_vals.name, type_union,
-            enum_vals.name, enum_vals.name, array_items
+            enum_vals.name, type_union, enum_vals.name, enum_vals.name, array_items
         );
         std::fs::write(&file_path, content).map_err(Error::other)?;
     }
@@ -120,4 +128,31 @@ pub fn builtin_cli_registrar() -> CommandRegistrar {
         )?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::export_all;
+
+    #[test]
+    fn exports_framework_typescript_helpers() {
+        let dir = tempdir().unwrap();
+        export_all(dir.path()).unwrap();
+
+        for file in [
+            "DatatableJsonResponse.ts",
+            "DatatableRequest.ts",
+            "MessageResponse.ts",
+            "RefreshTokenRequest.ts",
+            "TokenPair.ts",
+            "TokenResponse.ts",
+        ] {
+            assert!(
+                dir.path().join(file).exists(),
+                "expected generated TypeScript file: {file}"
+            );
+        }
+    }
 }

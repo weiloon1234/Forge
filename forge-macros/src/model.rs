@@ -104,14 +104,18 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
         persisted_column_names.push(column_name.value());
 
-        let (db_type, db_type_tokens) = match infer_or_explicit_db_type(field_ty, field_args.db_type) {
-            Ok(spec) => (Some(spec), spec.tokens()),
-            Err(_) => {
-                // Fallback: assume ForgeAppEnum, let compiler verify
-                let ty = field_ty;
-                (None, quote!(<#ty as ::forge::app_enum::ForgeAppEnum>::DB_TYPE))
-            }
-        };
+        let (db_type, db_type_tokens) =
+            match infer_or_explicit_db_type(field_ty, field_args.db_type) {
+                Ok(spec) => (Some(spec), spec.tokens()),
+                Err(_) => {
+                    // Fallback: assume ForgeAppEnum, let compiler verify
+                    let ty = field_ty;
+                    (
+                        None,
+                        quote!(<#ty as ::forge::app_enum::ForgeAppEnum>::DB_TYPE),
+                    )
+                }
+            };
         let const_ident = screaming_const_ident(field_ident);
         let is_optional = option_inner_type(field_ty).is_some();
         let field_name = column_name.value();

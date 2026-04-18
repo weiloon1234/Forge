@@ -61,8 +61,8 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod countries;
-pub mod datatable;
 pub mod database;
+pub mod datatable;
 pub mod email;
 pub mod events;
 pub mod foundation;
@@ -70,67 +70,63 @@ pub mod http;
 pub mod i18n;
 pub mod imaging;
 pub mod jobs;
-pub mod metadata;
-pub mod settings;
-pub mod translations;
 pub mod kernel;
 pub mod logging;
+pub mod metadata;
+pub mod notifications;
 pub mod openapi;
 pub mod plugin;
 pub mod prelude;
 pub mod redis;
 pub mod scheduler;
-pub mod notifications;
+pub mod settings;
 pub mod storage;
 pub mod support;
 pub mod testing;
+pub mod translations;
 pub mod typescript;
 pub mod validation;
 pub mod websocket;
 
-pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, TS, Validate};
+pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, Validate, TS};
 pub use inventory;
 pub use ts_rs;
 
 pub use attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
-pub use countries::Country;
 pub use auth::{
     email_verification::EmailVerificationManager,
     password_reset::PasswordResetManager,
     session::SessionManager,
-    token::{HasToken, TokenAuthenticator, TokenManager, TokenPair},
-    AccessScope, Actor, Auth, AuthError, AuthManager, Authenticatable, AuthenticatableRegistry,
-    AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor, GuardedAccess,
-    OptionalActor, Policy, StaticBearerAuthenticator,
+    token::{
+        HasToken, RefreshTokenRequest, TokenAuthenticator, TokenManager, TokenPair, TokenResponse,
+    },
+    AccessScope, Actor, Auth, AuthError, AuthErrorCode, AuthManager, Authenticatable,
+    AuthenticatableRegistry, AuthenticatedModel, Authorizer, BearerAuthenticator, CurrentActor,
+    GuardedAccess, OptionalActor, Policy, StaticBearerAuthenticator,
 };
 pub use cache::{CacheManager, CacheStore};
-pub use notifications::{
-    BroadcastNotificationChannel, DatabaseNotificationChannel, EmailNotificationChannel,
-    Notifiable, Notification, NotificationChannel, NotificationChannelRegistry,
-    NOTIFY_BROADCAST, NOTIFY_DATABASE, NOTIFY_EMAIL,
-};
-pub use testing::{Factory, FactoryBuilder, TestApp, TestClient, TestResponse};
+pub use countries::Country;
 pub use database::{
     belongs_to, has_many, has_one, many_to_many, AggregateExpr, AggregateFn, AggregateNode,
     AggregateProjection, AnyRelation, BinaryExpr, BinaryOperator, Case, Column, ColumnInfo,
     ColumnRef, ComparisonOp, Condition, CreateDraft, CreateManyModel, CreateModel, CreateRow, Cte,
-    DatabaseManager, DatabaseTransaction, DbRecord, DbRecordStream, DbType, DbValue, DeleteModel,
-    Expr, FromDbValue, FromItem, FunctionCall, InsertSource, IntoColumnValue, IntoFieldValue,
-    IntoLoadableRelation, JoinKind, JoinNode, JsonExprBuilder, Loaded, LockBehavior, LockClause,
-    LockStrength, ManyToManyDef, MigrationContext, MigrationFile, Model, ModelBehavior,
-    ModelCollectionExt, ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent,
-    ModelDeletingEvent, ModelFeatureSetting, ModelHookContext, ModelInstanceWriteExt,
-    ModelLifecycle, ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelQuery, ModelUpdatedEvent,
+    CursorInfo, CursorMeta, CursorPaginated, CursorPagination, DatabaseManager,
+    DatabaseTransaction, DbRecord, DbRecordStream, DbType, DbValue, DeleteModel, Expr, FromDbValue,
+    FromItem, FunctionCall, InsertSource, IntoColumnValue, IntoFieldValue, IntoLoadableRelation,
+    JoinKind, JoinNode, JsonExprBuilder, Loaded, LockBehavior, LockClause, LockStrength,
+    ManyToManyDef, MigrationContext, MigrationFile, Model, ModelBehavior, ModelCollectionExt,
+    ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent,
+    ModelFeatureSetting, ModelHookContext, ModelInstanceWriteExt, ModelLifecycle,
+    ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelQuery, ModelUpdatedEvent,
     ModelUpdatingEvent, ModelWriteExecutor, NoModelLifecycle, Numeric, OnConflictAction,
-    OnConflictNode, OnConflictTarget, OrderBy, OrderDirection, CursorInfo, CursorMeta,
-    CursorPaginated, CursorPagination, Paginated, PaginatedResponse, PaginationLinks,
-    PaginationMeta, Pagination,
-    PersistedModel, Projection, ProjectionField, ProjectionFieldInfo, ProjectionMeta,
-    ProjectionQuery, Query, QueryAst, QueryBody, QueryExecutionOptions, QueryExecutor,
-    RelationAggregateDef, RelationDef, RelationKind, RelationLoader, RelationNode, RestoreModel,
-    SeederContext, SeederFile, SelectItem, SelectNode, SetOperator, Sql, TableMeta, TableRef,
-    ToDbValue, UnaryExpr, UnaryOperator, UpdateDraft, UpdateModel, Window, WindowBuilder,
-    WindowExpr, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
+    OnConflictNode, OnConflictTarget, OrderBy, OrderDirection, Paginated, PaginatedResponse,
+    Pagination, PaginationLinks, PaginationMeta, PersistedModel, Projection, ProjectionField,
+    ProjectionFieldInfo, ProjectionMeta, ProjectionQuery, Query, QueryAst, QueryBody,
+    QueryExecutionOptions, QueryExecutor, RelationAggregateDef, RelationDef, RelationKind,
+    RelationLoader, RelationNode, RestoreModel, SeederContext, SeederFile, SelectItem, SelectNode,
+    SetOperator, Sql, TableMeta, TableRef, ToDbValue, UnaryExpr, UnaryOperator, UpdateDraft,
+    UpdateModel, Window, WindowBuilder, WindowExpr, WindowFrame, WindowFrameBound,
+    WindowFrameUnits, WindowSpec,
 };
 pub use email::{
     EmailAddress, EmailAttachment, EmailDriver, EmailMailer, EmailManager, EmailMessage,
@@ -142,29 +138,33 @@ pub use foundation::{
     ServiceRegistrar,
 };
 pub use http::cookie::{Cookie, CookieJar, SessionCookie};
-pub use http::routes::RouteRegistry;
 pub use http::middleware::{
     Compression, Cors, Csrf, CsrfToken, ETag, MaintenanceMode, MaxBodySize, MiddlewareConfig,
     MiddlewareGroups, RateLimit, RateLimitBy, RateLimitWindow, RealIp, RequestTimeout,
     SecurityHeaders, TrustedProxy,
 };
 pub use http::resource::ApiResource;
+pub use http::response::MessageResponse;
+pub use http::routes::RouteRegistry;
+pub use http::{HttpResourceRoutes, JsonValidated, Validated};
 pub use i18n::{I18n, I18nManager, Locale};
 pub use imaging::{ImageFormat, ImageProcessor, Rotation};
 pub use jobs::{spawn_worker, JobHistoryStatus, JobMiddleware};
-pub use metadata::{HasMetadata, ModelMeta};
-pub use translations::{
-    current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,
-};
 pub use kernel::worker::WorkerKernel;
-pub use openapi::{ApiSchema, RouteDoc, SchemaRef};
-pub use openapi::spec::{generate_openapi_spec, DocumentedRoute};
 pub use logging::{
     AuthOutcome, HttpOutcomeClass, JobOutcome, LivenessReport, LogFormat, LogLevel,
     ObservabilityOptions, ProbeResult, ProbeState, ReadinessCheck, ReadinessReport, RequestId,
     RuntimeBackendKind, RuntimeDiagnostics, RuntimeSnapshot, SchedulerLeadershipState,
     WebSocketConnectionState,
 };
+pub use metadata::{HasMetadata, ModelMeta};
+pub use notifications::{
+    BroadcastNotificationChannel, DatabaseNotificationChannel, EmailNotificationChannel,
+    Notifiable, Notification, NotificationChannel, NotificationChannelRegistry, NOTIFY_BROADCAST,
+    NOTIFY_DATABASE, NOTIFY_EMAIL,
+};
+pub use openapi::spec::{generate_openapi_spec, DocumentedRoute};
+pub use openapi::{ApiSchema, RouteDoc, SchemaRef};
 pub use plugin::{
     Plugin, PluginAsset, PluginAssetKind, PluginDependency, PluginInstallOptions, PluginManifest,
     PluginRegistrar, PluginRegistry, PluginScaffold, PluginScaffoldOptions, PluginScaffoldVar,
@@ -177,11 +177,15 @@ pub use storage::{
 };
 pub use support::lock::{DistributedLock, LockGuard};
 pub use support::{
-    sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock, Collection, CommandId,
-    CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId, LocalDateTime, MigrationId,
-    ModelId, NotificationChannelId, PermissionId, PluginAssetId, PluginId, PluginScaffoldId,
-    PolicyId, ProbeId, QueueId,
-    RoleId, ScheduleId, SeederId, Time, Timezone, Token, ValidationRuleId,
+    sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock,
+    Collection, CommandId, CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId,
+    LocalDateTime, MigrationId, ModelId, NotificationChannelId, PermissionId, PluginAssetId,
+    PluginId, PluginScaffoldId, PolicyId, ProbeId, QueueId, RoleId, ScheduleId, SeederId, Time,
+    Timezone, Token, ValidationRuleId,
+};
+pub use testing::{Factory, FactoryBuilder, TestApp, TestClient, TestResponse};
+pub use translations::{
+    current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,
 };
 pub use websocket::{ERROR_EVENT, SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT};
 

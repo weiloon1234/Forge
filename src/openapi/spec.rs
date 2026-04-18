@@ -10,11 +10,7 @@ pub struct DocumentedRoute {
     pub doc: RouteDoc,
 }
 
-pub fn generate_openapi_spec(
-    title: &str,
-    version: &str,
-    routes: &[DocumentedRoute],
-) -> Value {
+pub fn generate_openapi_spec(title: &str, version: &str, routes: &[DocumentedRoute]) -> Value {
     let mut paths: BTreeMap<String, Value> = BTreeMap::new();
     let mut schemas: BTreeMap<String, Value> = BTreeMap::new();
 

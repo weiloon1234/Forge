@@ -124,6 +124,19 @@ impl Authenticatable for User {
 impl HasToken for User {}
 ```
 
+If your model follows the common `id: ModelId<Self>` pattern, you can usually omit `resolve_from_actor()` entirely and rely on Forge's default primary-key lookup:
+
+```rust
+#[async_trait]
+impl Authenticatable for User {
+    fn guard() -> GuardId {
+        Guard::User.into()
+    }
+}
+```
+
+The default resolver supports UUID, text, and integer primary keys. Override it only when you need custom eager loading, tenant scoping, active-status checks, or a non-standard lookup.
+
 If you have a separate admin model:
 
 ```rust
@@ -299,12 +312,18 @@ Client sends: `Authorization: Bearer forge_abc123...`
 ```rust
 async fn refresh(
     State(app): State<AppContext>,
-    Json(body): Json<RefreshRequest>,
+    JsonValidated(body): JsonValidated<RefreshTokenRequest>,
 ) -> Result<impl IntoResponse> {
     let tokens = app.tokens()?;
     let new_pair = tokens.refresh(&body.refresh_token).await?;
-    Ok(Json(new_pair))
+    Ok(Json(TokenResponse::new(new_pair)))
 }
+```
+
+`TokenResponse` also works well as a WebSocket payload for token-auth portals:
+
+```rust
+context.publish("auth.tokens", TokenResponse::new(tokens)).await?;
 ```
 
 ### Revoking Tokens
@@ -332,6 +351,23 @@ refresh_token_ttl_days = 30         # long-lived refresh token
 token_length = 32                   # random bytes in token
 rotate_refresh_tokens = true        # issue new refresh token on refresh
 ```
+
+---
+
+## Auth Error Responses
+
+Unauthorized and forbidden auth failures now return stable machine-friendly codes alongside the status:
+
+```json
+{
+  "message": "Unauthorized",
+  "status": 401,
+  "code": "missing_auth_credentials",
+  "message_key": "auth.missing_auth_credentials"
+}
+```
+
+This keeps server responses consistent while giving clients a translation-friendly key for UI copy.
 
 ---
 

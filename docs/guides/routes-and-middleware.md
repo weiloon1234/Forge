@@ -85,6 +85,29 @@ r.group("/api", |r| {
 })?;
 ```
 
+If a whole group shares the same guard, middleware, or documentation tags, use `group_with_options()` to define those defaults once:
+
+```rust
+r.group_with_options(
+    "/api/admin",
+    HttpRouteOptions::new()
+        .guard(Guard::Admin)
+        .middleware_group("api")
+        .tag("admin"),
+    |r| {
+        r.route("/users", get(list_admin_users));
+        r.route_with_options(
+            "/stats",
+            get(admin_stats),
+            HttpRouteOptions::new().summary("Admin stats"),
+        );
+        Ok(())
+    },
+)?;
+```
+
+Per-route options inside the group are merged with the group defaults.
+
 ### API Versioning
 
 Shorthand for `/api/v{N}` groups:
@@ -131,6 +154,29 @@ r.route_named("password.reset", "/reset/:token", get(reset_form));
 r.route_named_with_options("posts.create", "/posts", post(create_post),
     HttpRouteOptions::new().guard(Guard::User));
 ```
+
+### Resource Routes
+
+For common CRUD route sets, use `resource()` or `resource_with_options()`:
+
+```rust
+r.resource_with_options(
+    "posts",
+    "/posts",
+    HttpResourceRoutes::new()
+        .index(get(list_posts))
+        .store(post(create_post))
+        .show(get(show_post))
+        .update(put(update_post))
+        .destroy(delete(delete_post)),
+    HttpRouteOptions::new()
+        .guard(Guard::User)
+        .middleware_group("api")
+        .tag("posts"),
+);
+```
+
+This registers conventional named routes such as `posts.index`, `posts.store`, `posts.show`, `posts.update`, and `posts.destroy`.
 
 ### Generating URLs
 

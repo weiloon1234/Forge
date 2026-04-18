@@ -76,7 +76,10 @@ impl TestAppBuilder {
         self
     }
 
-    pub fn register_middleware(mut self, config: crate::http::middleware::MiddlewareConfig) -> Self {
+    pub fn register_middleware(
+        mut self,
+        config: crate::http::middleware::MiddlewareConfig,
+    ) -> Self {
         self.inner = self.inner.register_middleware(config);
         self
     }
@@ -170,9 +173,7 @@ impl TestRequestBuilder {
             None => Body::empty(),
         };
 
-        let mut builder = Request::builder()
-            .method(self.method)
-            .uri(&self.path);
+        let mut builder = Request::builder().method(self.method).uri(&self.path);
 
         for (name, value) in &self.headers {
             builder = builder.header(name.as_str(), value.as_str());

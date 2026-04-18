@@ -121,7 +121,9 @@ enum RuleSpec {
 
 /// Check if a type's last path segment matches the given name.
 fn last_segment_is(ty: &Type, name: &str) -> bool {
-    let Type::Path(type_path) = ty else { return false };
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
     type_path
         .path
         .segments
@@ -234,7 +236,10 @@ fn parse_one_rule(input: ParseStream<'_>) -> syn::Result<RuleSpec> {
     // File validation rules
     if name == "image" {
         if input.peek(syn::token::Paren) {
-            return Err(syn::Error::new(input.span(), "image rule takes no arguments"));
+            return Err(syn::Error::new(
+                input.span(),
+                "image rule takes no arguments",
+            ));
         }
         return Ok(RuleSpec::Image);
     }
@@ -478,7 +483,12 @@ fn generate_validate_body(
                     quote!(self.#field_ident.original_name.as_deref().unwrap_or(""))
                 };
 
-                let rule_chain = generate_rule_chain_from_refs(&text_rules, struct_ident, all_field_names, field_ident)?;
+                let rule_chain = generate_rule_chain_from_refs(
+                    &text_rules,
+                    struct_ident,
+                    all_field_names,
+                    field_ident,
+                )?;
 
                 let has_nullable = text_rules.iter().any(|r| match r {
                     RuleSpec::Simple { name, .. } => name == "nullable",
@@ -543,7 +553,10 @@ fn generate_validate_body(
     Ok(stmts)
 }
 
-fn generate_file_validation_code(fv: &FieldValidation, field_name: &str) -> syn::Result<TokenStream> {
+fn generate_file_validation_code(
+    fv: &FieldValidation,
+    field_name: &str,
+) -> syn::Result<TokenStream> {
     let field_ident = &fv.field_ident;
     let field_name_lit = field_name;
 

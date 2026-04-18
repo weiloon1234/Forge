@@ -96,6 +96,7 @@ struct FieldValidator
   fn bail(self) -> Self
   fn with_message(self, message: impl Into<String>) -> Self
   async fn apply(self) -> Result<()>
+struct JsonValidated
 struct Multipart
   async fn next_field(&mut self) -> Result<Option<Field<'_>>, MultipartError>
 struct RuleContext

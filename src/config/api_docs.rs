@@ -100,7 +100,11 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
 
         let lines = content.lines().count();
         fs::write(out.join("root.md"), &content).map_err(Error::other)?;
-        index_entries.push(("root".into(), "Crate root: derive macros, re-exports".into(), lines));
+        index_entries.push((
+            "root".into(),
+            "Crate root: derive macros, re-exports".into(),
+            lines,
+        ));
     }
 
     // Write module files
@@ -140,7 +144,8 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
 
         if has_content {
             let lines = content.lines().count();
-            fs::write(modules_dir.join(format!("{group_key}.md")), &content).map_err(Error::other)?;
+            fs::write(modules_dir.join(format!("{group_key}.md")), &content)
+                .map_err(Error::other)?;
             index_entries.push((group_key.to_string(), desc, lines));
         }
     }
@@ -157,14 +162,22 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
     let mut index = String::new();
     writeln!(index, "# Forge API Surface").unwrap();
     writeln!(index).unwrap();
-    writeln!(index, "> Auto-generated from `cargo doc`. Regenerate: `docs:api`").unwrap();
+    writeln!(
+        index,
+        "> Auto-generated from `cargo doc`. Regenerate: `docs:api`"
+    )
+    .unwrap();
     writeln!(index).unwrap();
     writeln!(
         index,
         "Each file documents one module's public API (structs, enums, traits, functions)."
     )
     .unwrap();
-    writeln!(index, "Load only the file you need — don't read them all at once.").unwrap();
+    writeln!(
+        index,
+        "Load only the file you need — don't read them all at once."
+    )
+    .unwrap();
     writeln!(index).unwrap();
     writeln!(index, "| Module | Description | Size |").unwrap();
     writeln!(index, "|--------|-------------|------|").unwrap();
@@ -235,9 +248,7 @@ fn auto_group_modules(
     groups
 }
 
-fn filter_root_items(
-    items: &BTreeMap<String, Vec<String>>,
-) -> BTreeMap<String, Vec<String>> {
+fn filter_root_items(items: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
     let skip_structs = ["Cookie", "CookieJar"];
     let mut filtered = BTreeMap::new();
     for (kind, names) in items {
@@ -341,7 +352,10 @@ fn discover_modules(
         }
 
         if let Some(arr) = names.as_array() {
-            let v: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            let v: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
             if !v.is_empty() {
                 items.insert(kind.clone(), v);
             }
@@ -355,11 +369,7 @@ fn discover_modules(
 
 // ── Formatting (regex-based, no scraper dependency) ──────────────────
 
-fn format_module(
-    doc_root: &Path,
-    mod_path: &str,
-    items: &BTreeMap<String, Vec<String>>,
-) -> String {
+fn format_module(doc_root: &Path, mod_path: &str, items: &BTreeMap<String, Vec<String>>) -> String {
     let mut out = String::new();
     let dir = if mod_path.is_empty() {
         doc_root.to_path_buf()
@@ -367,8 +377,9 @@ fn format_module(
         doc_root.join(mod_path.replace("::", "/"))
     };
 
-    for kind in ["derive", "macro", "constant", "static", "type", "enum", "struct", "trait", "fn"]
-    {
+    for kind in [
+        "derive", "macro", "constant", "static", "type", "enum", "struct", "trait", "fn",
+    ] {
         let Some(names) = items.get(kind) else {
             continue;
         };
@@ -489,7 +500,11 @@ fn extract_own_methods(html: &str) -> Vec<String> {
         .filter_map(|c| {
             let raw = decode_and_strip_tags(c.get(1)?.as_str());
             let sig = simplify_method_sig(&raw);
-            if sig.len() > 3 { Some(sig) } else { None }
+            if sig.len() > 3 {
+                Some(sig)
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -528,7 +543,11 @@ fn extract_trait_methods(decl: &str) -> Vec<String> {
             let t = line.trim();
             if t.starts_with("fn ") || t.starts_with("async fn ") {
                 let sig = simplify_method_sig(&format!("pub {t}"));
-                if !sig.is_empty() { Some(sig) } else { None }
+                if !sig.is_empty() {
+                    Some(sig)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -553,7 +572,10 @@ fn extract_desugared_async_methods(decl: &str) -> Vec<String> {
         if !in_fn && t.starts_with("fn ") {
             in_fn = true;
             current_fn = t.to_string();
-            brace_depth = t.matches('{').count().saturating_sub(t.matches('}').count());
+            brace_depth = t
+                .matches('{')
+                .count()
+                .saturating_sub(t.matches('}').count());
             if t.ends_with("{ ... }") || t.ends_with(';') {
                 push_desugared(&mut methods, &current_fn);
                 in_fn = false;
@@ -613,7 +635,9 @@ fn simplify_method_sig(sig: &str) -> String {
     let clean = strip_where_clause(s)
         .replace("{ … }", "")
         .replace("{ ... }", "");
-    strip_where_from_sig(&collapse_whitespace(clean.trim().trim_end_matches(';').trim()))
+    strip_where_from_sig(&collapse_whitespace(
+        clean.trim().trim_end_matches(';').trim(),
+    ))
 }
 
 fn simplify_trait_decl(decl: &str, name: &str) -> String {
@@ -637,7 +661,11 @@ fn simplify_trait_decl(decl: &str, name: &str) -> String {
         }
         if collecting {
             if t.starts_with('+') {
-                let p = t.trim_start_matches('+').trim().trim_end_matches('{').trim();
+                let p = t
+                    .trim_start_matches('+')
+                    .trim()
+                    .trim_end_matches('{')
+                    .trim();
                 if !p.is_empty() {
                     supers.push(p.to_string());
                 }
@@ -648,7 +676,12 @@ fn simplify_trait_decl(decl: &str, name: &str) -> String {
     }
     let supers: Vec<_> = supers
         .into_iter()
-        .filter(|s| !matches!(s.as_str(), "Send" | "Sync" | "'static" | "Sized" | "'static {"))
+        .filter(|s| {
+            !matches!(
+                s.as_str(),
+                "Send" | "Sync" | "'static" | "Sized" | "'static {"
+            )
+        })
         .collect();
     if supers.is_empty() {
         name.to_string()

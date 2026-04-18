@@ -115,4 +115,3 @@ fn extract_expires_param(url: &str) -> Result<i64> {
     }
     Err(Error::http(403, "missing expires parameter"))
 }
-

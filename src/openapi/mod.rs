@@ -174,4 +174,33 @@ impl RouteDoc {
         self.deprecated = true;
         self
     }
+
+    pub fn merge_defaults(mut self, defaults: &Self) -> Self {
+        if self.method.is_none() {
+            self.method = defaults.method.clone();
+        }
+        if self.summary.is_none() {
+            self.summary = defaults.summary.clone();
+        }
+        if self.description.is_none() {
+            self.description = defaults.description.clone();
+        }
+        if self.request.is_none() {
+            self.request = defaults.request.clone();
+        }
+        if self.responses.is_empty() {
+            self.responses = defaults.responses.clone();
+        }
+        if defaults.deprecated {
+            self.deprecated = true;
+        }
+
+        for tag in &defaults.tags {
+            if !self.tags.contains(tag) {
+                self.tags.push(tag.clone());
+            }
+        }
+
+        self
+    }
 }

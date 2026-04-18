@@ -40,14 +40,12 @@ impl Job for DatatableExportJob {
         let app = context.app();
         let registry = app.datatables()?;
 
-        let datatable = registry
-            .get(&self.payload.datatable_id)
-            .ok_or_else(|| {
-                crate::foundation::Error::message(format!(
-                    "datatable '{}' not found in registry",
-                    self.payload.datatable_id
-                ))
-            })?;
+        let datatable = registry.get(&self.payload.datatable_id).ok_or_else(|| {
+            crate::foundation::Error::message(format!(
+                "datatable '{}' not found in registry",
+                self.payload.datatable_id
+            ))
+        })?;
 
         // Reconstruct actor from snapshot
         let actor = self.payload.actor.as_ref().map(Actor::from);
@@ -55,17 +53,13 @@ impl Job for DatatableExportJob {
         let request = self.payload.request.clone();
 
         // Use the download path to generate the export data, then deliver
-        let response = datatable
-            .download(app, actor.as_ref(), request)
-            .await?;
+        let response = datatable.download(app, actor.as_ref(), request).await?;
 
         // Extract bytes from the response body
         let (_, body) = response.into_parts();
-        let bytes = axum::body::to_bytes(body, usize::MAX)
-            .await
-            .map_err(|e| {
-                crate::foundation::Error::message(format!("failed to read export body: {e}"))
-            })?;
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+            crate::foundation::Error::message(format!("failed to read export body: {e}"))
+        })?;
 
         let export = super::export::GeneratedDatatableExport {
             datatable_id: self.payload.datatable_id.clone(),
@@ -103,9 +97,7 @@ pub async fn dispatch_export<D: super::datatable_trait::ModelDatatable + ?Sized>
 ) -> Result<DatatableExportAccepted> {
     let actor_snapshot = actor.map(DatatableActorSnapshot::from);
 
-    let timezone = app
-        .timezone()
-        .unwrap_or_else(|_| Timezone::utc());
+    let timezone = app.timezone().unwrap_or_else(|_| Timezone::utc());
 
     let job = DatatableExportJob {
         payload: DatatableExportJobPayload {

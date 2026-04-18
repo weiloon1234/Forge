@@ -537,9 +537,8 @@ impl PluginRegistrar {
         G: crate::auth::BearerAuthenticator,
     {
         let id = id.into();
-        self.registrar_actions.push(Box::new(move |r| {
-            r.register_guard(id, guard)
-        }));
+        self.registrar_actions
+            .push(Box::new(move |r| r.register_guard(id, guard)));
         self
     }
 
@@ -549,9 +548,8 @@ impl PluginRegistrar {
         P: crate::auth::Policy,
     {
         let id = id.into();
-        self.registrar_actions.push(Box::new(move |r| {
-            r.register_policy(id, policy)
-        }));
+        self.registrar_actions
+            .push(Box::new(move |r| r.register_policy(id, policy)));
         self
     }
 
@@ -619,9 +617,8 @@ impl PluginRegistrar {
         C: crate::logging::ReadinessCheck,
     {
         let id = id.into();
-        self.registrar_actions.push(Box::new(move |r| {
-            r.register_readiness_check(id, check)
-        }));
+        self.registrar_actions
+            .push(Box::new(move |r| r.register_readiness_check(id, check)));
         self
     }
 
@@ -631,9 +628,8 @@ impl PluginRegistrar {
         factory: crate::storage::StorageDriverFactory,
     ) -> &mut Self {
         let name = name.into();
-        self.registrar_actions.push(Box::new(move |r| {
-            r.register_storage_driver(&name, factory)
-        }));
+        self.registrar_actions
+            .push(Box::new(move |r| r.register_storage_driver(&name, factory)));
         self
     }
 
@@ -643,9 +639,8 @@ impl PluginRegistrar {
         factory: crate::email::EmailDriverFactory,
     ) -> &mut Self {
         let name = name.into();
-        self.registrar_actions.push(Box::new(move |r| {
-            r.register_email_driver(&name, factory)
-        }));
+        self.registrar_actions
+            .push(Box::new(move |r| r.register_email_driver(&name, factory)));
         self
     }
 
@@ -1464,20 +1459,23 @@ mod tests {
     #[test]
     fn installs_assets_and_detects_collisions() {
         let directory = tempdir().unwrap();
-        let registry = PluginRegistry::new(vec![PluginManifest::new(
-            PluginId::new("forge.example"),
-            Version::parse("1.0.0").unwrap(),
-            VersionReq::parse("^0.1").unwrap(),
-        )
-        .with_assets_and_scaffolds(
-            vec![PluginAsset::text(
-                PluginAssetId::new("config"),
-                PluginAssetKind::Config,
-                "config/plugin.toml",
-                "enabled = true\n",
+        let registry = PluginRegistry::new(
+            vec![PluginManifest::new(
+                PluginId::new("forge.example"),
+                Version::parse("1.0.0").unwrap(),
+                VersionReq::parse("^0.1").unwrap(),
+            )
+            .with_assets_and_scaffolds(
+                vec![PluginAsset::text(
+                    PluginAssetId::new("config"),
+                    PluginAssetKind::Config,
+                    "config/plugin.toml",
+                    "enabled = true\n",
+                )],
+                Vec::new(),
             )],
-            Vec::new(),
-        )], HashMap::new());
+            HashMap::new(),
+        );
 
         let written = registry
             .install_assets(
@@ -1502,20 +1500,23 @@ mod tests {
     #[test]
     fn renders_scaffolds_with_validation() {
         let directory = tempdir().unwrap();
-        let registry = PluginRegistry::new(vec![PluginManifest::new(
-            PluginId::new("forge.example"),
-            Version::parse("1.0.0").unwrap(),
-            VersionReq::parse("^0.1").unwrap(),
-        )
-        .with_assets_and_scaffolds(
-            Vec::new(),
-            vec![PluginScaffold::new(PluginScaffoldId::new("portal"))
-                .variable(PluginScaffoldVar::new("name"))
-                .file(
-                    "src/app/{{name}}.rs",
-                    "pub const NAME: &str = \"{{name}}\";\n",
-                )],
-        )], HashMap::new());
+        let registry = PluginRegistry::new(
+            vec![PluginManifest::new(
+                PluginId::new("forge.example"),
+                Version::parse("1.0.0").unwrap(),
+                VersionReq::parse("^0.1").unwrap(),
+            )
+            .with_assets_and_scaffolds(
+                Vec::new(),
+                vec![PluginScaffold::new(PluginScaffoldId::new("portal"))
+                    .variable(PluginScaffoldVar::new("name"))
+                    .file(
+                        "src/app/{{name}}.rs",
+                        "pub const NAME: &str = \"{{name}}\";\n",
+                    )],
+            )],
+            HashMap::new(),
+        );
 
         registry
             .render_scaffold(

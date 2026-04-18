@@ -194,8 +194,7 @@ impl RuntimeBackend {
                     .get_multiplexed_async_connection()
                     .await
                     .map_err(Error::other)?;
-                let members: Vec<String> =
-                    conn.smembers(full_key).await.map_err(Error::other)?;
+                let members: Vec<String> = conn.smembers(full_key).await.map_err(Error::other)?;
                 Ok(members)
             }
             Self::Memory(runtime) => {

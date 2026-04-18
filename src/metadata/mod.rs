@@ -64,11 +64,7 @@ pub trait HasMetadata: Send + Sync {
         }
     }
 
-    async fn get_meta_raw(
-        &self,
-        app: &AppContext,
-        key: &str,
-    ) -> Result<Option<serde_json::Value>> {
+    async fn get_meta_raw(&self, app: &AppContext, key: &str) -> Result<Option<serde_json::Value>> {
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -149,4 +145,3 @@ pub trait HasMetadata: Send + Sync {
             .collect())
     }
 }
-

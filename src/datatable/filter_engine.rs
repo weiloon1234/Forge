@@ -5,7 +5,9 @@ use crate::foundation::{Error, Result};
 use crate::support::{Date, DateTime, LocalDateTime};
 
 use super::column::DatatableColumn;
-use super::request::{DatatableFilterInput, DatatableFilterOp, DatatableFilterValue, DatatableSortInput};
+use super::request::{
+    DatatableFilterInput, DatatableFilterOp, DatatableFilterValue, DatatableSortInput,
+};
 
 // ---------------------------------------------------------------------------
 // Auto-filter application
@@ -99,7 +101,11 @@ fn build_filter_condition(
     match op {
         DatatableFilterOp::Eq => {
             let db_val = filter_value_to_db(value, db_type)?;
-            Ok(Condition::compare(col_expr, ComparisonOp::Eq, Expr::value(db_val)))
+            Ok(Condition::compare(
+                col_expr,
+                ComparisonOp::Eq,
+                Expr::value(db_val),
+            ))
         }
         DatatableFilterOp::NotEq => {
             let db_val = filter_value_to_db(value, db_type)?;
@@ -120,7 +126,11 @@ fn build_filter_condition(
         }
         DatatableFilterOp::Gt => {
             let db_val = filter_value_to_db(value, db_type)?;
-            Ok(Condition::compare(col_expr, ComparisonOp::Gt, Expr::value(db_val)))
+            Ok(Condition::compare(
+                col_expr,
+                ComparisonOp::Gt,
+                Expr::value(db_val),
+            ))
         }
         DatatableFilterOp::Gte => {
             let db_val = filter_value_to_db(value, db_type)?;
@@ -132,7 +142,11 @@ fn build_filter_condition(
         }
         DatatableFilterOp::Lt => {
             let db_val = filter_value_to_db(value, db_type)?;
-            Ok(Condition::compare(col_expr, ComparisonOp::Lt, Expr::value(db_val)))
+            Ok(Condition::compare(
+                col_expr,
+                ComparisonOp::Lt,
+                Expr::value(db_val),
+            ))
         }
         DatatableFilterOp::Lte => {
             let db_val = filter_value_to_db(value, db_type)?;
@@ -156,7 +170,11 @@ fn build_filter_condition(
         DatatableFilterOp::Date => {
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
-            Ok(Condition::compare(col_expr, ComparisonOp::Eq, Expr::value(db_val)))
+            Ok(Condition::compare(
+                col_expr,
+                ComparisonOp::Eq,
+                Expr::value(db_val),
+            ))
         }
         DatatableFilterOp::DateFrom => {
             let text = expect_text(value)?;
@@ -179,7 +197,11 @@ fn build_filter_condition(
         DatatableFilterOp::Datetime => {
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
-            Ok(Condition::compare(col_expr, ComparisonOp::Eq, Expr::value(db_val)))
+            Ok(Condition::compare(
+                col_expr,
+                ComparisonOp::Eq,
+                Expr::value(db_val),
+            ))
         }
         DatatableFilterOp::DatetimeFrom => {
             let text = expect_text(value)?;
@@ -293,7 +315,9 @@ pub fn apply_default_sorts<M: Model>(
 fn expect_text(value: &DatatableFilterValue) -> Result<String> {
     match value {
         DatatableFilterValue::Text(s) => Ok(s.clone()),
-        _ => Err(Error::message("expected text value for this filter operation")),
+        _ => Err(Error::message(
+            "expected text value for this filter operation",
+        )),
     }
 }
 
@@ -312,9 +336,7 @@ fn filter_value_to_db(value: &DatatableFilterValue, db_type: DbType) -> Result<D
         DatatableFilterValue::Text(s) => text_to_db_value(s, db_type),
         DatatableFilterValue::Bool(b) => Ok(DbValue::Bool(*b)),
         DatatableFilterValue::Number(n) => number_to_db_value(*n, db_type),
-        DatatableFilterValue::Values(vs) if vs.len() == 1 => {
-            text_to_db_value(&vs[0], db_type)
-        }
+        DatatableFilterValue::Values(vs) if vs.len() == 1 => text_to_db_value(&vs[0], db_type),
         _ => Err(Error::message(
             "cannot convert this filter value to a database value",
         )),

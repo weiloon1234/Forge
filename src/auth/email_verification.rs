@@ -36,20 +36,14 @@ impl EmailVerificationManager {
     ///
     /// Returns the plaintext token (to be included in the verification URL).
     pub async fn create_token<M: Authenticatable>(&self, email: &str) -> Result<String> {
-        self.store
-            .create_token(email, Self::guard_key::<M>())
-            .await
+        self.store.create_token(email, Self::guard_key::<M>()).await
     }
 
     /// Validate an email verification token.
     ///
     /// Returns `Ok(())` if the token is valid and not expired.
     /// Deletes the token after successful validation (single use).
-    pub async fn validate_token<M: Authenticatable>(
-        &self,
-        email: &str,
-        token: &str,
-    ) -> Result<()> {
+    pub async fn validate_token<M: Authenticatable>(&self, email: &str, token: &str) -> Result<()> {
         self.store
             .validate_token(email, token, Self::guard_key::<M>())
             .await

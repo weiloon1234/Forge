@@ -447,7 +447,11 @@ mod file_validation {
         pub avatar: Option<forge::storage::UploadedFile>,
     }
 
-    fn make_uploaded_file(content: &[u8], name: &str, content_type: &str) -> forge::storage::UploadedFile {
+    fn make_uploaded_file(
+        content: &[u8],
+        name: &str,
+        content_type: &str,
+    ) -> forge::storage::UploadedFile {
         let temp_dir = std::env::temp_dir().join("forge-test-file-validation");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let temp_path = temp_dir.join(format!("test-{}", uuid::Uuid::now_v7()));
@@ -468,8 +472,8 @@ mod file_validation {
 
         // PNG magic bytes
         let png_bytes = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
         ];
         let file = make_uploaded_file(&png_bytes, "avatar.png", "image/png");
 
@@ -504,8 +508,8 @@ mod file_validation {
 
         // PNG header + padding to exceed 2048 bytes
         let mut png_bytes = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
         ];
         png_bytes.extend(vec![0u8; 3000]); // exceed 2048KB... wait, 2048 is KB, so 2048*1024 = 2MB
 
@@ -558,9 +562,7 @@ mod file_validation {
         bytes.extend(vec![0u8; 1500]);
         let file = make_uploaded_file(&bytes, "big.png", "image/png");
 
-        let input = TinyUpload {
-            photo: Some(file),
-        };
+        let input = TinyUpload { photo: Some(file) };
         let mut validator = Validator::new(app);
         input.validate(&mut validator).await.unwrap();
         let errors = validator.finish().unwrap_err();
@@ -580,14 +582,10 @@ mod file_validation {
         let app = test_app();
 
         // PNG bytes but claiming text/plain content type — magic bytes will detect it as PNG
-        let png_bytes = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-        ];
+        let png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let file = make_uploaded_file(&png_bytes, "doc.png", "text/plain");
 
-        let input = DocumentUpload {
-            doc: Some(file),
-        };
+        let input = DocumentUpload { doc: Some(file) };
         let mut validator = Validator::new(app);
         input.validate(&mut validator).await.unwrap();
         let errors = validator.finish().unwrap_err();
@@ -607,9 +605,7 @@ mod file_validation {
         let app = test_app();
         let file = make_uploaded_file(b"data", "document.pdf", "application/pdf");
 
-        let input = ImageUpload {
-            photo: Some(file),
-        };
+        let input = ImageUpload { photo: Some(file) };
         let mut validator = Validator::new(app);
         input.validate(&mut validator).await.unwrap();
         let errors = validator.finish().unwrap_err();
@@ -621,9 +617,7 @@ mod file_validation {
         let app = test_app();
         let file = make_uploaded_file(b"data", "photo.png", "image/png");
 
-        let input = ImageUpload {
-            photo: Some(file),
-        };
+        let input = ImageUpload { photo: Some(file) };
         let mut validator = Validator::new(app);
         input.validate(&mut validator).await.unwrap();
         assert!(validator.finish().is_ok());

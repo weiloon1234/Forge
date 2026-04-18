@@ -67,9 +67,7 @@ impl SessionManager {
         let session_key = self.redis.key(format!("session:{session_id}"));
         conn.set_ex(&session_key, &json, ttl_secs).await?;
 
-        let index_key = self
-            .redis
-            .key(format!("session_index:{guard}:{actor_id}"));
+        let index_key = self.redis.key(format!("session_index:{guard}:{actor_id}"));
         conn.sadd(&index_key, &session_id).await?;
 
         Ok(session_id)
@@ -128,9 +126,7 @@ impl SessionManager {
     pub async fn destroy_all<M: Authenticatable>(&self, actor_id: &str) -> Result<()> {
         let guard = M::guard();
         let mut conn = self.redis.connection().await?;
-        let index_key = self
-            .redis
-            .key(format!("session_index:{guard}:{actor_id}"));
+        let index_key = self.redis.key(format!("session_index:{guard}:{actor_id}"));
 
         let session_ids: Vec<String> = conn.smembers(&index_key).await.unwrap_or_default();
 
@@ -139,7 +135,10 @@ impl SessionManager {
             .map(|sid| self.redis.key(format!("session:{sid}")))
             .collect();
 
-        let all_keys: Vec<&_> = session_keys.iter().chain(std::iter::once(&index_key)).collect();
+        let all_keys: Vec<&_> = session_keys
+            .iter()
+            .chain(std::iter::once(&index_key))
+            .collect();
         conn.del_many(&all_keys).await?;
         Ok(())
     }
@@ -150,11 +149,7 @@ impl SessionManager {
     }
 
     /// Build a response that sets the session cookie alongside the given body.
-    pub fn login_response(
-        &self,
-        session_id: String,
-        body: impl IntoResponse,
-    ) -> Result<Response> {
+    pub fn login_response(&self, session_id: String, body: impl IntoResponse) -> Result<Response> {
         let cookie = SessionCookie::build(
             &self.config.cookie_name,
             &session_id,

@@ -15,48 +15,200 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
     );
 
     // HTTP request counters
-    write_help_type(&mut out, "forge_http_requests_total", "Total HTTP requests handled", "counter");
-    write_counter_label(&mut out, "forge_http_requests_total", "class", "1xx", snapshot.http.informational_total);
-    write_counter_label(&mut out, "forge_http_requests_total", "class", "2xx", snapshot.http.success_total);
-    write_counter_label(&mut out, "forge_http_requests_total", "class", "3xx", snapshot.http.redirection_total);
-    write_counter_label(&mut out, "forge_http_requests_total", "class", "4xx", snapshot.http.client_error_total);
-    write_counter_label(&mut out, "forge_http_requests_total", "class", "5xx", snapshot.http.server_error_total);
+    write_help_type(
+        &mut out,
+        "forge_http_requests_total",
+        "Total HTTP requests handled",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_requests_total",
+        "class",
+        "1xx",
+        snapshot.http.informational_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_requests_total",
+        "class",
+        "2xx",
+        snapshot.http.success_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_requests_total",
+        "class",
+        "3xx",
+        snapshot.http.redirection_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_requests_total",
+        "class",
+        "4xx",
+        snapshot.http.client_error_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_requests_total",
+        "class",
+        "5xx",
+        snapshot.http.server_error_total,
+    );
 
     // Auth counters
-    write_help_type(&mut out, "forge_auth_total", "Total authentication outcomes", "counter");
-    write_counter_label(&mut out, "forge_auth_total", "outcome", "success", snapshot.auth.success_total);
-    write_counter_label(&mut out, "forge_auth_total", "outcome", "unauthorized", snapshot.auth.unauthorized_total);
-    write_counter_label(&mut out, "forge_auth_total", "outcome", "forbidden", snapshot.auth.forbidden_total);
-    write_counter_label(&mut out, "forge_auth_total", "outcome", "error", snapshot.auth.error_total);
+    write_help_type(
+        &mut out,
+        "forge_auth_total",
+        "Total authentication outcomes",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_auth_total",
+        "outcome",
+        "success",
+        snapshot.auth.success_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_auth_total",
+        "outcome",
+        "unauthorized",
+        snapshot.auth.unauthorized_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_auth_total",
+        "outcome",
+        "forbidden",
+        snapshot.auth.forbidden_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_auth_total",
+        "outcome",
+        "error",
+        snapshot.auth.error_total,
+    );
 
     // WebSocket counters
-    write_help_type(&mut out, "forge_websocket_connections_total", "Total WebSocket connections opened", "counter");
-    let _ = writeln!(out, "forge_websocket_connections_total {}", snapshot.websocket.opened_total);
-    write_gauge(&mut out, "forge_websocket_active_connections", "Currently active WebSocket connections", snapshot.websocket.active_connections);
+    write_help_type(
+        &mut out,
+        "forge_websocket_connections_total",
+        "Total WebSocket connections opened",
+        "counter",
+    );
+    let _ = writeln!(
+        out,
+        "forge_websocket_connections_total {}",
+        snapshot.websocket.opened_total
+    );
+    write_gauge(
+        &mut out,
+        "forge_websocket_active_connections",
+        "Currently active WebSocket connections",
+        snapshot.websocket.active_connections,
+    );
 
-    write_help_type(&mut out, "forge_websocket_messages_total", "Total WebSocket messages", "counter");
-    write_counter_label(&mut out, "forge_websocket_messages_total", "direction", "inbound", snapshot.websocket.inbound_messages_total);
-    write_counter_label(&mut out, "forge_websocket_messages_total", "direction", "outbound", snapshot.websocket.outbound_messages_total);
+    write_help_type(
+        &mut out,
+        "forge_websocket_messages_total",
+        "Total WebSocket messages",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_websocket_messages_total",
+        "direction",
+        "inbound",
+        snapshot.websocket.inbound_messages_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_websocket_messages_total",
+        "direction",
+        "outbound",
+        snapshot.websocket.outbound_messages_total,
+    );
 
     // Scheduler counters
-    write_help_type(&mut out, "forge_scheduler_ticks_total", "Total scheduler ticks", "counter");
-    let _ = writeln!(out, "forge_scheduler_ticks_total {}", snapshot.scheduler.ticks_total);
-    write_help_type(&mut out, "forge_scheduler_executions_total", "Total scheduled tasks executed", "counter");
-    let _ = writeln!(out, "forge_scheduler_executions_total {}", snapshot.scheduler.executed_schedules_total);
+    write_help_type(
+        &mut out,
+        "forge_scheduler_ticks_total",
+        "Total scheduler ticks",
+        "counter",
+    );
+    let _ = writeln!(
+        out,
+        "forge_scheduler_ticks_total {}",
+        snapshot.scheduler.ticks_total
+    );
+    write_help_type(
+        &mut out,
+        "forge_scheduler_executions_total",
+        "Total scheduled tasks executed",
+        "counter",
+    );
+    let _ = writeln!(
+        out,
+        "forge_scheduler_executions_total {}",
+        snapshot.scheduler.executed_schedules_total
+    );
     write_gauge(
         &mut out,
         "forge_scheduler_leader_active",
         "Whether this instance is the active scheduler leader",
-        if snapshot.scheduler.leader_active { 1 } else { 0 },
+        if snapshot.scheduler.leader_active {
+            1
+        } else {
+            0
+        },
     );
 
     // Job counters
-    write_help_type(&mut out, "forge_jobs_total", "Total job lifecycle events", "counter");
-    write_counter_label(&mut out, "forge_jobs_total", "outcome", "enqueued", snapshot.jobs.enqueued_total);
-    write_counter_label(&mut out, "forge_jobs_total", "outcome", "started", snapshot.jobs.started_total);
-    write_counter_label(&mut out, "forge_jobs_total", "outcome", "succeeded", snapshot.jobs.succeeded_total);
-    write_counter_label(&mut out, "forge_jobs_total", "outcome", "retried", snapshot.jobs.retried_total);
-    write_counter_label(&mut out, "forge_jobs_total", "outcome", "dead_lettered", snapshot.jobs.dead_lettered_total);
+    write_help_type(
+        &mut out,
+        "forge_jobs_total",
+        "Total job lifecycle events",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
+        "enqueued",
+        snapshot.jobs.enqueued_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
+        "started",
+        snapshot.jobs.started_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
+        "succeeded",
+        snapshot.jobs.succeeded_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
+        "retried",
+        snapshot.jobs.retried_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
+        "dead_lettered",
+        snapshot.jobs.dead_lettered_total,
+    );
 
     out
 }

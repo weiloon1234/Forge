@@ -80,12 +80,7 @@ impl Validator {
     /// Add a validation error for a field with automatic message resolution.
     ///
     /// Used by the Validate derive macro for file validation rules.
-    pub fn add_error(
-        &mut self,
-        field: &str,
-        code: &str,
-        params: &[(&str, &str)],
-    ) {
+    pub fn add_error(&mut self, field: &str, code: &str, params: &[(&str, &str)]) {
         let msg = self.resolve_message(field, code, params, None);
         self.errors.push(FieldError {
             field: field.to_string(),

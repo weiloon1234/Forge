@@ -707,8 +707,11 @@ impl DatabaseSession {
     }
 
     pub(crate) async fn release_advisory_lock(&self, key: i64) -> Result<()> {
-        self.raw_query("SELECT pg_advisory_unlock($1)::text", &[DbValue::Int64(key)])
-            .await?;
+        self.raw_query(
+            "SELECT pg_advisory_unlock($1)::text",
+            &[DbValue::Int64(key)],
+        )
+        .await?;
         Ok(())
     }
 }
@@ -895,7 +898,13 @@ async fn query_records_on_connection(
         .map(|row| decode_row(row, sql, options.label.as_deref(), &adapter_snapshot))
         .collect();
 
-    log_sql_complete(sql_log, sql, start.elapsed(), &options.label, rows.len() as u64);
+    log_sql_complete(
+        sql_log,
+        sql,
+        start.elapsed(),
+        &options.label,
+        rows.len() as u64,
+    );
     result
 }
 

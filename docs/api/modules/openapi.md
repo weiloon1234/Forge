@@ -21,6 +21,7 @@ struct RouteDoc
   fn request<T: ApiSchema>(self) -> Self
   fn response<T: ApiSchema>(self, status: u16) -> Self
   fn deprecated(self) -> Self
+  fn merge_defaults(self, defaults: &Self) -> Self
 struct SchemaRef
   fn of<T: ApiSchema>() -> Self
 trait ApiSchema

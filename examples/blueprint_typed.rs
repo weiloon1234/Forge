@@ -183,12 +183,13 @@ mod app {
                 multipart: &mut axum::extract::Multipart,
             ) -> forge::foundation::Result<Self> {
                 let mut phone = None;
-                while let Some(field) = multipart.next_field().await
-                    .map_err(|e| forge::foundation::Error::message(format!("multipart error: {e}")))?
-                {
+                while let Some(field) = multipart.next_field().await.map_err(|e| {
+                    forge::foundation::Error::message(format!("multipart error: {e}"))
+                })? {
                     if field.name() == Some("phone") {
-                        phone = Some(field.text().await
-                            .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?);
+                        phone = Some(field.text().await.map_err(|e| {
+                            forge::foundation::Error::message(format!("field error: {e}"))
+                        })?);
                     }
                 }
                 Ok(Self {

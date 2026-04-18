@@ -1499,12 +1499,18 @@ mod tests {
 
     #[test]
     fn to_pascal_case_from_snake() {
-        assert_eq!(super::to_pascal_case("send_welcome_email"), "SendWelcomeEmail");
+        assert_eq!(
+            super::to_pascal_case("send_welcome_email"),
+            "SendWelcomeEmail"
+        );
     }
 
     #[test]
     fn to_pascal_case_from_pascal() {
-        assert_eq!(super::to_pascal_case("SendWelcomeEmail"), "SendWelcomeEmail");
+        assert_eq!(
+            super::to_pascal_case("SendWelcomeEmail"),
+            "SendWelcomeEmail"
+        );
     }
 
     #[test]
@@ -1515,7 +1521,10 @@ mod tests {
 
     #[test]
     fn to_screaming_snake_case_converts() {
-        assert_eq!(super::to_screaming_snake_case("send_welcome_email"), "SEND_WELCOME_EMAIL");
+        assert_eq!(
+            super::to_screaming_snake_case("send_welcome_email"),
+            "SEND_WELCOME_EMAIL"
+        );
     }
 
     #[test]
@@ -1528,7 +1537,11 @@ mod tests {
 
     #[test]
     fn render_job_template_contains_const_and_impl() {
-        let output = super::render_job_template("SendWelcomeEmail", "send_welcome_email", "SEND_WELCOME_EMAIL");
+        let output = super::render_job_template(
+            "SendWelcomeEmail",
+            "send_welcome_email",
+            "SEND_WELCOME_EMAIL",
+        );
         assert!(output.contains("pub const SEND_WELCOME_EMAIL_JOB: JobId"));
         assert!(output.contains("pub struct SendWelcomeEmail;"));
         assert!(output.contains("const ID: JobId = SEND_WELCOME_EMAIL_JOB;"));
@@ -1536,7 +1549,8 @@ mod tests {
 
     #[test]
     fn render_command_template_contains_register() {
-        let output = super::render_command_template("SyncInventory", "sync_inventory", "SYNC_INVENTORY");
+        let output =
+            super::render_command_template("SyncInventory", "sync_inventory", "SYNC_INVENTORY");
         assert!(output.contains("pub const SYNC_INVENTORY_COMMAND: CommandId"));
         assert!(output.contains("pub fn register("));
         assert!(output.contains("Command::new(\"sync_inventory\")"));

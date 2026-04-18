@@ -93,8 +93,7 @@ pub trait Notifiable: Send + Sync {
 // Channel Registry
 // ---------------------------------------------------------------------------
 
-pub(crate) type NotificationChannelRegistryHandle =
-    Arc<Mutex<NotificationChannelRegistryBuilder>>;
+pub(crate) type NotificationChannelRegistryHandle = Arc<Mutex<NotificationChannelRegistryBuilder>>;
 
 #[derive(Default)]
 pub(crate) struct NotificationChannelRegistryBuilder {
@@ -110,11 +109,7 @@ impl NotificationChannelRegistryBuilder {
         self.channels.contains_key(id)
     }
 
-    pub(crate) fn register<I>(
-        &mut self,
-        id: I,
-        channel: Arc<dyn NotificationChannel>,
-    ) -> Result<()>
+    pub(crate) fn register<I>(&mut self, id: I, channel: Arc<dyn NotificationChannel>) -> Result<()>
     where
         I: Into<NotificationChannelId>,
     {

@@ -16,7 +16,9 @@ use super::{Actor, Authenticatable, BearerAuthenticator};
 const TOKEN_PRUNE_COMMAND: CommandId = CommandId::new("token:prune");
 
 /// A pair of access + refresh tokens returned to the client after login.
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS, forge_macros::TS, forge_macros::ApiSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, ts_rs::TS, forge_macros::TS, forge_macros::ApiSchema,
+)]
 #[ts(export)]
 pub struct TokenPair {
     pub access_token: String,
@@ -24,6 +26,48 @@ pub struct TokenPair {
     #[ts(type = "number")]
     pub expires_in: u64,
     pub token_type: String,
+}
+
+/// Standard refresh-token request body for token-auth endpoints.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    ts_rs::TS,
+    forge_macros::TS,
+    forge_macros::ApiSchema,
+    forge_macros::Validate,
+)]
+#[ts(export)]
+pub struct RefreshTokenRequest {
+    #[validate(required)]
+    pub refresh_token: String,
+}
+
+/// Small typed wrapper for token payloads in HTTP or WebSocket responses.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, ts_rs::TS, forge_macros::TS, forge_macros::ApiSchema,
+)]
+#[ts(export)]
+pub struct TokenResponse {
+    pub tokens: TokenPair,
+}
+
+impl TokenResponse {
+    pub fn new(tokens: TokenPair) -> Self {
+        Self { tokens }
+    }
+
+    pub fn into_inner(self) -> TokenPair {
+        self.tokens
+    }
+}
+
+impl From<TokenPair> for TokenResponse {
+    fn from(tokens: TokenPair) -> Self {
+        Self::new(tokens)
+    }
 }
 
 /// Manages personal access tokens: issuance, validation, refresh, and revocation.
@@ -116,12 +160,9 @@ impl TokenManager {
         // Parse token-scoped abilities into Actor permissions.
         if let Some(abilities_value) = row.get("abilities") {
             if let Ok(abilities_json) = serde_json::Value::from_db_value(abilities_value) {
-                if let Ok(abilities) =
-                    serde_json::from_value::<Vec<String>>(abilities_json)
-                {
-                    actor = actor.with_permissions(
-                        abilities.iter().map(|a| PermissionId::owned(a.clone())),
-                    );
+                if let Ok(abilities) = serde_json::from_value::<Vec<String>>(abilities_json) {
+                    actor = actor
+                        .with_permissions(abilities.iter().map(|a| PermissionId::owned(a.clone())));
                 }
             }
         }
@@ -389,7 +430,9 @@ pub trait HasToken: super::Authenticatable {
     ) -> Result<TokenPair> {
         let tokens = app.tokens()?;
         let id = self.token_actor_id();
-        tokens.issue_with_abilities::<Self>(&id, name, abilities).await
+        tokens
+            .issue_with_abilities::<Self>(&id, name, abilities)
+            .await
     }
 
     /// Revoke all tokens for this model instance.

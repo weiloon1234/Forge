@@ -85,9 +85,9 @@ impl AppConfig {
             ));
         }
         use base64::{engine::general_purpose::STANDARD, Engine};
-        STANDARD.decode(&self.signing_key).map_err(|e| {
-            crate::foundation::Error::message(format!("invalid app.signing_key: {e}"))
-        })
+        STANDARD
+            .decode(&self.signing_key)
+            .map_err(|e| crate::foundation::Error::message(format!("invalid app.signing_key: {e}")))
     }
 }
 

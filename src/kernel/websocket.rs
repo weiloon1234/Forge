@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::auth::{Actor, AuthError};
+use crate::auth::{Actor, AuthError, AuthErrorCode};
 use crate::config::WebSocketConfig;
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{AuthOutcome, RuntimeDiagnostics, WebSocketConnectionState};
@@ -197,7 +197,7 @@ impl WebSocketServerState {
             return ConnectionIdentity {
                 bearer_token: None,
                 session_id: None,
-                auth_error: Some("auth manager is not available".to_string()),
+                auth_error: Some(AuthError::internal("auth manager is not available")),
                 client_ip: None,
             };
         };
@@ -214,7 +214,7 @@ impl WebSocketServerState {
                 Err(error) => ConnectionIdentity {
                     bearer_token: None,
                     session_id: None,
-                    auth_error: Some(error.to_string()),
+                    auth_error: Some(error),
                     client_ip: None,
                 },
             };
@@ -276,7 +276,6 @@ impl WebSocketServerState {
 
         let identity = self.hub.identity(connection_id).await?;
         if let Some(error) = identity.auth_error {
-            let error = AuthError::unauthorized(error);
             self.record_auth_outcome(auth_outcome_from_error(&error));
             return Err(error);
         }
@@ -291,7 +290,7 @@ impl WebSocketServerState {
             match sessions.validate(&session_id).await {
                 Ok(Some(actor)) => actor.with_guard(guard_id.clone()),
                 Ok(None) => {
-                    let error = AuthError::unauthorized("invalid or expired session");
+                    let error = AuthError::unauthorized_code(AuthErrorCode::InvalidSession);
                     self.record_auth_outcome(auth_outcome_from_error(&error));
                     return Err(error);
                 }
@@ -310,7 +309,7 @@ impl WebSocketServerState {
                 }
             }
         } else {
-            let error = AuthError::unauthorized("missing authorization header or session cookie");
+            let error = AuthError::unauthorized_code(AuthErrorCode::MissingAuthCredentials);
             self.record_auth_outcome(auth_outcome_from_error(&error));
             return Err(error);
         };
@@ -320,7 +319,11 @@ impl WebSocketServerState {
             return Err(error);
         }
         self.hub
-            .cache_actor(connection_id, actor.clone(), self.ws_config.max_connections_per_user)
+            .cache_actor(
+                connection_id,
+                actor.clone(),
+                self.ws_config.max_connections_per_user,
+            )
             .await?;
         self.record_auth_outcome(AuthOutcome::Success);
         Ok(Some(actor))
@@ -403,8 +406,7 @@ async fn handle_socket(
     // Heartbeat task: sends pings and closes the connection on timeout.
     let heartbeat_sender = state.hub.sender(connection_id).await;
     let heartbeat_pong = last_pong_at.clone();
-    let heartbeat_interval =
-        Duration::from_secs(state.ws_config.heartbeat_interval_seconds.max(1));
+    let heartbeat_interval = Duration::from_secs(state.ws_config.heartbeat_interval_seconds.max(1));
     let heartbeat_timeout = Duration::from_secs(state.ws_config.heartbeat_timeout_seconds.max(1));
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(heartbeat_interval);
@@ -444,9 +446,7 @@ async fn handle_socket(
                                 channel: SYSTEM_CHANNEL,
                                 event: ERROR_EVENT,
                                 room: None,
-                                payload: serde_json::json!({
-                                    "message": error.to_string(),
-                                }),
+                                payload: error.payload(),
                             }),
                         )
                         .await;
@@ -509,10 +509,25 @@ async fn process_client_message(
 
     match message.action {
         ClientAction::Subscribe => {
-            let actor = state
-                .authorize_channel(connection_id, channel)
-                .await
-                .map_err(Error::other)?;
+            let actor = match state.authorize_channel(connection_id, channel).await {
+                Ok(actor) => actor,
+                Err(error) => {
+                    state
+                        .hub
+                        .send(
+                            connection_id,
+                            WriterCommand::Json(ServerMessage {
+                                channel: SYSTEM_CHANNEL,
+                                event: ERROR_EVENT,
+                                room: None,
+                                payload: error.payload(),
+                            }),
+                        )
+                        .await
+                        .ok();
+                    return Ok(());
+                }
+            };
 
             // Authorization callback (Feature 4).
             if let Some(ref authorize) = channel.options.authorize {
@@ -523,8 +538,7 @@ async fn process_client_message(
                     message.channel.clone(),
                     message.room.clone(),
                 );
-                if let Err(error) =
-                    authorize(&ctx, &message.channel, message.room.as_deref()).await
+                if let Err(error) = authorize(&ctx, &message.channel, message.room.as_deref()).await
                 {
                     state
                         .hub
@@ -534,7 +548,7 @@ async fn process_client_message(
                                 channel: SYSTEM_CHANNEL,
                                 event: ERROR_EVENT,
                                 room: None,
-                                payload: serde_json::json!({"message": error.to_string()}),
+                                payload: error.payload(),
                             }),
                         )
                         .await
@@ -560,10 +574,7 @@ async fn process_client_message(
                 let _ = state.backend.sadd(&key, &member_value).await;
                 state
                     .hub
-                    .add_presence_entry(connection_id, PresenceEntry {
-                        key,
-                        member_value,
-                    })
+                    .add_presence_entry(connection_id, PresenceEntry { key, member_value })
                     .await;
 
                 // Broadcast presence join event to all subscribers.
@@ -669,7 +680,9 @@ async fn process_client_message(
                     .and_then(|e| {
                         serde_json::from_str::<serde_json::Value>(&e.member_value)
                             .ok()
-                            .and_then(|v| v.get("actor_id").and_then(|a| a.as_str().map(String::from)))
+                            .and_then(|v| {
+                                v.get("actor_id").and_then(|a| a.as_str().map(String::from))
+                            })
                     })
                     .unwrap_or_else(|| format!("anon:{connection_id}"));
                 let leave_msg = ServerMessage {
@@ -701,10 +714,25 @@ async fn process_client_message(
                 .await?;
         }
         ClientAction::Message => {
-            let actor = state
-                .authorize_channel(connection_id, channel)
-                .await
-                .map_err(Error::other)?;
+            let actor = match state.authorize_channel(connection_id, channel).await {
+                Ok(actor) => actor,
+                Err(error) => {
+                    state
+                        .hub
+                        .send(
+                            connection_id,
+                            WriterCommand::Json(ServerMessage {
+                                channel: SYSTEM_CHANNEL,
+                                event: ERROR_EVENT,
+                                room: None,
+                                payload: error.payload(),
+                            }),
+                        )
+                        .await
+                        .ok();
+                    return Ok(());
+                }
+            };
             let context = WebSocketContext::new(
                 state.app.clone(),
                 connection_id,
@@ -745,15 +773,25 @@ async fn process_client_message(
         }
         ClientAction::ClientEvent => {
             if !channel.options.allow_client_events {
-                return Err(Error::message(
-                    "client events not allowed on this channel",
-                ));
+                return Err(Error::message("client events not allowed on this channel"));
             }
 
-            let _actor = state
-                .authorize_channel(connection_id, channel)
-                .await
-                .map_err(Error::other)?;
+            if let Err(error) = state.authorize_channel(connection_id, channel).await {
+                state
+                    .hub
+                    .send(
+                        connection_id,
+                        WriterCommand::Json(ServerMessage {
+                            channel: SYSTEM_CHANNEL,
+                            event: ERROR_EVENT,
+                            room: None,
+                            payload: error.payload(),
+                        }),
+                    )
+                    .await
+                    .ok();
+                return Ok(());
+            }
 
             let event_id = message
                 .event
@@ -766,10 +804,7 @@ async fn process_client_message(
             };
 
             // Broadcast to all subscribers EXCEPT the sender.
-            state
-                .hub
-                .broadcast_except(connection_id, &server_msg)
-                .await;
+            state.hub.broadcast_except(connection_id, &server_msg).await;
         }
     }
 
@@ -978,10 +1013,7 @@ impl ConnectionHub {
     }
 
     /// Returns a clone of the sender for the given connection, used by the heartbeat task.
-    async fn sender(
-        &self,
-        connection_id: u64,
-    ) -> Option<mpsc::UnboundedSender<WriterCommand>> {
+    async fn sender(&self, connection_id: u64) -> Option<mpsc::UnboundedSender<WriterCommand>> {
         self.connections
             .read()
             .await
@@ -1029,7 +1061,9 @@ impl ConnectionHub {
         if max_connections_per_user > 0 {
             if let Some(existing) = user_conns.get(&actor_id) {
                 if existing.len() >= max_connections_per_user as usize {
-                    return Err(AuthError::forbidden("max connections per user exceeded"));
+                    return Err(AuthError::forbidden_code(
+                        AuthErrorCode::MaxConnectionsPerUserExceeded,
+                    ));
                 }
             }
         }
@@ -1165,7 +1199,7 @@ impl ConnectionState {
 struct ConnectionIdentity {
     bearer_token: Option<String>,
     session_id: Option<String>,
-    auth_error: Option<String>,
+    auth_error: Option<AuthError>,
     client_ip: Option<String>,
 }
 

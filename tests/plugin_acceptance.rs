@@ -55,12 +55,16 @@ impl forge::validation::FromMultipart for CreateContact {
         multipart: &mut axum::extract::Multipart,
     ) -> forge::foundation::Result<Self> {
         let mut phone = None;
-        while let Some(field) = multipart.next_field().await
+        while let Some(field) = multipart
+            .next_field()
+            .await
             .map_err(|e| forge::foundation::Error::message(format!("multipart error: {e}")))?
         {
             if field.name() == Some("phone") {
-                phone = Some(field.text().await
-                    .map_err(|e| forge::foundation::Error::message(format!("field error: {e}")))?);
+                phone =
+                    Some(field.text().await.map_err(|e| {
+                        forge::foundation::Error::message(format!("field error: {e}"))
+                    })?);
             }
         }
         Ok(Self {
@@ -637,16 +641,11 @@ impl forge::plugin::Plugin for DirectRegistrationPlugin {
         )
     }
 
-    fn register(
-        &self,
-        registrar: &mut forge::plugin::PluginRegistrar,
-    ) -> Result<()> {
+    fn register(&self, registrar: &mut forge::plugin::PluginRegistrar) -> Result<()> {
         // Direct registration — no ServiceProvider wrapper needed
         registrar.register_guard(DIRECT_GUARD, DirectGuard);
         registrar.register_policy(DIRECT_POLICY, DirectPolicy);
-        registrar.register_middleware(forge::MiddlewareConfig::Compression(
-            forge::Compression,
-        ));
+        registrar.register_middleware(forge::MiddlewareConfig::Compression(forge::Compression));
         registrar.register_routes(|r| {
             r.route(
                 "/direct-plugin",
@@ -678,7 +677,10 @@ async fn plugin_direct_registration_works_without_provider_wrapper() {
 
     // Policy is registered — verify through authorizer
     let authorizer = app.authorizer().unwrap();
-    let allowed = authorizer.allows_policy(&actor, DIRECT_POLICY).await.unwrap();
+    let allowed = authorizer
+        .allows_policy(&actor, DIRECT_POLICY)
+        .await
+        .unwrap();
     assert!(allowed);
 }
 
@@ -732,8 +734,5 @@ async fn plugin_shutdown_called_in_reverse_dependency_order() {
     // Trigger shutdown manually
     kernel.app().shutdown_plugins().await.unwrap();
 
-    assert_eq!(
-        log.lock().unwrap().as_slice(),
-        &["booted", "shutdown"]
-    );
+    assert_eq!(log.lock().unwrap().as_slice(), &["booted", "shutdown"]);
 }

@@ -244,7 +244,8 @@ pub struct WebSocketRegistrar {
 pub type LifecycleCallback = Arc<
     dyn for<'a> Fn(
             &'a WebSocketContext,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
         + Send
         + Sync,
 >;
@@ -255,7 +256,8 @@ pub type AuthorizeCallback = Arc<
             &'a WebSocketContext,
             &'a ChannelId,
             Option<&'a str>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
         + Send
         + Sync,
 >;

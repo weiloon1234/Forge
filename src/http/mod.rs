@@ -1,6 +1,7 @@
 pub mod cookie;
 pub mod middleware;
 pub mod resource;
+pub mod response;
 pub mod routes;
 pub(crate) mod spa;
 
@@ -18,7 +19,7 @@ use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
 use crate::logging::AuthOutcome;
 use crate::support::{GuardId, PermissionId};
-pub use crate::validation::Validated;
+pub use crate::validation::{JsonValidated, Validated};
 
 pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
 pub type HttpRouter = Router<AppContext>;
@@ -103,6 +104,45 @@ impl HttpRouteOptions {
         self
     }
 
+    /// Add an OpenAPI tag without building a full [`crate::openapi::RouteDoc`] manually.
+    pub fn tag(mut self, tag: &str) -> Self {
+        let doc = self.doc.take().unwrap_or_default().tag(tag);
+        self.doc = Some(doc);
+        self
+    }
+
+    /// Add an OpenAPI summary without building a full [`crate::openapi::RouteDoc`] manually.
+    pub fn summary(mut self, summary: &str) -> Self {
+        let doc = self.doc.take().unwrap_or_default().summary(summary);
+        self.doc = Some(doc);
+        self
+    }
+
+    /// Add an OpenAPI description without building a full [`crate::openapi::RouteDoc`] manually.
+    pub fn description(mut self, description: &str) -> Self {
+        let doc = self.doc.take().unwrap_or_default().description(description);
+        self.doc = Some(doc);
+        self
+    }
+
+    pub fn request<T: crate::openapi::ApiSchema>(mut self) -> Self {
+        let doc = self.doc.take().unwrap_or_default().request::<T>();
+        self.doc = Some(doc);
+        self
+    }
+
+    pub fn response<T: crate::openapi::ApiSchema>(mut self, status: u16) -> Self {
+        let doc = self.doc.take().unwrap_or_default().response::<T>(status);
+        self.doc = Some(doc);
+        self
+    }
+
+    pub fn deprecated(mut self) -> Self {
+        let doc = self.doc.take().unwrap_or_default().deprecated();
+        self.doc = Some(doc);
+        self
+    }
+
     fn requires_auth(&self) -> bool {
         self.access.requires_auth()
     }
@@ -114,6 +154,96 @@ impl HttpRouteOptions {
     fn permissions_set(&self) -> BTreeSet<PermissionId> {
         self.access.permissions()
     }
+
+    fn with_defaults(mut self, defaults: &Self) -> Self {
+        self.access = merge_access_scope(&self.access, &defaults.access);
+
+        let mut middlewares = defaults.middlewares.clone();
+        middlewares.extend(self.middlewares);
+        self.middlewares = middlewares;
+
+        if self.middleware_group_name.is_none() {
+            self.middleware_group_name = defaults.middleware_group_name.clone();
+        }
+        if self.post_auth_rate_limit.is_none() {
+            self.post_auth_rate_limit = defaults.post_auth_rate_limit.clone();
+        }
+
+        self.doc = match (self.doc.take(), defaults.doc.as_ref()) {
+            (Some(doc), Some(default_doc)) => Some(doc.merge_defaults(default_doc)),
+            (Some(doc), None) => Some(doc),
+            (None, Some(default_doc)) => Some(default_doc.clone()),
+            (None, None) => None,
+        };
+
+        self
+    }
+}
+
+fn merge_access_scope(explicit: &AccessScope, defaults: &AccessScope) -> AccessScope {
+    match (defaults, explicit) {
+        (AccessScope::Public, _) => explicit.clone(),
+        (AccessScope::Guarded(defaults), AccessScope::Public) => {
+            AccessScope::Guarded(defaults.clone())
+        }
+        (AccessScope::Guarded(defaults), AccessScope::Guarded(explicit)) => {
+            let mut merged = defaults.clone();
+            if explicit.guard.is_some() {
+                merged.guard = explicit.guard.clone();
+            }
+            merged.permissions.extend(explicit.permissions.clone());
+            AccessScope::Guarded(merged)
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct HttpResourceRoutes {
+    index: Option<MethodRouter<AppContext>>,
+    store: Option<MethodRouter<AppContext>>,
+    show: Option<MethodRouter<AppContext>>,
+    update: Option<MethodRouter<AppContext>>,
+    destroy: Option<MethodRouter<AppContext>>,
+    id_param: String,
+}
+
+impl HttpResourceRoutes {
+    pub fn new() -> Self {
+        Self {
+            id_param: "id".to_string(),
+            ..Self::default()
+        }
+    }
+
+    pub fn index(mut self, route: MethodRouter<AppContext>) -> Self {
+        self.index = Some(route);
+        self
+    }
+
+    pub fn store(mut self, route: MethodRouter<AppContext>) -> Self {
+        self.store = Some(route);
+        self
+    }
+
+    pub fn show(mut self, route: MethodRouter<AppContext>) -> Self {
+        self.show = Some(route);
+        self
+    }
+
+    pub fn update(mut self, route: MethodRouter<AppContext>) -> Self {
+        self.update = Some(route);
+        self
+    }
+
+    pub fn destroy(mut self, route: MethodRouter<AppContext>) -> Self {
+        self.destroy = Some(route);
+        self
+    }
+
+    pub fn id_param(mut self, id_param: impl Into<String>) -> Self {
+        self.id_param = id_param.into();
+        self
+    }
 }
 
 struct RouteRegistration {
@@ -124,18 +254,14 @@ struct RouteRegistration {
 
 enum HttpRegistration {
     Route(Box<RouteRegistration>),
-    Nest {
-        path: String,
-        router: HttpRouter,
-    },
-    Merge {
-        router: HttpRouter,
-    },
+    Nest { path: String, router: HttpRouter },
+    Merge { router: HttpRouter },
 }
 
 pub struct HttpRegistrar {
     registrations: Vec<HttpRegistration>,
     pub(crate) named_routes: routes::RouteRegistry,
+    default_route_options: HttpRouteOptions,
 }
 
 impl Default for HttpRegistrar {
@@ -149,6 +275,7 @@ impl HttpRegistrar {
         Self {
             registrations: Vec::new(),
             named_routes: routes::RouteRegistry::new(),
+            default_route_options: HttpRouteOptions::default(),
         }
     }
 
@@ -167,7 +294,7 @@ impl HttpRegistrar {
             .push(HttpRegistration::Route(Box::new(RouteRegistration {
                 path: path_owned,
                 method_router,
-                options,
+                options: options.with_defaults(&self.default_route_options),
             })));
         self
     }
@@ -225,7 +352,28 @@ impl HttpRegistrar {
         f: impl FnOnce(&mut HttpRegistrar) -> Result<()>,
     ) -> Result<&mut Self> {
         let mut sub = HttpRegistrar::new();
+        sub.default_route_options = self.default_route_options.clone();
         f(&mut sub)?;
+        self.merge_group(prefix, sub)
+    }
+
+    /// Create a route group under a shared path prefix with inherited defaults.
+    ///
+    /// Guard, middleware, rate-limit, and OpenAPI defaults from `options`
+    /// apply to every route registered inside the closure.
+    pub fn group_with_options(
+        &mut self,
+        prefix: &str,
+        options: HttpRouteOptions,
+        f: impl FnOnce(&mut HttpRegistrar) -> Result<()>,
+    ) -> Result<&mut Self> {
+        let mut sub = HttpRegistrar::new();
+        sub.default_route_options = options.with_defaults(&self.default_route_options);
+        f(&mut sub)?;
+        self.merge_group(prefix, sub)
+    }
+
+    fn merge_group(&mut self, prefix: &str, sub: HttpRegistrar) -> Result<&mut Self> {
         for registration in sub.registrations {
             match registration {
                 HttpRegistration::Route(route) => {
@@ -252,7 +400,8 @@ impl HttpRegistrar {
         }
         // Merge named routes from sub-registrar with prefix applied
         for (name, pattern) in sub.named_routes.iter() {
-            self.named_routes.register(name, format!("{prefix}{pattern}"));
+            self.named_routes
+                .register(name, format!("{prefix}{pattern}"));
         }
         Ok(self)
     }
@@ -276,10 +425,50 @@ impl HttpRegistrar {
         self.group(&format!("/api/v{version}"), f)
     }
 
+    pub fn resource(&mut self, name: &str, path: &str, routes: HttpResourceRoutes) -> &mut Self {
+        self.resource_with_options(name, path, routes, HttpRouteOptions::default())
+    }
+
+    pub fn resource_with_options(
+        &mut self,
+        name: &str,
+        path: &str,
+        routes: HttpResourceRoutes,
+        options: HttpRouteOptions,
+    ) -> &mut Self {
+        if let Some(route) = routes.index {
+            self.route_named_with_options(&format!("{name}.index"), path, route, options.clone());
+        }
+        if let Some(route) = routes.store {
+            self.route_named_with_options(&format!("{name}.store"), path, route, options.clone());
+        }
+
+        let member_path = format!("{path}/:{}", routes.id_param);
+        if let Some(route) = routes.show {
+            self.route_named_with_options(
+                &format!("{name}.show"),
+                &member_path,
+                route,
+                options.clone(),
+            );
+        }
+        if let Some(route) = routes.update {
+            self.route_named_with_options(
+                &format!("{name}.update"),
+                &member_path,
+                route,
+                options.clone(),
+            );
+        }
+        if let Some(route) = routes.destroy {
+            self.route_named_with_options(&format!("{name}.destroy"), &member_path, route, options);
+        }
+
+        self
+    }
+
     /// Collect documented routes for OpenAPI spec generation.
-    pub(crate) fn collect_documented_routes(
-        &self,
-    ) -> Vec<crate::openapi::spec::DocumentedRoute> {
+    pub(crate) fn collect_documented_routes(&self) -> Vec<crate::openapi::spec::DocumentedRoute> {
         let mut docs = Vec::new();
         for registration in &self.registrations {
             if let HttpRegistration::Route(route) = registration {
@@ -547,4 +736,85 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
         Ok(())
     });
     registrar
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::{delete, get, post, put};
+
+    use super::{HttpRegistrar, HttpRegistration, HttpResourceRoutes, HttpRouteOptions};
+    use crate::support::GuardId;
+
+    async fn ok() -> &'static str {
+        "ok"
+    }
+
+    #[test]
+    fn group_with_options_inherits_guard_and_doc_defaults() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .group_with_options(
+                "/api",
+                HttpRouteOptions::new()
+                    .guard(GuardId::new("api"))
+                    .tag("users"),
+                |routes| {
+                    routes.route_with_options(
+                        "/users",
+                        get(ok),
+                        HttpRouteOptions::new().summary("List users"),
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let HttpRegistration::Route(route) = &registrar.registrations[0] else {
+            panic!("expected route registration");
+        };
+
+        assert_eq!(route.path, "/api/users");
+        assert_eq!(route.options.guard_id(), Some(&GuardId::new("api")));
+
+        let doc = route
+            .options
+            .doc
+            .as_ref()
+            .expect("route docs should be present");
+        assert_eq!(doc.tags, vec!["users".to_string()]);
+        assert_eq!(doc.summary.as_deref(), Some("List users"));
+    }
+
+    #[test]
+    fn resource_registers_common_named_routes() {
+        let mut registrar = HttpRegistrar::new();
+        registrar.resource_with_options(
+            "users",
+            "/users",
+            HttpResourceRoutes::new()
+                .index(get(ok))
+                .store(post(ok))
+                .show(get(ok))
+                .update(put(ok))
+                .destroy(delete(ok)),
+            HttpRouteOptions::new().guard(GuardId::new("api")),
+        );
+
+        assert!(registrar.named_routes.has("users.index"));
+        assert!(registrar.named_routes.has("users.store"));
+        assert!(registrar.named_routes.has("users.show"));
+        assert!(registrar.named_routes.has("users.update"));
+        assert!(registrar.named_routes.has("users.destroy"));
+
+        let registered_paths = registrar
+            .registrations
+            .iter()
+            .filter_map(|registration| match registration {
+                HttpRegistration::Route(route) => Some(route.path.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(registered_paths.contains(&"/users"));
+        assert!(registered_paths.contains(&"/users/:id"));
+    }
 }

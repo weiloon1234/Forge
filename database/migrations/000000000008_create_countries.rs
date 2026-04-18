@@ -30,6 +30,7 @@ impl MigrationFile for Entry {
                 un_member BOOLEAN,
                 flag_emoji TEXT,
                 conversion_rate DOUBLE PRECISION,
+                is_default BOOLEAN NOT NULL DEFAULT false,
                 status TEXT NOT NULL DEFAULT 'disabled',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ

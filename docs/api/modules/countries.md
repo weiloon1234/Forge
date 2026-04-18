@@ -22,5 +22,6 @@ struct CountryCurrency
 struct CountrySeed
 fn load_seed() -> Result<Vec<CountrySeed>>
 fn async fn seed_countries(app: &AppContext) -> Result<u64>
+fn async fn seed_countries_with(executor: &dyn QueryExecutor) -> Result<u64>
 ```
 

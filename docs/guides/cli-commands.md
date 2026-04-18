@@ -276,10 +276,12 @@ These are available automatically — no registration needed:
 | `env:publish` | Generate `.env.example` |
 | `key:generate` | Generate signing + encryption keys |
 | `migrate:publish` | Publish framework migration files |
+| `seed:publish` | Publish framework seeder files |
 | `db:migrate` | Run pending migrations |
 | `db:migrate:status` | Show migration status |
 | `db:rollback` | Rollback last migration batch |
 | `db:seed` | Run seeders |
+| `seed:countries` | Seed 250 countries |
 | `make:migration` | Create a migration file |
 | `make:seeder` | Create a seeder file |
 | `make:model` | Create a model file |
@@ -288,7 +290,6 @@ These are available automatically — no registration needed:
 | `down` | Enter maintenance mode |
 | `up` | Exit maintenance mode |
 | `routes:list` | List named routes |
-| `seed:countries` | Seed 250 countries |
 | `token:prune` | Prune expired tokens |
 | `plugin:list` | List plugins |
 | `plugin:install-assets` | Install plugin assets |

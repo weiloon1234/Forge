@@ -459,3 +459,59 @@ async fn make_seeder_generates_a_rust_file_and_refuses_overwrite_without_force()
     .unwrap_err();
     assert!(error.to_string().contains("refusing to overwrite"));
 }
+
+#[tokio::test]
+async fn seed_publish_generates_framework_seeders_and_honors_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeders_dir = dir.path().join("seeders");
+    let published_path = seeders_dir.join("000000000001_countries_seeder.rs");
+
+    run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "seed:publish".into(),
+            "--path".into(),
+            seeders_dir.display().to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let published = fs::read_to_string(&published_path).unwrap();
+    assert!(published.contains("seed_countries_with(ctx)"));
+
+    fs::write(&published_path, "// custom seeder").unwrap();
+
+    run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "seed:publish".into(),
+            "--path".into(),
+            seeders_dir.display().to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&published_path).unwrap(),
+        "// custom seeder"
+    );
+
+    run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "seed:publish".into(),
+            "--path".into(),
+            seeders_dir.display().to_string(),
+            "--force".into(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert!(fs::read_to_string(&published_path)
+        .unwrap()
+        .contains("seed_countries_with(ctx)"));
+}

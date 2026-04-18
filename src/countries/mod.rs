@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::database::DbValue;
+use crate::database::{DbValue, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
 
 const BUILTIN_SEED: &str = include_str!("seed.json");
@@ -69,6 +69,7 @@ pub struct Country {
     pub flag_emoji: Option<String>,
     pub status: CountryStatus,
     pub conversion_rate: Option<f64>,
+    pub is_default: bool,
 }
 
 impl Country {
@@ -172,6 +173,10 @@ pub struct CountrySeed {
     pub un_member: Option<bool>,
     #[serde(default)]
     pub flag_emoji: Option<String>,
+    #[serde(default)]
+    pub conversion_rate: Option<f64>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
     #[serde(default, alias = "status")]
     pub assignment_status: Option<String>,
     #[serde(default)]
@@ -200,51 +205,19 @@ pub fn load_seed() -> Result<Vec<CountrySeed>> {
 /// Uses upsert (ON CONFLICT iso2 DO UPDATE) so it's safe to run multiple times.
 pub async fn seed_countries(app: &AppContext) -> Result<u64> {
     let db = app.database()?;
+    seed_countries_with(db.as_ref()).await
+}
+
+/// Seed the countries table using any database executor.
+///
+/// This lets published seeders reuse the same upsert logic while still running
+/// inside the active seeder transaction.
+pub async fn seed_countries_with(executor: &dyn QueryExecutor) -> Result<u64> {
     let seeds = load_seed()?;
     let mut count = 0u64;
 
     for seed in seeds {
-        let iso2 = seed.iso2.trim().to_ascii_uppercase();
-        let iso3 = seed.iso3.trim().to_ascii_uppercase();
-        let currencies = serde_json::to_value(&seed.currencies).unwrap_or_default();
-        let calling_suffixes = serde_json::to_value(&seed.calling_suffixes).unwrap_or_default();
-        let tlds = serde_json::to_value(&seed.tlds).unwrap_or_default();
-        let timezones = serde_json::to_value(&seed.timezones).unwrap_or_default();
-
-        db.raw_execute(
-            "INSERT INTO countries (iso2, iso3, iso_numeric, name, official_name, capital, region, subregion, \
-             currencies, primary_currency_code, calling_code, calling_root, calling_suffixes, tlds, timezones, \
-             latitude, longitude, independent, un_member, flag_emoji, status, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'disabled', NOW()) \
-             ON CONFLICT (iso2) DO UPDATE SET \
-             iso3 = $2, iso_numeric = $3, name = $4, official_name = $5, capital = $6, region = $7, subregion = $8, \
-             currencies = $9, primary_currency_code = $10, calling_code = $11, calling_root = $12, \
-             calling_suffixes = $13, tlds = $14, timezones = $15, latitude = $16, longitude = $17, \
-             independent = $18, un_member = $19, flag_emoji = $20, updated_at = NOW()",
-            &[
-                DbValue::Text(iso2),
-                DbValue::Text(iso3),
-                opt_text(&seed.iso_numeric),
-                DbValue::Text(seed.name.trim().to_string()),
-                opt_text(&seed.official_name),
-                opt_text(&seed.capital),
-                opt_text(&seed.region),
-                opt_text(&seed.subregion),
-                DbValue::Json(currencies),
-                opt_text(&seed.primary_currency_code),
-                opt_text(&seed.calling_code),
-                opt_text(&seed.calling_root),
-                DbValue::Json(calling_suffixes),
-                DbValue::Json(tlds),
-                DbValue::Json(timezones),
-                opt_f64(seed.latitude),
-                opt_f64(seed.longitude),
-                opt_bool(seed.independent),
-                opt_bool(seed.un_member),
-                opt_text(&seed.flag_emoji),
-            ],
-        )
-        .await?;
+        upsert_country_seed(executor, &seed).await?;
         count += 1;
     }
 
@@ -274,6 +247,80 @@ fn opt_bool(value: Option<bool>) -> DbValue {
         Some(v) => DbValue::Bool(v),
         None => DbValue::Null(crate::database::DbType::Bool),
     }
+}
+
+async fn upsert_country_seed(executor: &dyn QueryExecutor, seed: &CountrySeed) -> Result<()> {
+    let iso2 = seed.iso2.trim().to_ascii_uppercase();
+    let iso3 = seed.iso3.trim().to_ascii_uppercase();
+    let currencies = serde_json::to_value(&seed.currencies).unwrap_or_default();
+    let calling_suffixes = serde_json::to_value(&seed.calling_suffixes).unwrap_or_default();
+    let tlds = serde_json::to_value(&seed.tlds).unwrap_or_default();
+    let timezones = serde_json::to_value(&seed.timezones).unwrap_or_default();
+
+    executor
+        .raw_execute(
+            r#"
+            INSERT INTO countries (
+                iso2, iso3, iso_numeric, name, official_name, capital, region, subregion,
+                currencies, primary_currency_code, calling_code, calling_root, calling_suffixes,
+                tlds, timezones, latitude, longitude, independent, un_member, flag_emoji,
+                conversion_rate, is_default, status, created_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21, COALESCE($22, false), 'disabled', NOW()
+            )
+            ON CONFLICT (iso2) DO UPDATE SET
+                iso3 = $2,
+                iso_numeric = $3,
+                name = $4,
+                official_name = $5,
+                capital = $6,
+                region = $7,
+                subregion = $8,
+                currencies = $9,
+                primary_currency_code = $10,
+                calling_code = $11,
+                calling_root = $12,
+                calling_suffixes = $13,
+                tlds = $14,
+                timezones = $15,
+                latitude = $16,
+                longitude = $17,
+                independent = $18,
+                un_member = $19,
+                flag_emoji = $20,
+                conversion_rate = COALESCE($21, countries.conversion_rate),
+                is_default = COALESCE($22, countries.is_default),
+                updated_at = NOW()
+            "#,
+            &[
+                DbValue::Text(iso2),
+                DbValue::Text(iso3),
+                opt_text(&seed.iso_numeric),
+                DbValue::Text(seed.name.trim().to_string()),
+                opt_text(&seed.official_name),
+                opt_text(&seed.capital),
+                opt_text(&seed.region),
+                opt_text(&seed.subregion),
+                DbValue::Json(currencies),
+                opt_text(&seed.primary_currency_code),
+                opt_text(&seed.calling_code),
+                opt_text(&seed.calling_root),
+                DbValue::Json(calling_suffixes),
+                DbValue::Json(tlds),
+                DbValue::Json(timezones),
+                opt_f64(seed.latitude),
+                opt_f64(seed.longitude),
+                opt_bool(seed.independent),
+                opt_bool(seed.un_member),
+                opt_text(&seed.flag_emoji),
+                opt_f64(seed.conversion_rate),
+                opt_bool(seed.is_default),
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
 fn row_to_country(row: &crate::database::DbRecord) -> Country {
@@ -327,6 +374,10 @@ fn row_to_country(row: &crate::database::DbRecord) -> Country {
             Some(DbValue::Float64(v)) => Some(*v),
             _ => None,
         },
+        is_default: match row.get("is_default") {
+            Some(DbValue::Bool(v)) => *v,
+            _ => false,
+        },
     }
 }
 
@@ -355,5 +406,13 @@ mod tests {
         let us = countries.iter().find(|c| c.iso2 == "US").unwrap();
         assert!(!us.currencies.is_empty());
         assert_eq!(us.currencies[0].code, "USD");
+    }
+
+    #[test]
+    fn seed_data_defaults_optional_country_flags() {
+        let countries = load_seed().unwrap();
+        let my = countries.iter().find(|c| c.iso2 == "MY").unwrap();
+        assert_eq!(my.conversion_rate, None);
+        assert_eq!(my.is_default, None);
     }
 }

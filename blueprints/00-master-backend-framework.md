@@ -1283,9 +1283,9 @@ See **[framework-models-image](17-framework-models-image-module.md)** for framew
 16. ~~**Image Module**~~ — ✅ Done (ImageProcessor with resize/crop/convert/blur/grayscale/rotate/flip/brightness/contrast, 8 formats)
 17. ~~**Framework Models**~~ — ✅ Done (Attachments with upload pipeline, Metadata key-value store, Translations with locale-aware resolution)
 18. ~~**HasToken Trait**~~ — ✅ Done (Laravel HasApiTokens — create_token, create_token_named, create_token_with_abilities, revoke_all_tokens)
-19. ~~**CLI Publisher Commands**~~ — ✅ Done (config:publish, key:generate, migrate:publish for 8 framework SQL migrations, seed:countries)
+19. ~~**CLI Publisher Commands**~~ — ✅ Done (config:publish, key:generate, migrate:publish, seed:publish, seed:countries)
 20. ~~**Countries Table**~~ — ✅ Done (250 countries from ISO 3166-1, iso2 primary key, Country model with find/all/enabled/exists, seed:countries CLI)
-21. ~~**Framework Migrations & Seeders**~~ — ✅ Done (8 sequential .rs migrations at `database/migrations/000000000001-8_*.rs`, 1 seeder at `database/seeders/`, consumer examples removed)
+21. ~~**Framework Migrations & Seeders**~~ — ✅ Done (9 sequential .rs migrations at `database/migrations/000000000001-9_*.rs`, 1 seeder at `database/seeders/`, consumer examples removed)
 22. ~~**Scheduler Hardening**~~ — ✅ Done (error isolation per task, parallel spawning, overlap prevention via distributed lock, per-task ScheduleOptions with without_overlapping/environments/before/after/on_failure hooks, convenience methods: every_minute/hourly/daily/daily_at/weekly)
 23. ~~**CLI Hardening**~~ — ✅ Done (root command with --version/--help/subcommand_required, `about` command for environment summary, `routes:list` command for named route inspection. Total: 21 builtin commands)
 

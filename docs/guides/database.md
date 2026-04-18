@@ -731,7 +731,11 @@ cargo run -- db:rollback          # rollback last batch
 
 ```bash
 cargo run -- make:seeder seed_posts
-cargo run -- db:seed              # run all seeders
+cargo run -- seed:publish                        # publish framework seeders like countries
+cargo build                                      # rebuild so published seeders are discovered
+cargo run -- db:seed                             # run all seeders
+cargo run -- db:seed --id 000000000001_countries_seeder
+cargo run -- seed:countries                      # direct built-in countries seed
 ```
 
 ### Build-Time Discovery

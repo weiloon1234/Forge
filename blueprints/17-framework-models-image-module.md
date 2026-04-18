@@ -425,7 +425,7 @@ let product = Product::query().without_defaults().first(&app).await?;
 | 4 | Metadata | — | S | ✅ Done — `src/metadata/mod.rs`, HasMetadata |
 | 5 | Translations | — | M | ✅ Done — `src/translations/mod.rs`, HasTranslations, CURRENT_LOCALE task_local |
 | 6 | HasToken trait | — | S | ✅ Done — `src/auth/token.rs`, create_token/revoke on Authenticatable models |
-| 7 | migrate:publish CLI | — | S | ✅ Done — publishes 8 framework SQL migrations |
+| 7 | migrate:publish CLI | — | S | ✅ Done — publishes framework Rust migrations |
 | 8 | Countries table + model + seeder | — | M | ✅ Done — 250 countries, iso2 PK, seed:countries CLI |
 
 ---
@@ -450,9 +450,9 @@ user.revoke_all_tokens(&app).await?;
 
 ## migrate:publish CLI Command
 
-Publishes framework SQL migrations to the consumer project:
+Publishes framework Rust migrations to the consumer project:
 ```bash
-forge migrate:publish              # 7 SQL files
+forge migrate:publish              # framework migrations
 forge migrate:publish --force      # overwrite existing
 forge migrate:publish --path=db/   # custom directory
 ```
@@ -475,7 +475,8 @@ let exists = Country::exists(&app, "US").await?; // check existence
 
 CLI commands:
 ```bash
-forge migrate:publish   # includes 000007_create_countries.sql
+forge migrate:publish   # includes countries migrations
+forge seed:publish      # publishes 000000000001_countries_seeder.rs
 forge seed:countries    # seeds 250 countries (upsert, safe to re-run)
 ```
 

@@ -336,6 +336,14 @@ Run once (or on every deploy — it's idempotent):
 cargo run -- seed:countries
 ```
 
+If you want the framework seeder file inside your app:
+
+```bash
+cargo run -- seed:publish
+cargo build
+cargo run -- db:seed --id 000000000001_countries_seeder
+```
+
 Or programmatically:
 
 ```rust
@@ -388,6 +396,7 @@ if Country::exists(&app, "US").await? {
 | `latitude` / `longitude` | Option\<f64\> | `2.5` / `112.5` |
 | `flag_emoji` | Option | `"🇲🇾"` |
 | `status` | `CountryStatus` | `CountryStatus::Enabled` or `CountryStatus::Disabled` |
+| `is_default` | `bool` | `false` |
 | `conversion_rate` | Option\<f64\> | `4.47` (relative to base currency) |
 
 ### Common Patterns
@@ -661,4 +670,10 @@ Run `cargo run -- migrate:publish` to get the framework migration files:
 000000000007_create_model_translations.rs
 000000000008_create_countries.rs
 000000000009_create_settings.rs
+```
+
+Run `cargo run -- seed:publish` if you also want the framework countries seeder in your app:
+
+```text
+000000000001_countries_seeder.rs
 ```

@@ -2,13 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::CommandRegistrar;
-use crate::foundation::Error;
+use crate::foundation::{Error, Result};
 use crate::support::CommandId;
 
 const CONFIG_PUBLISH_COMMAND: CommandId = CommandId::new("config:publish");
 const KEY_GENERATE_COMMAND: CommandId = CommandId::new("key:generate");
 const MIGRATE_PUBLISH_COMMAND: CommandId = CommandId::new("migrate:publish");
-const SEED_COMMAND: CommandId = CommandId::new("seed:countries");
+const SEED_PUBLISH_COMMAND: CommandId = CommandId::new("seed:publish");
+const SEED_COUNTRIES_COMMAND: CommandId = CommandId::new("seed:countries");
 const ABOUT_COMMAND: CommandId = CommandId::new("about");
 
 /// Generate the full sample configuration TOML.
@@ -359,36 +360,44 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
                     .unwrap_or("database/migrations");
                 let force = invocation.matches().get_flag("force");
 
-                let path = Path::new(dir);
-                if !path.exists() {
-                    std::fs::create_dir_all(path).map_err(Error::other)?;
-                }
-
-                let mut published = 0;
-                for (name, sql) in framework_migrations() {
-                    let file_path = path.join(name);
-                    if file_path.exists() && !force {
-                        println!("  skip  {} (exists)", name);
-                        continue;
-                    }
-                    std::fs::write(&file_path, sql).map_err(Error::other)?;
-                    println!("  create  {}", name);
-                    published += 1;
-                }
-
-                if published == 0 {
-                    println!("\nAll migrations already exist. Use --force to overwrite.");
-                } else {
-                    println!("\n{published} migration(s) published to {dir}");
-                }
-
+                publish_framework_files(dir, FRAMEWORK_MIGRATIONS, force, "migration")?;
                 Ok(())
             },
         )?;
 
         registry.command(
-            SEED_COMMAND,
-            clap::Command::new(SEED_COMMAND.as_str().to_string())
+            SEED_PUBLISH_COMMAND,
+            clap::Command::new(SEED_PUBLISH_COMMAND.as_str().to_string())
+                .about("Publish framework seeder files to your project")
+                .arg(
+                    clap::Arg::new("path")
+                        .long("path")
+                        .value_name("DIR")
+                        .default_value("database/seeders")
+                        .help("Directory to write seeder files to"),
+                )
+                .arg(
+                    clap::Arg::new("force")
+                        .long("force")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Overwrite existing seeder files"),
+                ),
+            |invocation| async move {
+                let dir = invocation
+                    .matches()
+                    .get_one::<String>("path")
+                    .map(|s| s.as_str())
+                    .unwrap_or("database/seeders");
+                let force = invocation.matches().get_flag("force");
+
+                publish_framework_files(dir, FRAMEWORK_SEEDERS, force, "seeder")?;
+                Ok(())
+            },
+        )?;
+
+        registry.command(
+            SEED_COUNTRIES_COMMAND,
+            clap::Command::new(SEED_COUNTRIES_COMMAND.as_str().to_string())
                 .about("Seed the countries table with 250 built-in country records"),
             |invocation| async move {
                 let app = invocation.app();
@@ -464,447 +473,81 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
     })
 }
 
+fn publish_framework_files(
+    dir: &str,
+    files: &[(&'static str, &'static str)],
+    force: bool,
+    kind: &str,
+) -> Result<()> {
+    let path = Path::new(dir);
+    if !path.exists() {
+        std::fs::create_dir_all(path).map_err(Error::other)?;
+    }
+
+    let mut published = 0;
+    for (name, contents) in files {
+        let file_path = path.join(name);
+        if file_path.exists() && !force {
+            println!("  skip  {} (exists)", name);
+            continue;
+        }
+
+        std::fs::write(&file_path, contents).map_err(Error::other)?;
+        println!("  create  {}", name);
+        published += 1;
+    }
+
+    if published == 0 {
+        println!("\nAll {kind}s already exist. Use --force to overwrite.");
+    } else {
+        println!("\n{published} {kind}(s) published to {dir}");
+    }
+
+    Ok(())
+}
+
 /// Framework-provided migration files (Rust format, discoverable by forge-build).
-fn framework_migrations() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            "000000000001_create_personal_access_tokens.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
+const FRAMEWORK_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "000000000001_create_personal_access_tokens.rs",
+        include_str!("../../database/migrations/000000000001_create_personal_access_tokens.rs"),
+    ),
+    (
+        "000000000002_create_password_reset_tokens.rs",
+        include_str!("../../database/migrations/000000000002_create_password_reset_tokens.rs"),
+    ),
+    (
+        "000000000003_create_notifications.rs",
+        include_str!("../../database/migrations/000000000003_create_notifications.rs"),
+    ),
+    (
+        "000000000004_create_job_history.rs",
+        include_str!("../../database/migrations/000000000004_create_job_history.rs"),
+    ),
+    (
+        "000000000005_create_attachments.rs",
+        include_str!("../../database/migrations/000000000005_create_attachments.rs"),
+    ),
+    (
+        "000000000006_create_metadata.rs",
+        include_str!("../../database/migrations/000000000006_create_metadata.rs"),
+    ),
+    (
+        "000000000007_create_model_translations.rs",
+        include_str!("../../database/migrations/000000000007_create_model_translations.rs"),
+    ),
+    (
+        "000000000008_create_countries.rs",
+        include_str!("../../database/migrations/000000000008_create_countries.rs"),
+    ),
+    (
+        "000000000009_create_settings.rs",
+        include_str!("../../database/migrations/000000000009_create_settings.rs"),
+    ),
+];
 
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS personal_access_tokens (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                guard TEXT NOT NULL,
-                actor_id UUID NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                access_token_hash TEXT NOT NULL,
-                refresh_token_hash TEXT,
-                abilities JSONB NOT NULL DEFAULT '[]',
-                expires_at TIMESTAMPTZ NOT NULL,
-                refresh_expires_at TIMESTAMPTZ,
-                last_used_at TIMESTAMPTZ,
-                revoked_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_pat_access_hash ON personal_access_tokens (access_token_hash)",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_pat_refresh_hash ON personal_access_tokens (refresh_token_hash)",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_pat_actor ON personal_access_tokens (guard, actor_id)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS personal_access_tokens", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000002_create_password_reset_tokens.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS password_reset_tokens (
-                email TEXT NOT NULL,
-                guard TEXT NOT NULL,
-                token_hash TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_password_reset_email_guard ON password_reset_tokens (email, guard)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS password_reset_tokens", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000003_create_notifications.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS notifications (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                notifiable_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                data JSONB NOT NULL DEFAULT '{}',
-                read_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_notifications_notifiable ON notifications (notifiable_id, created_at DESC)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS notifications", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000004_create_job_history.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS job_history (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                job_id TEXT NOT NULL,
-                queue TEXT NOT NULL,
-                status TEXT NOT NULL,
-                attempt INT NOT NULL DEFAULT 1,
-                error TEXT,
-                started_at TIMESTAMPTZ,
-                completed_at TIMESTAMPTZ,
-                duration_ms BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_history_status ON job_history (status, created_at DESC)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS job_history", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000005_create_attachments.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS attachments (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                attachable_type TEXT NOT NULL,
-                attachable_id UUID NOT NULL,
-                collection TEXT NOT NULL DEFAULT 'default',
-                disk TEXT NOT NULL,
-                path TEXT NOT NULL,
-                name TEXT NOT NULL,
-                original_name TEXT,
-                mime_type TEXT,
-                size BIGINT NOT NULL DEFAULT 0,
-                sort_order INT NOT NULL DEFAULT 0,
-                custom_properties JSONB NOT NULL DEFAULT '{}',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_attachments_poly ON attachments (attachable_type, attachable_id, collection)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS attachments", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000006_create_metadata.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS metadata (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                metadatable_type TEXT NOT NULL,
-                metadatable_id UUID NOT NULL,
-                key TEXT NOT NULL,
-                value JSONB,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_unique ON metadata (metadatable_type, metadatable_id, key)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS metadata", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000007_create_model_translations.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS model_translations (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                translatable_type TEXT NOT NULL,
-                translatable_id UUID NOT NULL,
-                locale TEXT NOT NULL,
-                field TEXT NOT NULL,
-                value TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_translations_unique ON model_translations (translatable_type, translatable_id, locale, field)",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_translations_lookup ON model_translations (translatable_type, translatable_id, locale)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS model_translations", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000008_create_countries.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS countries (
-                iso2 TEXT PRIMARY KEY,
-                iso3 TEXT NOT NULL,
-                iso_numeric TEXT,
-                name TEXT NOT NULL,
-                official_name TEXT,
-                capital TEXT,
-                region TEXT,
-                subregion TEXT,
-                currencies JSONB NOT NULL DEFAULT '[]',
-                primary_currency_code TEXT,
-                calling_code TEXT,
-                calling_root TEXT,
-                calling_suffixes JSONB NOT NULL DEFAULT '[]',
-                tlds JSONB NOT NULL DEFAULT '[]',
-                timezones JSONB NOT NULL DEFAULT '[]',
-                latitude DOUBLE PRECISION,
-                longitude DOUBLE PRECISION,
-                independent BOOLEAN,
-                un_member BOOLEAN,
-                flag_emoji TEXT,
-                conversion_rate DOUBLE PRECISION,
-                status TEXT NOT NULL DEFAULT 'disabled',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_countries_status ON countries (status)",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_countries_region ON countries (region)",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS countries", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-        (
-            "000000000009_create_settings.rs",
-            r#"use async_trait::async_trait;
-use forge::prelude::*;
-
-pub struct Entry;
-
-#[async_trait]
-impl MigrationFile for Entry {
-    async fn up(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute(
-            "CREATE TABLE IF NOT EXISTS settings (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                key TEXT NOT NULL,
-                value JSONB,
-                setting_type TEXT NOT NULL DEFAULT 'text',
-                parameters JSONB NOT NULL DEFAULT '{}',
-                group_name TEXT NOT NULL DEFAULT 'general',
-                label TEXT NOT NULL DEFAULT '',
-                description TEXT,
-                sort_order INT NOT NULL DEFAULT 0,
-                is_public BOOLEAN NOT NULL DEFAULT false,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ
-            )",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings (key)",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_settings_group ON settings (group_name, sort_order)",
-            &[],
-        )
-        .await?;
-
-        ctx.raw_execute(
-            "CREATE INDEX IF NOT EXISTS idx_settings_public ON settings (is_public) WHERE is_public = true",
-            &[],
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn down(ctx: &MigrationContext<'_>) -> Result<()> {
-        ctx.raw_execute("DROP TABLE IF EXISTS settings", &[])
-            .await?;
-        Ok(())
-    }
-}
-"#,
-        ),
-    ]
-}
+/// Framework-provided seeder files (Rust format, discoverable by forge-build).
+const FRAMEWORK_SEEDERS: &[(&str, &str)] = &[(
+    "000000000001_countries_seeder.rs",
+    include_str!("../../database/seeders/000000000001_countries_seeder.rs"),
+)];

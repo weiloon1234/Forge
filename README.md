@@ -463,6 +463,9 @@ cargo run -- key:generate
 
 # Publish framework migrations
 cargo run -- migrate:publish
+
+# Publish framework seeders
+cargo run -- seed:publish
 ```
 
 Environment variables override config using double-underscore notation:
@@ -514,13 +517,15 @@ impl ServiceProvider for AppServiceProvider {
 | `config:publish` | Publish sample configuration to your project |
 | `env:publish` | Generate `.env.example` with all overridable variables |
 | `key:generate` | Generate signing and encryption keys |
-| `migrate:publish` | Publish framework migration SQL files |
+| `migrate:publish` | Publish framework migration files |
+| `seed:publish` | Publish framework seeder files |
 | `about` | Display framework version and environment info |
 | **Database** | |
 | `db:migrate` | Run pending migrations |
 | `db:migrate:status` | Show migration status |
 | `db:rollback` | Rollback the last migration batch |
 | `db:seed` | Run database seeders |
+| `seed:countries` | Seed 250 built-in country records |
 | **Scaffolding** | |
 | `make:migration` | Create a new migration file |
 | `make:seeder` | Create a new seeder file |
@@ -531,7 +536,6 @@ impl ServiceProvider for AppServiceProvider {
 | `down` | Put the application into maintenance mode |
 | `up` | Bring the application out of maintenance mode |
 | `routes:list` | List all registered routes |
-| `seed:countries` | Seed 250 built-in country records |
 | `token:prune` | Prune expired personal access tokens |
 | **Plugins** | |
 | `plugin:list` | List registered plugins |

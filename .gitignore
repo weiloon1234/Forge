@@ -35,3 +35,6 @@ logs/
 # Profiling
 flamegraph.svg
 perf.data*
+
+# Git worktrees
+.worktrees/

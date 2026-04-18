@@ -177,7 +177,7 @@ impl TokenManager {
             .db
             .raw_query(
                 r#"
-                SELECT guard, actor_id::text, abilities
+                SELECT guard, actor_id, abilities
                 FROM personal_access_tokens
                 WHERE access_token_hash = $1
                   AND revoked_at IS NULL
@@ -242,7 +242,7 @@ impl TokenManager {
                     WHERE refresh_token_hash = $1
                       AND revoked_at IS NULL
                       AND refresh_expires_at > NOW()
-                    RETURNING guard, actor_id::text, name, abilities
+                    RETURNING guard, actor_id, name, abilities
                     "#,
                     &[DbValue::Text(hash)],
                 )
@@ -251,7 +251,7 @@ impl TokenManager {
             self.db
                 .raw_query(
                     r#"
-                    SELECT guard, actor_id::text
+                    SELECT guard, actor_id
                          , name
                          , abilities
                     FROM personal_access_tokens
@@ -293,7 +293,7 @@ impl TokenManager {
         let guard = M::guard();
         self.db
             .raw_execute(
-                "UPDATE personal_access_tokens SET revoked_at = NOW() WHERE guard = $1 AND actor_id = $2::uuid AND revoked_at IS NULL",
+                "UPDATE personal_access_tokens SET revoked_at = NOW() WHERE guard = $1 AND actor_id = $2 AND revoked_at IS NULL",
                 &[
                     DbValue::Text(guard.to_string()),
                     DbValue::Text(actor_id.to_string()),
@@ -348,7 +348,7 @@ impl TokenManager {
                 INSERT INTO personal_access_tokens
                     (guard, actor_id, name, access_token_hash, refresh_token_hash, abilities, expires_at, refresh_expires_at)
                 VALUES
-                    ($1, $2::uuid, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 second', NOW() + $8 * INTERVAL '1 second')
+                    ($1, $2, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 second', NOW() + $8 * INTERVAL '1 second')
                 "#,
                 &[
                     DbValue::Text(guard.to_string()),

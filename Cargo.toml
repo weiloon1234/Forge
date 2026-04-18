@@ -19,6 +19,10 @@ exclude = [
     "tests/fixtures/plugin_consumer_app",
     "tests/fixtures/plugin_dep",
     "tools/forge-api-doc",
+    ".worktrees/ws-dashboard/tests/fixtures/blueprint_app",
+    ".worktrees/ws-dashboard/tests/fixtures/plugin_base",
+    ".worktrees/ws-dashboard/tests/fixtures/plugin_consumer_app",
+    ".worktrees/ws-dashboard/tests/fixtures/plugin_dep",
 ]
 resolver = "2"
 

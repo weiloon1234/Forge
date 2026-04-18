@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use forge::config::DatabaseConfig;
@@ -391,18 +391,14 @@ async fn make_migration_generates_a_rust_file_and_refuses_overwrite_without_forc
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
     assert_eq!(generated.len(), 1);
-    assert!(
-        generated[0]
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .ends_with("_create_widgets.rs")
-    );
-    assert!(
-        fs::read_to_string(&generated[0])
-            .unwrap()
-            .contains("impl MigrationFile for Entry")
-    );
+    assert!(generated[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .ends_with("_create_widgets.rs"));
+    assert!(fs::read_to_string(&generated[0])
+        .unwrap()
+        .contains("impl MigrationFile for Entry"));
 
     let error = run_cli(
         App::builder().load_config_dir(dir.path()),
@@ -446,11 +442,9 @@ async fn make_seeder_generates_a_rust_file_and_refuses_overwrite_without_force()
         generated[0].file_name().unwrap().to_string_lossy(),
         "users_seed.rs"
     );
-    assert!(
-        fs::read_to_string(&generated[0])
-            .unwrap()
-            .contains("impl SeederFile for Entry")
-    );
+    assert!(fs::read_to_string(&generated[0])
+        .unwrap()
+        .contains("impl SeederFile for Entry"));
 
     let error = run_cli(
         App::builder().load_config_dir(dir.path()),
@@ -488,6 +482,7 @@ async fn seed_publish_generates_framework_seeders_and_honors_force() {
     assert!(published.contains("seed_countries_with(ctx)"));
     assert!(published.contains("WHERE iso2 = 'MY'"));
     assert!(published.contains("is_default = true"));
+    assert!(published.contains("status = 'enabled'"));
 
     fs::write(&published_path, "// custom seeder").unwrap();
 
@@ -519,9 +514,7 @@ async fn seed_publish_generates_framework_seeders_and_honors_force() {
     )
     .await
     .unwrap();
-    assert!(
-        fs::read_to_string(&published_path)
-            .unwrap()
-            .contains("WHERE iso2 = 'MY'")
-    );
+    assert!(fs::read_to_string(&published_path)
+        .unwrap()
+        .contains("status = 'enabled'"));
 }

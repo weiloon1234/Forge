@@ -160,6 +160,16 @@ async fn wait_for_log(log: &Arc<Mutex<Vec<String>>>, prefix: &str) {
     panic!("log entry with prefix `{prefix}` not observed");
 }
 
+async fn wait_for_worker_job(app: &AppContext) {
+    for _ in 0..80 {
+        if Worker::from_app(app.clone()).unwrap().run_once().await.unwrap() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("worker did not observe a runnable job");
+}
+
 #[tokio::test]
 async fn run_worker_async_processes_jobs_through_worker_kernel() {
     let config_dir = tempdir().unwrap();
@@ -193,7 +203,7 @@ async fn run_worker_async_processes_jobs_through_worker_kernel() {
 }
 
 #[tokio::test]
-async fn worker_recovers_claimed_job_after_lease_expiry() {
+async fn aborting_worker_run_does_not_duplicate_in_flight_jobs() {
     let config_dir = tempdir().unwrap();
     write_runtime_config(config_dir.path(), "distributed-worker-recovery");
     let shared_log = Arc::new(Mutex::new(Vec::new()));
@@ -225,6 +235,7 @@ async fn worker_recovers_claimed_job_after_lease_expiry() {
     let worker_two_task = tokio::spawn(async move { worker_two.run().await.unwrap() });
 
     wait_for_log(&shared_log, "done:recover").await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
 
     let entries = shared_log.lock().unwrap().clone();
     assert_eq!(
@@ -234,17 +245,24 @@ async fn worker_recovers_claimed_job_after_lease_expiry() {
             .count(),
         1
     );
-    assert!(
+    assert_eq!(
         entries
             .iter()
             .filter(|entry| entry.starts_with("start:recover"))
-            .count()
-            >= 2
+            .count(),
+        1
     );
 
+    assert!(!Worker::from_app(app_two.clone())
+        .unwrap()
+        .run_once()
+        .await
+        .unwrap());
+
+    let snapshot_one = app_one.diagnostics().unwrap().snapshot();
     let snapshot = app_two.diagnostics().unwrap().snapshot();
-    assert!(snapshot.jobs.expired_requeues_total >= 1);
-    assert!(snapshot.jobs.succeeded_total >= 1);
+    assert!(snapshot_one.jobs.succeeded_total >= 1);
+    assert_eq!(snapshot.jobs.expired_requeues_total, 0);
 
     worker_two_task.abort();
 }
@@ -295,11 +313,7 @@ async fn only_one_scheduler_kernel_executes_when_sharing_a_backend() {
     assert_eq!(executed_one, vec![app::ids::CRON_SCHEDULE]);
     assert!(executed_two.is_empty());
 
-    assert!(Worker::from_app(scheduler_one.app().clone())
-        .unwrap()
-        .run_once()
-        .await
-        .unwrap());
+    wait_for_worker_job(scheduler_one.app()).await;
     wait_for_log(&log, "done:cron").await;
 
     let snapshot_one = scheduler_one.app().diagnostics().unwrap().snapshot();

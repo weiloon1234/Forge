@@ -381,6 +381,16 @@ async fn wait_for_http_ready(base_url: &str) {
     panic!("plugin http server did not become ready");
 }
 
+async fn wait_for_log_entry(log: &Arc<Mutex<Vec<String>>>, entry: &str) {
+    for _ in 0..40 {
+        if log.lock().unwrap().iter().any(|item| item == entry) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("log entry `{entry}` not observed");
+}
+
 async fn connect_websocket(
     url: &str,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
@@ -447,7 +457,7 @@ async fn plugin_contributed_runtime_features_work_across_kernels() {
         .unwrap();
     let executed = scheduler.run_once().await.unwrap();
     assert_eq!(executed, vec![PLUGIN_SCHEDULE]);
-    assert!(log.lock().unwrap().contains(&"plugin-schedule".to_string()));
+    wait_for_log_entry(&log, "plugin-schedule").await;
 
     let http_kernel = build_plugin_app(config_dir.path(), log.clone())
         .build_http_kernel()

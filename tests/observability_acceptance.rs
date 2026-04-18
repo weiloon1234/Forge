@@ -310,6 +310,17 @@ async fn connect_websocket(
     panic!("websocket server did not become ready");
 }
 
+async fn wait_for_scheduler_executions(app: &AppContext, expected: u64) {
+    for _ in 0..40 {
+        let snapshot = app.diagnostics().unwrap().snapshot();
+        if snapshot.scheduler.executed_schedules_total >= expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("scheduler diagnostics did not reach the expected execution count");
+}
+
 #[tokio::test]
 async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot() {
     let config_dir = tempdir().unwrap();
@@ -543,6 +554,7 @@ async fn diagnostics_track_websocket_job_and_scheduler_activity() {
     let now = DateTime::parse("2026-04-08T12:00:00Z").unwrap();
     let executed = scheduler.tick_at(now).await.unwrap();
     assert_eq!(executed, vec![app::ids::HEARTBEAT_SCHEDULE]);
+    wait_for_scheduler_executions(&scheduler_app, 1).await;
 
     let snapshot = scheduler_app.diagnostics().unwrap().snapshot();
     assert_eq!(snapshot.jobs.enqueued_total, 1);

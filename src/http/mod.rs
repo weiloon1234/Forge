@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
+use axum::handler::Handler;
 use axum::middleware::{self as axum_middleware, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
@@ -250,12 +251,419 @@ struct RouteRegistration {
     path: String,
     method_router: MethodRouter<AppContext>,
     options: HttpRouteOptions,
+    inherit_parent_defaults_on_merge: bool,
 }
 
 enum HttpRegistration {
     Route(Box<RouteRegistration>),
     Nest { path: String, router: HttpRouter },
     Merge { router: HttpRouter },
+}
+
+#[derive(Clone)]
+struct ResolvedHttpScopeState {
+    path_prefix: String,
+    name_prefix: String,
+    options: HttpRouteOptions,
+    explicit_tags_started: bool,
+}
+
+impl ResolvedHttpScopeState {
+    fn root(path: &str, defaults: &HttpRouteOptions) -> Self {
+        Self {
+            path_prefix: join_path_prefix("", path),
+            name_prefix: String::new(),
+            options: defaults.clone(),
+            explicit_tags_started: false,
+        }
+    }
+
+    fn child(&self, path: &str) -> Self {
+        Self {
+            path_prefix: join_path_prefix(&self.path_prefix, path),
+            name_prefix: self.name_prefix.clone(),
+            options: self.options.clone(),
+            explicit_tags_started: false,
+        }
+    }
+
+    fn route_path(&self, path: &str) -> String {
+        join_route_path(&self.path_prefix, path)
+    }
+
+    fn route_name(&self, name: &str) -> String {
+        join_route_name(&self.name_prefix, name)
+    }
+}
+
+pub struct HttpScope<'a> {
+    registrar: &'a mut HttpRegistrar,
+    state: ResolvedHttpScopeState,
+}
+
+impl<'a> HttpScope<'a> {
+    fn new(registrar: &'a mut HttpRegistrar, state: ResolvedHttpScopeState) -> Self {
+        Self { registrar, state }
+    }
+
+    pub fn scope(
+        &mut self,
+        path: &str,
+        f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>,
+    ) -> Result<&mut Self> {
+        let state = self.state.child(path);
+        let result = {
+            let mut child = HttpScope::new(self.registrar, state);
+            f(&mut child)
+        };
+        result?;
+        Ok(self)
+    }
+
+    pub fn name_prefix(&mut self, prefix: &str) -> &mut Self {
+        self.state.name_prefix = join_route_name(&self.state.name_prefix, prefix);
+        self
+    }
+
+    pub fn public(&mut self) -> &mut Self {
+        self.state.options.access = AccessScope::Public;
+        self
+    }
+
+    pub fn guard<I>(&mut self, guard: I) -> &mut Self
+    where
+        I: Into<GuardId>,
+    {
+        self.state.options.access = self.state.options.access.clone().with_guard(guard);
+        self
+    }
+
+    pub fn permission<I>(&mut self, permission: I) -> &mut Self
+    where
+        I: Into<PermissionId>,
+    {
+        self.state.options.access = self
+            .state
+            .options
+            .access
+            .clone()
+            .with_permission(permission);
+        self
+    }
+
+    pub fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PermissionId>,
+    {
+        self.state.options.access = self
+            .state
+            .options
+            .access
+            .clone()
+            .with_permissions(permissions);
+        self
+    }
+
+    pub fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self {
+        self.state.options.middlewares.push(config);
+        self
+    }
+
+    pub fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self {
+        self.state.options.middleware_group_name = Some(name.into());
+        self
+    }
+
+    pub fn rate_limit(&mut self, rate_limit: middleware::RateLimit) -> &mut Self {
+        apply_rate_limit(&mut self.state.options, rate_limit);
+        self
+    }
+
+    pub fn tag(&mut self, tag: &str) -> &mut Self {
+        apply_tag(
+            &mut self.state.options,
+            tag,
+            &mut self.state.explicit_tags_started,
+        );
+        self
+    }
+
+    pub fn summary(&mut self, summary: &str) -> &mut Self {
+        mutate_doc(&mut self.state.options, |doc| doc.summary(summary));
+        self
+    }
+
+    pub fn description(&mut self, description: &str) -> &mut Self {
+        mutate_doc(&mut self.state.options, |doc| doc.description(description));
+        self
+    }
+
+    pub fn deprecated(&mut self) -> &mut Self {
+        mutate_doc(&mut self.state.options, |doc| doc.deprecated());
+        self
+    }
+
+    pub fn get<H, T>(
+        &mut self,
+        path: &str,
+        name: &str,
+        handler: H,
+        configure: impl FnOnce(&mut HttpRouteBuilder),
+    ) -> &mut Self
+    where
+        H: Handler<T, AppContext>,
+        T: 'static,
+    {
+        self.register_route(path, name, axum::routing::get(handler), "get", configure)
+    }
+
+    pub fn post<H, T>(
+        &mut self,
+        path: &str,
+        name: &str,
+        handler: H,
+        configure: impl FnOnce(&mut HttpRouteBuilder),
+    ) -> &mut Self
+    where
+        H: Handler<T, AppContext>,
+        T: 'static,
+    {
+        self.register_route(path, name, axum::routing::post(handler), "post", configure)
+    }
+
+    pub fn put<H, T>(
+        &mut self,
+        path: &str,
+        name: &str,
+        handler: H,
+        configure: impl FnOnce(&mut HttpRouteBuilder),
+    ) -> &mut Self
+    where
+        H: Handler<T, AppContext>,
+        T: 'static,
+    {
+        self.register_route(path, name, axum::routing::put(handler), "put", configure)
+    }
+
+    pub fn patch<H, T>(
+        &mut self,
+        path: &str,
+        name: &str,
+        handler: H,
+        configure: impl FnOnce(&mut HttpRouteBuilder),
+    ) -> &mut Self
+    where
+        H: Handler<T, AppContext>,
+        T: 'static,
+    {
+        self.register_route(
+            path,
+            name,
+            axum::routing::patch(handler),
+            "patch",
+            configure,
+        )
+    }
+
+    pub fn delete<H, T>(
+        &mut self,
+        path: &str,
+        name: &str,
+        handler: H,
+        configure: impl FnOnce(&mut HttpRouteBuilder),
+    ) -> &mut Self
+    where
+        H: Handler<T, AppContext>,
+        T: 'static,
+    {
+        self.register_route(
+            path,
+            name,
+            axum::routing::delete(handler),
+            "delete",
+            configure,
+        )
+    }
+
+    fn register_route(
+        &mut self,
+        path: &str,
+        name: &str,
+        method_router: MethodRouter<AppContext>,
+        method: &str,
+        configure: impl FnOnce(&mut HttpRouteBuilder),
+    ) -> &mut Self {
+        let mut route = HttpRouteBuilder::from_scope(&self.state, method);
+        configure(&mut route);
+
+        self.registrar.route_named_resolved(
+            &self.state.route_name(name),
+            &self.state.route_path(path),
+            method_router,
+            route.finish(),
+        );
+        self
+    }
+}
+
+pub struct HttpRouteBuilder {
+    options: HttpRouteOptions,
+    explicit_tags_started: bool,
+}
+
+impl HttpRouteBuilder {
+    fn from_scope(scope: &ResolvedHttpScopeState, method: &str) -> Self {
+        let mut options = scope.options.clone();
+        mutate_doc(&mut options, |doc| doc.method(method));
+
+        Self {
+            options,
+            explicit_tags_started: false,
+        }
+    }
+
+    fn finish(self) -> HttpRouteOptions {
+        self.options
+    }
+
+    pub fn public(&mut self) -> &mut Self {
+        self.options.access = AccessScope::Public;
+        self
+    }
+
+    pub fn guard<I>(&mut self, guard: I) -> &mut Self
+    where
+        I: Into<GuardId>,
+    {
+        self.options.access = self.options.access.clone().with_guard(guard);
+        self
+    }
+
+    pub fn permission<I>(&mut self, permission: I) -> &mut Self
+    where
+        I: Into<PermissionId>,
+    {
+        self.options.access = self.options.access.clone().with_permission(permission);
+        self
+    }
+
+    pub fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PermissionId>,
+    {
+        self.options.access = self.options.access.clone().with_permissions(permissions);
+        self
+    }
+
+    pub fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self {
+        self.options.middlewares.push(config);
+        self
+    }
+
+    pub fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self {
+        self.options.middleware_group_name = Some(name.into());
+        self
+    }
+
+    pub fn rate_limit(&mut self, rate_limit: middleware::RateLimit) -> &mut Self {
+        apply_rate_limit(&mut self.options, rate_limit);
+        self
+    }
+
+    pub fn tag(&mut self, tag: &str) -> &mut Self {
+        apply_tag(&mut self.options, tag, &mut self.explicit_tags_started);
+        self
+    }
+
+    pub fn summary(&mut self, summary: &str) -> &mut Self {
+        mutate_doc(&mut self.options, |doc| doc.summary(summary));
+        self
+    }
+
+    pub fn description(&mut self, description: &str) -> &mut Self {
+        mutate_doc(&mut self.options, |doc| doc.description(description));
+        self
+    }
+
+    pub fn request<T: crate::openapi::ApiSchema>(&mut self) -> &mut Self {
+        mutate_doc(&mut self.options, |doc| doc.request::<T>());
+        self
+    }
+
+    pub fn response<T: crate::openapi::ApiSchema>(&mut self, status: u16) -> &mut Self {
+        mutate_doc(&mut self.options, |doc| doc.response::<T>(status));
+        self
+    }
+
+    pub fn deprecated(&mut self) -> &mut Self {
+        mutate_doc(&mut self.options, |doc| doc.deprecated());
+        self
+    }
+}
+
+fn mutate_doc(
+    options: &mut HttpRouteOptions,
+    f: impl FnOnce(crate::openapi::RouteDoc) -> crate::openapi::RouteDoc,
+) {
+    let doc = options.doc.take().unwrap_or_default();
+    options.doc = Some(f(doc));
+}
+
+fn apply_tag(options: &mut HttpRouteOptions, tag: &str, explicit_tags_started: &mut bool) {
+    let mut doc = options.doc.take().unwrap_or_default();
+    if !*explicit_tags_started {
+        doc.tags = vec![tag.to_string()];
+        *explicit_tags_started = true;
+    } else if !doc.tags.iter().any(|existing| existing == tag) {
+        doc.tags.push(tag.to_string());
+    }
+    options.doc = Some(doc);
+}
+
+fn apply_rate_limit(options: &mut HttpRouteOptions, rate_limit: middleware::RateLimit) {
+    match rate_limit.rate_limit_by() {
+        middleware::RateLimitBy::Ip => {
+            options.middlewares.push(rate_limit.build());
+        }
+        _ => {
+            options.post_auth_rate_limit = Some(rate_limit);
+        }
+    }
+}
+
+fn join_path_prefix(base: &str, path: &str) -> String {
+    let base = base.trim_matches('/');
+    let path = path.trim_matches('/');
+
+    match (base.is_empty(), path.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => format!("/{path}"),
+        (false, true) => format!("/{base}"),
+        (false, false) => format!("/{base}/{path}"),
+    }
+}
+
+fn join_route_path(base: &str, path: &str) -> String {
+    let joined = join_path_prefix(base, path);
+    if joined.is_empty() {
+        "/".to_string()
+    } else {
+        joined
+    }
+}
+
+fn join_route_name(prefix: &str, name: &str) -> String {
+    let prefix = prefix.trim_matches('.');
+    let name = name.trim_matches('.');
+
+    match (prefix.is_empty(), name.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => name.to_string(),
+        (false, true) => prefix.to_string(),
+        (false, false) => format!("{prefix}.{name}"),
+    }
 }
 
 pub struct HttpRegistrar {
@@ -289,13 +697,12 @@ impl HttpRegistrar {
         method_router: MethodRouter<AppContext>,
         options: HttpRouteOptions,
     ) -> &mut Self {
-        let path_owned = path.to_string();
-        self.registrations
-            .push(HttpRegistration::Route(Box::new(RouteRegistration {
-                path: path_owned,
-                method_router,
-                options: options.with_defaults(&self.default_route_options),
-            })));
+        self.push_route_registration(
+            path.to_string(),
+            method_router,
+            options.with_defaults(&self.default_route_options),
+            true,
+        );
         self
     }
 
@@ -320,6 +727,20 @@ impl HttpRegistrar {
     ) -> &mut Self {
         self.named_routes.register(name, path);
         self.route_with_options(path, method_router, options)
+    }
+
+    pub fn scope(
+        &mut self,
+        path: &str,
+        f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>,
+    ) -> Result<&mut Self> {
+        let state = ResolvedHttpScopeState::root(path, &self.default_route_options);
+        let result = {
+            let mut scope = HttpScope::new(self, state);
+            f(&mut scope)
+        };
+        result?;
+        Ok(self)
     }
 
     pub fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self {
@@ -377,11 +798,20 @@ impl HttpRegistrar {
         for registration in sub.registrations {
             match registration {
                 HttpRegistration::Route(route) => {
-                    self.route_with_options(
-                        &format!("{prefix}{}", route.path),
-                        route.method_router,
-                        route.options,
-                    );
+                    if route.inherit_parent_defaults_on_merge {
+                        self.route_with_options(
+                            &format!("{prefix}{}", route.path),
+                            route.method_router,
+                            route.options,
+                        );
+                    } else {
+                        self.push_route_registration(
+                            format!("{prefix}{}", route.path),
+                            route.method_router,
+                            route.options,
+                            false,
+                        );
+                    }
                 }
                 HttpRegistration::Nest { path, router } => {
                     self.registrations.push(HttpRegistration::Nest {
@@ -502,6 +932,7 @@ impl HttpRegistrar {
                         path,
                         method_router,
                         options,
+                        ..
                     } = *route;
                     let mut route_middlewares = Vec::new();
                     // Expand middleware group if specified
@@ -564,6 +995,34 @@ impl HttpRegistrar {
                 crate::logging::request_context_middleware,
             ))
             .with_state(app)
+    }
+
+    fn route_named_resolved(
+        &mut self,
+        name: &str,
+        path: &str,
+        method_router: MethodRouter<AppContext>,
+        options: HttpRouteOptions,
+    ) -> &mut Self {
+        self.named_routes.register(name, path);
+        self.push_route_registration(path.to_string(), method_router, options, false);
+        self
+    }
+
+    fn push_route_registration(
+        &mut self,
+        path: String,
+        method_router: MethodRouter<AppContext>,
+        options: HttpRouteOptions,
+        inherit_parent_defaults_on_merge: bool,
+    ) {
+        self.registrations
+            .push(HttpRegistration::Route(Box::new(RouteRegistration {
+                path,
+                method_router,
+                options,
+                inherit_parent_defaults_on_merge,
+            })));
     }
 }
 
@@ -740,13 +1199,27 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use axum::routing::{delete, get, post, put};
 
     use super::{HttpRegistrar, HttpRegistration, HttpResourceRoutes, HttpRouteOptions};
-    use crate::support::GuardId;
+    use crate::http::middleware::{RateLimit, RateLimitWindow};
+    use crate::support::{GuardId, PermissionId};
 
     async fn ok() -> &'static str {
         "ok"
+    }
+
+    fn route_by_path<'a>(registrar: &'a HttpRegistrar, path: &str) -> &'a super::RouteRegistration {
+        registrar
+            .registrations
+            .iter()
+            .find_map(|registration| match registration {
+                HttpRegistration::Route(route) if route.path == path => Some(route.as_ref()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing route at `{path}`"))
     }
 
     #[test]
@@ -786,6 +1259,45 @@ mod tests {
     }
 
     #[test]
+    fn scope_inside_group_with_options_inherits_outer_defaults_and_can_reset_access() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .group_with_options(
+                "/api",
+                HttpRouteOptions::new()
+                    .guard(GuardId::new("api"))
+                    .tag("outer"),
+                |routes| {
+                    routes.scope("/admin", |admin| {
+                        admin.name_prefix("admin");
+                        admin.get("/health", "health", ok, |_| {});
+                        admin.get("/login", "login", ok, |route| {
+                            route.public();
+                        });
+                        Ok(())
+                    })?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(registrar.named_routes.has("admin.health"));
+        assert!(registrar.named_routes.has("admin.login"));
+
+        let health = route_by_path(&registrar, "/api/admin/health");
+        let health_doc = health.options.doc.as_ref().expect("docs should exist");
+        assert_eq!(health.options.guard_id(), Some(&GuardId::new("api")));
+        assert_eq!(health_doc.tags, vec!["outer".to_string()]);
+
+        let login = route_by_path(&registrar, "/api/admin/login");
+        let login_doc = login.options.doc.as_ref().expect("docs should exist");
+        assert_eq!(login.options.guard_id(), None);
+        assert!(login.options.permissions_set().is_empty());
+        assert!(!login.options.requires_auth());
+        assert_eq!(login_doc.tags, vec!["outer".to_string()]);
+    }
+
+    #[test]
     fn resource_registers_common_named_routes() {
         let mut registrar = HttpRegistrar::new();
         registrar.resource_with_options(
@@ -816,5 +1328,294 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(registered_paths.contains(&"/users"));
         assert!(registered_paths.contains(&"/users/:id"));
+    }
+
+    #[test]
+    fn scope_joins_nested_paths_and_relative_route_names() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin.name_prefix("admin");
+                admin.scope("/profile", |profile| {
+                    profile.name_prefix("profile");
+                    profile.put("", "update", ok, |route| {
+                        route.summary("Update admin profile");
+                    });
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(registrar.named_routes.has("admin.profile.update"));
+
+        let route = route_by_path(&registrar, "/admin/profile");
+        let doc = route.options.doc.as_ref().expect("route docs should exist");
+        assert_eq!(doc.method.as_deref(), Some("put"));
+        assert_eq!(doc.summary.as_deref(), Some("Update admin profile"));
+    }
+
+    #[test]
+    fn scope_inherits_defaults_across_nested_scopes() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin
+                    .name_prefix("admin")
+                    .guard(GuardId::new("admin"))
+                    .permission(PermissionId::new("users.view"))
+                    .middleware_group("api")
+                    .rate_limit(RateLimit::new(60).per_minute().by_actor())
+                    .tag("admin:users")
+                    .summary("Admin users")
+                    .description("Inherited from scope")
+                    .deprecated();
+
+                admin.scope("/users", |users| {
+                    users.name_prefix("users");
+                    users.get("/:id", "show", ok, |_| {});
+                    Ok(())
+                })?;
+
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/users/:id");
+        let doc = route.options.doc.as_ref().expect("route docs should exist");
+        let rate_limit = route
+            .options
+            .post_auth_rate_limit
+            .as_ref()
+            .expect("scope rate limit should be inherited");
+
+        assert_eq!(route.options.guard_id(), Some(&GuardId::new("admin")));
+        assert_eq!(
+            route.options.permissions_set(),
+            BTreeSet::from([PermissionId::new("users.view")])
+        );
+        assert_eq!(route.options.middleware_group_name.as_deref(), Some("api"));
+        assert_eq!(rate_limit.max(), 60);
+        assert!(matches!(rate_limit.window(), RateLimitWindow::Minute));
+        assert_eq!(doc.method.as_deref(), Some("get"));
+        assert_eq!(doc.tags, vec!["admin:users".to_string()]);
+        assert_eq!(doc.summary.as_deref(), Some("Admin users"));
+        assert_eq!(doc.description.as_deref(), Some("Inherited from scope"));
+        assert!(doc.deprecated);
+    }
+
+    #[test]
+    fn route_public_clears_inherited_scope_access() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin
+                    .name_prefix("admin")
+                    .guard(GuardId::new("admin"))
+                    .permission(PermissionId::new("admin.access"));
+
+                admin.get("/login", "login", ok, |route| {
+                    route.public();
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/login");
+        assert_eq!(route.options.guard_id(), None);
+        assert!(route.options.permissions_set().is_empty());
+        assert!(!route.options.requires_auth());
+    }
+
+    #[test]
+    fn child_scope_public_clears_inherited_parent_access() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin
+                    .name_prefix("admin")
+                    .guard(GuardId::new("admin"))
+                    .permission(PermissionId::new("admin.access"));
+
+                admin.scope("/auth", |auth| {
+                    auth.name_prefix("auth").public();
+                    auth.post("/login", "login", ok, |_| {});
+                    Ok(())
+                })?;
+
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/auth/login");
+        assert_eq!(route.options.guard_id(), None);
+        assert!(route.options.permissions_set().is_empty());
+        assert!(!route.options.requires_auth());
+    }
+
+    #[test]
+    fn route_overrides_guard_and_adds_permissions() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin
+                    .name_prefix("admin")
+                    .guard(GuardId::new("admin"))
+                    .permission(PermissionId::new("users.view"))
+                    .tag("admin:users");
+
+                admin.get("/users/:id", "show", ok, |route| {
+                    route.guard(GuardId::new("support"));
+                    route.permission(PermissionId::new("users.edit"));
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/users/:id");
+        assert_eq!(route.options.guard_id(), Some(&GuardId::new("support")));
+        assert_eq!(
+            route.options.permissions_set(),
+            BTreeSet::from([
+                PermissionId::new("users.edit"),
+                PermissionId::new("users.view"),
+            ])
+        );
+    }
+
+    #[test]
+    fn route_permissions_replace_inherited_permissions_and_tags_replace_inherited_tags() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin
+                    .name_prefix("admin")
+                    .guard(GuardId::new("admin"))
+                    .permission(PermissionId::new("users.view"))
+                    .tag("admin:users");
+
+                admin.get("/users/:id/audit", "audit", ok, |route| {
+                    route.permissions([PermissionId::new("users.manage")]);
+                    route.tag("custom:users");
+                    route.tag("custom:audit");
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/users/:id/audit");
+        let doc = route.options.doc.as_ref().expect("route docs should exist");
+
+        assert_eq!(
+            route.options.permissions_set(),
+            BTreeSet::from([PermissionId::new("users.manage")])
+        );
+        assert_eq!(
+            doc.tags,
+            vec!["custom:users".to_string(), "custom:audit".to_string()]
+        );
+    }
+
+    #[test]
+    fn verb_helpers_populate_method_and_preserve_request_response_docs() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/users", |users| {
+                users.name_prefix("users");
+                users.patch("/:id", "update", ok, |route| {
+                    route.summary("Patch user");
+                    route.request::<String>();
+                    route.response::<String>(200);
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/users/:id");
+        let doc = route.options.doc.as_ref().expect("route docs should exist");
+
+        assert_eq!(doc.method.as_deref(), Some("patch"));
+        assert_eq!(doc.summary.as_deref(), Some("Patch user"));
+        assert_eq!(
+            doc.request.as_ref().map(|schema| schema.name),
+            Some("String")
+        );
+        assert_eq!(doc.responses.len(), 1);
+        assert_eq!(doc.responses[0].0, 200);
+        assert_eq!(doc.responses[0].1.name, "String");
+    }
+
+    #[test]
+    fn scope_dsl_registers_starter_style_routes_and_openapi_docs() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .api_version(1, |routes| {
+                routes.scope("/admin", |admin| {
+                    admin.name_prefix("admin");
+
+                    admin.scope("/auth", |auth| {
+                        auth.name_prefix("auth").tag("admin:auth");
+
+                        auth.post("/login", "login", ok, |route| {
+                            route.public();
+                            route.summary("Admin login");
+                            route.request::<String>();
+                            route.response::<String>(200);
+                        });
+
+                        auth.get("/me", "me", ok, |route| {
+                            route.guard(GuardId::new("admin"));
+                            route.summary("Get authenticated admin profile");
+                            route.response::<String>(200);
+                        });
+
+                        Ok(())
+                    })?;
+
+                    admin.scope("/profile", |profile| {
+                        profile
+                            .name_prefix("profile")
+                            .tag("admin:profile")
+                            .guard(GuardId::new("admin"));
+
+                        profile.put("", "update", ok, |route| {
+                            route.summary("Update admin profile");
+                            route.request::<String>();
+                            route.response::<String>(200);
+                        });
+
+                        Ok(())
+                    })?;
+
+                    Ok(())
+                })?;
+
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(registrar.named_routes.has("admin.auth.login"));
+        assert!(registrar.named_routes.has("admin.auth.me"));
+        assert!(registrar.named_routes.has("admin.profile.update"));
+
+        let docs = registrar.collect_documented_routes();
+        let spec = crate::openapi::spec::generate_openapi_spec("Forge", "1.0.0", &docs);
+
+        assert_eq!(
+            spec["paths"]["/api/v1/admin/auth/login"]["post"]["summary"],
+            "Admin login"
+        );
+        assert_eq!(
+            spec["paths"]["/api/v1/admin/auth/login"]["post"]["tags"][0],
+            "admin:auth"
+        );
+        assert_eq!(
+            spec["paths"]["/api/v1/admin/profile"]["put"]["summary"],
+            "Update admin profile"
+        );
+        assert_eq!(
+            spec["paths"]["/api/v1/admin/profile"]["put"]["tags"][0],
+            "admin:profile"
+        );
     }
 }

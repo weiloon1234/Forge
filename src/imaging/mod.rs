@@ -111,11 +111,14 @@ pub enum Rotation {
 /// ```rust,no_run
 /// use forge::imaging::{ImageProcessor, ImageFormat, Rotation};
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let bytes = ImageProcessor::open("photo.jpg")?
 ///     .resize(800, 600)
 ///     .grayscale()
 ///     .quality(85)
 ///     .to_bytes(ImageFormat::Jpeg)?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct ImageProcessor {
     image: DynamicImage,

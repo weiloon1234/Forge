@@ -12,11 +12,14 @@ use crate::support::token::Token;
 /// use forge::HashManager;
 /// use forge::config::HashingConfig;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = HashingConfig::default();
 /// let manager = HashManager::from_config(&config)?;
 ///
 /// let hash = manager.hash("secret")?;
 /// assert!(manager.check("secret", &hash)?);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct HashManager {

@@ -10,10 +10,10 @@ help: the following other types implement trait `IntoColumnValue<T>`
   --> src/database/model.rs
    |
    | impl IntoColumnValue<String> for &str {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<String>`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<std::string::String>`
 ...
    | impl IntoColumnValue<Option<String>> for &str {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<Option<String>>`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<Option<std::string::String>>`
 note: required by a bound in `forge::Column::<M, T>::eq`
   --> src/database/model.rs
    |
@@ -33,10 +33,10 @@ help: the following other types implement trait `IntoColumnValue<T>`
   --> src/database/model.rs
    |
    | impl IntoColumnValue<String> for &str {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<String>`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<std::string::String>`
 ...
    | impl IntoColumnValue<Option<String>> for &str {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<Option<String>>`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoColumnValue<Option<std::string::String>>`
 note: required by a bound in `forge::Column::<M, T>::in_list`
   --> src/database/model.rs
    |

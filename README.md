@@ -397,15 +397,24 @@ struct UserResponse {
 // ── Route with OpenAPI documentation ──
 
 fn routes(r: &mut HttpRegistrar) -> Result<()> {
-    r.route_with_options("/users", post(create_user),
-        HttpRouteOptions::new()
-            .guard(AuthGuard::Api)
-            .document(RouteDoc::new()
-                .post()
-                .summary("Create user")
-                .tag("users")
-                .request::<CreateUserRequest>()
-                .response::<UserResponse>(201)));
+    r.api_version(1, |r| {
+        r.scope("/users", |users| {
+            users
+                .name_prefix("users")
+                .guard(AuthGuard::Api)
+                .tag("users");
+
+            users.post("", "store", create_user, |route| {
+                route.summary("Create user");
+                route.request::<CreateUserRequest>();
+                route.response::<UserResponse>(201);
+            });
+
+            Ok(())
+        })?;
+
+        Ok(())
+    })?;
     Ok(())
 }
 

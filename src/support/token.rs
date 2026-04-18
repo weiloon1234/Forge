@@ -7,9 +7,12 @@ use crate::foundation::{Error, Result};
 /// ```rust
 /// use forge::Token;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let api_key = Token::generate(32)?;     // "aB3xY9z..."
 /// let hex_token = Token::hex(16)?;        // "4a7b2c..." (32 hex chars)
 /// let b64_token = Token::base64(32)?;     // URL-safe base64
+/// # Ok(())
+/// # }
 /// ```
 pub struct Token;
 

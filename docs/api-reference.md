@@ -1144,12 +1144,39 @@ fn route(&mut self, path: &str, method_router: MethodRouter<AppContext>) -> &mut
 fn route_with_options(&mut self, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions) -> &mut Self
 fn route_named(&mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>) -> &mut Self
 fn route_named_with_options(&mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions) -> &mut Self
+fn scope(&mut self, path: &str, f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>) -> Result<&mut Self>
 fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self
 fn merge(&mut self, router: HttpRouter) -> &mut Self
 fn group(&mut self, prefix: &str, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>) -> Result<&mut Self>
+fn group_with_options(&mut self, prefix: &str, options: HttpRouteOptions, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>) -> Result<&mut Self>
+fn resource(&mut self, name: &str, path: &str, routes: HttpResourceRoutes) -> &mut Self
+fn resource_with_options(&mut self, name: &str, path: &str, routes: HttpResourceRoutes, options: HttpRouteOptions) -> &mut Self
 fn api_version(&mut self, version: u32, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>) -> Result<&mut Self>
 fn into_router(self, app: AppContext) -> Router
 fn into_router_with_middlewares(self, app: AppContext, middlewares: Vec<MiddlewareConfig>) -> Router
+```
+
+### HttpScope — methods
+
+```rust
+fn scope(&mut self, path: &str, f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>) -> Result<&mut Self>
+fn name_prefix(&mut self, prefix: &str) -> &mut Self
+fn public(&mut self) -> &mut Self
+fn guard<I>(&mut self, guard: I) -> &mut Self
+fn permission<I>(&mut self, permission: I) -> &mut Self
+fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
+fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
+fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
+fn tag(&mut self, tag: &str) -> &mut Self
+fn summary(&mut self, summary: &str) -> &mut Self
+fn description(&mut self, description: &str) -> &mut Self
+fn deprecated(&mut self) -> &mut Self
+fn get<H, T>(&mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder)) -> &mut Self
+fn post<H, T>(&mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder)) -> &mut Self
+fn put<H, T>(&mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder)) -> &mut Self
+fn patch<H, T>(&mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder)) -> &mut Self
+fn delete<H, T>(&mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder)) -> &mut Self
 ```
 
 ### HttpRouteOptions — methods
@@ -1163,6 +1190,24 @@ fn middleware(self, config: MiddlewareConfig) -> Self
 fn middleware_group(self, name: impl Into<String>) -> Self
 fn rate_limit(self, rate_limit: RateLimit) -> Self
 fn document(self, doc: RouteDoc) -> Self
+```
+
+### HttpRouteBuilder — methods
+
+```rust
+fn public(&mut self) -> &mut Self
+fn guard<I>(&mut self, guard: I) -> &mut Self
+fn permission<I>(&mut self, permission: I) -> &mut Self
+fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
+fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
+fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
+fn tag(&mut self, tag: &str) -> &mut Self
+fn summary(&mut self, summary: &str) -> &mut Self
+fn description(&mut self, description: &str) -> &mut Self
+fn request<T: ApiSchema>(&mut self) -> &mut Self
+fn response<T: ApiSchema>(&mut self, status: u16) -> &mut Self
+fn deprecated(&mut self) -> &mut Self
 ```
 
 ---

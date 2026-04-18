@@ -15,6 +15,7 @@ struct HttpRegistrar
   fn route_with_options( &mut self, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
   fn route_named( &mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
   fn route_named_with_options( &mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
+  fn scope( &mut self, path: &str, f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>, ) -> Result<&mut Self>
   fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self
   fn merge(&mut self, router: HttpRouter) -> &mut Self
   fn group( &mut self, prefix: &str, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>, ) -> Result<&mut Self>
@@ -32,6 +33,20 @@ struct HttpResourceRoutes
   fn update(self, route: MethodRouter<AppContext>) -> Self
   fn destroy(self, route: MethodRouter<AppContext>) -> Self
   fn id_param(self, id_param: impl Into<String>) -> Self
+struct HttpRouteBuilder
+  fn public(&mut self) -> &mut Self
+  fn guard<I>(&mut self, guard: I) -> &mut Self
+  fn permission<I>(&mut self, permission: I) -> &mut Self
+  fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+  fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
+  fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
+  fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
+  fn tag(&mut self, tag: &str) -> &mut Self
+  fn summary(&mut self, summary: &str) -> &mut Self
+  fn description(&mut self, description: &str) -> &mut Self
+  fn request<T: ApiSchema>(&mut self) -> &mut Self
+  fn response<T: ApiSchema>(&mut self, status: u16) -> &mut Self
+  fn deprecated(&mut self) -> &mut Self
 struct HttpRouteOptions
   fn new() -> Self
   fn guard<I>(self, guard: I) -> Self
@@ -47,6 +62,25 @@ struct HttpRouteOptions
   fn request<T: ApiSchema>(self) -> Self
   fn response<T: ApiSchema>(self, status: u16) -> Self
   fn deprecated(self) -> Self
+struct HttpScope
+  fn scope( &mut self, path: &str, f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>, ) -> Result<&mut Self>
+  fn name_prefix(&mut self, prefix: &str) -> &mut Self
+  fn public(&mut self) -> &mut Self
+  fn guard<I>(&mut self, guard: I) -> &mut Self
+  fn permission<I>(&mut self, permission: I) -> &mut Self
+  fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+  fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
+  fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
+  fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
+  fn tag(&mut self, tag: &str) -> &mut Self
+  fn summary(&mut self, summary: &str) -> &mut Self
+  fn description(&mut self, description: &str) -> &mut Self
+  fn deprecated(&mut self) -> &mut Self
+  fn get<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
+  fn post<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
+  fn put<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
+  fn patch<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
+  fn delete<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
 ```
 
 ## forge::http::cookie

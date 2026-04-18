@@ -147,7 +147,10 @@ pub use http::middleware::{
 pub use http::resource::ApiResource;
 pub use http::response::MessageResponse;
 pub use http::routes::RouteRegistry;
-pub use http::{HttpResourceRoutes, JsonValidated, Validated};
+pub use http::{
+    HttpRegistrar, HttpResourceRoutes, HttpRouteBuilder, HttpRouteOptions, HttpScope,
+    JsonValidated, Validated,
+};
 pub use i18n::{I18n, I18nManager, Locale};
 pub use imaging::{ImageFormat, ImageProcessor, Rotation};
 pub use jobs::{spawn_worker, JobHistoryStatus, JobMiddleware};

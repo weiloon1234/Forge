@@ -1,5 +1,63 @@
-error: unsupported field type; add #[forge(db_type = "...")]
+error[E0277]: the trait bound `CustomType: forge::ForgeAppEnum` is not satisfied
   --> tests/ui/derive/fail_unsupported_field_type.rs:12:13
    |
 12 |     custom: CustomType,
-   |             ^^^^^^^^^^
+   |             ^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `forge::ForgeAppEnum` is not implemented for `CustomType`
+  --> tests/ui/derive/fail_unsupported_field_type.rs:6:1
+   |
+ 6 | struct CustomType;
+   | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `forge::ForgeAppEnum`
+  --> src/jobs/mod.rs
+   |
+   | #[derive(Clone, Copy, Debug, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS)]
+   |                                             ^^^^^^^^^^^^^^^^^^^^^ `JobHistoryStatus`
+   |
+  ::: src/countries/mod.rs
+   |
+   |     Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS,
+   |                                           ^^^^^^^^^^^^^^^^^^^^^ `CountryStatus`
+   |
+  ::: src/settings/mod.rs
+   |
+   |     Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS,
+   |                                           ^^^^^^^^^^^^^^^^^^^^^ `SettingType`
+   = note: this error originates in the derive macro `forge_macros::AppEnum` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `CustomType: FromDbValue` is not satisfied
+  --> tests/ui/derive/fail_unsupported_field_type.rs:10:8
+   |
+ 8 |   #[derive(forge::Model)]
+   |            ------------ required by a bound introduced by this call
+ 9 |   #[forge(model = "users", primary_key_strategy = "manual")]
+10 |   struct User {
+   |  ________^
+11 | |     id: i64,
+12 | |     custom: CustomType,
+   | |__________^ unsatisfied trait bound
+   |
+help: the trait `FromDbValue` is not implemented for `CustomType`
+  --> tests/ui/derive/fail_unsupported_field_type.rs:6:1
+   |
+ 6 | struct CustomType;
+   | ^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `FromDbValue`:
+             CountryStatus
+             DbValue
+             JobHistoryStatus
+             LocalDateTime
+             ModelId<M>
+             Option<T>
+             SettingType
+             Vec<T>
+           and $N others
+note: required by a bound in `database::model::<impl DbRecord>::decode_column`
+  --> src/database/model.rs
+   |
+   |     pub fn decode_column<M, T>(&self, column: Column<M, T>) -> Result<T>
+   |            ------------- required by a bound in this associated function
+   |     where
+   |         T: FromDbValue,
+   |            ^^^^^^^^^^^ required by this bound in `database::model::<impl DbRecord>::decode_column`

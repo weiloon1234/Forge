@@ -60,6 +60,62 @@ r.route_with_options("/posts", post(create_post),
 
 See [Auth Guide](auth.md) for setting up `Guard` and `Permission` enums.
 
+### Scope DSL
+
+For portal-style route modules, prefer `scope()` so path prefixes, relative route names, shared tags, and shared access rules live in one place:
+
+```rust
+fn routes(r: &mut HttpRegistrar) -> Result<()> {
+    r.api_version(1, |r| {
+        r.scope("/admin", |admin| {
+            admin.name_prefix("admin");
+
+            admin.scope("/auth", |auth| {
+                auth.name_prefix("auth").tag("admin:auth");
+
+                auth.post("/login", "login", login, |route| {
+                    route.public();
+                    route.summary("Admin login");
+                    route.request::<AdminLoginRequest>();
+                    route.response::<TokenPair>(200);
+                });
+
+                auth.get("/me", "me", me, |route| {
+                    route.guard(Guard::Admin);
+                    route.summary("Get authenticated admin profile");
+                    route.response::<AdminMeResponse>(200);
+                });
+
+                Ok(())
+            })?;
+
+            admin.scope("/profile", |profile| {
+                profile
+                    .name_prefix("profile")
+                    .tag("admin:profile")
+                    .guard(Guard::Admin);
+
+                profile.put("", "update", update_profile, |route| {
+                    route.summary("Update admin profile");
+                    route.request::<UpdateAdminProfileRequest>();
+                    route.response::<AdminMeResponse>(200);
+                });
+
+                Ok(())
+            })?;
+
+            Ok(())
+        })?;
+
+        Ok(())
+    })?;
+
+    Ok(())
+}
+```
+
+This registers named routes such as `admin.auth.login`, `admin.auth.me`, and `admin.profile.update` automatically.
+
 ### Route Groups
 
 Prefix a set of routes without nesting into a separate router:
@@ -108,6 +164,8 @@ r.group_with_options(
 
 Per-route options inside the group are merged with the group defaults.
 
+Use `group()` and `group_with_options()` when you want the low-level API directly. Use `scope()` when you also want relative route names and the higher-level route builder.
+
 ### API Versioning
 
 Shorthand for `/api/v{N}` groups:
@@ -144,6 +202,27 @@ r.merge(health_router);  // /healthz
 ## Named Routes & URL Generation
 
 ### Registering Named Routes
+
+With `scope()`, route names are usually relative and compose automatically:
+
+```rust
+r.scope("/admin", |admin| {
+    admin.name_prefix("admin");
+
+    admin.scope("/users", |users| {
+        users.name_prefix("users");
+        users.get("", "index", list_users, |_| {});
+        users.get("/:id", "show", show_user, |_| {});
+        Ok(())
+    })?;
+
+    Ok(())
+})?;
+```
+
+The example above registers `admin.users.index` and `admin.users.show`.
+
+The lower-level named route APIs remain available when you want to register names manually:
 
 ```rust
 r.route_named("posts.list", "/posts", get(list_posts));

@@ -1159,7 +1159,11 @@ enum TimeoutMode {
 }
 
 fn normalize_type_name(type_name: &str) -> String {
-    type_name.trim_matches('"').to_ascii_lowercase()
+    let normalized = type_name.trim().replace('"', "").to_ascii_lowercase();
+    match normalized.strip_suffix("[]") {
+        Some(element_type) => format!("_{}", element_type.trim()),
+        None => normalized,
+    }
 }
 
 fn bind_query<'q>(
@@ -1321,7 +1325,7 @@ fn decode_column(
         "_bytea" => Some(DbType::ByteaArray),
         _ => adapters.get(&normalized).copied(),
     }
-    .ok_or_else(|| unsupported_type_error(name, type_name, sql, label))?;
+    .ok_or_else(|| unsupported_type_error(name, type_name, &normalized, sql, label))?;
 
     decode_column_as(row, name, mapped).map_err(|error| {
         Error::message(format!(
@@ -1597,9 +1601,15 @@ fn decode_column_as(row: &PgRow, name: &str, db_type: DbType) -> Result<DbValue>
     }
 }
 
-fn unsupported_type_error(name: &str, type_name: &str, sql: &str, label: Option<&str>) -> Error {
+fn unsupported_type_error(
+    name: &str,
+    type_name: &str,
+    normalized_type: &str,
+    sql: &str,
+    label: Option<&str>,
+) -> Error {
     Error::message(format!(
-        "unsupported postgres type `{type_name}` for column `{name}`{}; register a database type adapter or add first-class support",
+        "unsupported postgres type `{type_name}` (normalized lookup `{normalized_type}`) for column `{name}`{}; register a database type adapter or add first-class support",
         format_query_context(sql, label)
     ))
 }
@@ -1611,4 +1621,17 @@ fn format_query_context(sql: &str, label: Option<&str>) -> String {
     }
     suffix.push_str(&format!(" while running `{sql}`"));
     suffix
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_type_name;
+
+    #[test]
+    fn normalize_type_name_maps_array_aliases_to_internal_lookup_keys() {
+        assert_eq!(normalize_type_name("_text"), "_text");
+        assert_eq!(normalize_type_name("text[]"), "_text");
+        assert_eq!(normalize_type_name("TEXT[]"), "_text");
+        assert_eq!(normalize_type_name("\"TEXT\"[]"), "_text");
+    }
 }

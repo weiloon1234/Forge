@@ -2361,12 +2361,28 @@ async fn typed_runtime_supports_production_postgres_values_and_custom_adapters()
         vec![vec![9, 8, 7]]
     );
 
+    let text_alias_record = database
+        .raw_query(
+            "SELECT ARRAY['alpha', 'beta']::TEXT[] AS text_alias_values",
+            &[],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        text_alias_record
+            .decode::<Vec<String>>("text_alias_values")
+            .unwrap(),
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+
     let unsupported = database
         .raw_query("SELECT 'happy'::forge_test_mood AS mood", &[])
         .await
         .unwrap_err();
     let unsupported_message = format!("{unsupported:?}");
     assert!(unsupported_message.contains("unsupported postgres type `forge_test_mood`"));
+    assert!(unsupported_message.contains("normalized lookup `forge_test_mood`"));
     assert!(unsupported_message.contains("column `mood`"));
 
     database
@@ -2569,6 +2585,7 @@ async fn locking_streaming_timeout_and_debug_surfaces_work() {
     let unsupported_stream_error = unsupported_stream.try_next().await.unwrap_err();
     let unsupported_stream_message = format!("{unsupported_stream_error:?}");
     assert!(unsupported_stream_message.contains("unsupported postgres type `forge_stream_mood`"));
+    assert!(unsupported_stream_message.contains("normalized lookup `forge_stream_mood`"));
     assert!(unsupported_stream_message.contains("unsupported stream"));
     execute_batch(&database, &["DROP TYPE IF EXISTS forge_stream_mood"]).await;
 }

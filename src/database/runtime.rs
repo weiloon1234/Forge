@@ -1300,7 +1300,7 @@ fn decode_column(
         "float4" => Some(DbType::Float32),
         "float8" => Some(DbType::Float64),
         "numeric" => Some(DbType::Numeric),
-        "text" | "varchar" | "bpchar" | "name" => Some(DbType::Text),
+        "text" | "varchar" | "bpchar" | "char" | "name" => Some(DbType::Text),
         "json" | "jsonb" => Some(DbType::Json),
         "uuid" => Some(DbType::Uuid),
         "timestamptz" => Some(DbType::TimestampTz),
@@ -1315,7 +1315,7 @@ fn decode_column(
         "_float4" => Some(DbType::Float32Array),
         "_float8" => Some(DbType::Float64Array),
         "_numeric" => Some(DbType::NumericArray),
-        "_text" | "_varchar" | "_bpchar" | "_name" => Some(DbType::TextArray),
+        "_text" | "_varchar" | "_bpchar" | "_char" | "_name" => Some(DbType::TextArray),
         "_json" | "_jsonb" => Some(DbType::JsonArray),
         "_uuid" => Some(DbType::UuidArray),
         "_timestamptz" => Some(DbType::TimestampTzArray),
@@ -1633,5 +1633,8 @@ mod tests {
         assert_eq!(normalize_type_name("text[]"), "_text");
         assert_eq!(normalize_type_name("TEXT[]"), "_text");
         assert_eq!(normalize_type_name("\"TEXT\"[]"), "_text");
+        assert_eq!(normalize_type_name("char[]"), "_char");
+        assert_eq!(normalize_type_name("CHAR[]"), "_char");
+        assert_eq!(normalize_type_name("\"CHAR\"[]"), "_char");
     }
 }

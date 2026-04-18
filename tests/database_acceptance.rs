@@ -21,6 +21,7 @@ const PAYMENTS_TABLE: &str = "forge_test_payments";
 const POSTS_TABLE: &str = "forge_test_posts";
 const SAFE_USERS_TABLE: &str = "forge_test_safe_uuid_users";
 const PASSWORD_USERS_TABLE: &str = "forge_test_password_users";
+const COUNTRIES_RUNTIME_TABLE: &str = "forge_test_runtime_countries";
 
 fn database_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -2588,6 +2589,56 @@ async fn locking_streaming_timeout_and_debug_surfaces_work() {
     assert!(unsupported_stream_message.contains("normalized lookup `forge_stream_mood`"));
     assert!(unsupported_stream_message.contains("unsupported stream"));
     execute_batch(&database, &["DROP TYPE IF EXISTS forge_stream_mood"]).await;
+}
+
+#[tokio::test]
+async fn typed_runtime_hydrates_published_countries_char_columns_as_strings() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!("DROP TABLE IF EXISTS {COUNTRIES_RUNTIME_TABLE}"),
+            &format!(
+                "CREATE TABLE {COUNTRIES_RUNTIME_TABLE} (iso2 CHAR(2) PRIMARY KEY, iso3 CHAR(3) NOT NULL, name TEXT NOT NULL)"
+            ),
+            &format!(
+                "INSERT INTO {COUNTRIES_RUNTIME_TABLE} (iso2, iso3, name) VALUES ('MY', 'MYS', 'Malaysia')"
+            ),
+        ],
+    )
+    .await;
+
+    let record = database
+        .raw_query(
+            &format!(
+                "SELECT iso2, iso3, ARRAY[iso2, 'US'::CHAR(2)]::CHAR(2)[] AS iso2_values, ARRAY[iso3, 'USA'::CHAR(3)]::CHAR(3)[] AS iso3_values FROM {COUNTRIES_RUNTIME_TABLE} WHERE iso2 = 'MY'"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    assert_eq!(record.decode::<String>("iso2").unwrap(), "MY".to_string());
+    assert_eq!(record.decode::<String>("iso3").unwrap(), "MYS".to_string());
+    assert_eq!(
+        record.decode::<Vec<String>>("iso2_values").unwrap(),
+        vec!["MY".to_string(), "US".to_string()]
+    );
+    assert_eq!(
+        record.decode::<Vec<String>>("iso3_values").unwrap(),
+        vec!["MYS".to_string(), "USA".to_string()]
+    );
+
+    execute_batch(
+        &database,
+        &[&format!("DROP TABLE IF EXISTS {COUNTRIES_RUNTIME_TABLE}")],
+    )
+    .await;
 }
 
 #[tokio::test]

@@ -433,6 +433,13 @@ async fn login(
 
 This is the common path for JSON DTOs. `Validated<T>` remains the mixed extractor for DTOs that intentionally support both JSON and multipart.
 
+`JsonValidated<T>` now resolves extractor-level request errors through the validation/i18n pipeline too:
+
+- `validation.invalid_request_body`
+- `validation.multipart_not_supported`
+
+That lets apps translate invalid JSON and JSON-only multipart rejections without wrapping the extractor locally.
+
 ### Route with OpenAPI documentation
 
 ```rust

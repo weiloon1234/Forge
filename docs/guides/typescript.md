@@ -161,6 +161,8 @@ These types are auto-exported by the framework (no configuration needed):
 | `JobHistoryStatus` | `forge::jobs` | `"succeeded" \| "retried" \| "dead_lettered"` |
 | `SettingType` | `forge::settings` | `"text" \| "textarea" \| "number" \| ...` |
 
+Datatable exports now keep JSON-facing numeric fields as `number` and include the supporting filter option imports needed by generated metadata files.
+
 ---
 
 ## Generated Output

@@ -30,6 +30,12 @@ pub struct DatatableFilterOption {
     pub label: String,
 }
 
+#[derive(Serialize, Clone, Debug, Default, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
+struct DatatableFilterOptions {
+    pub items: Vec<DatatableFilterOption>,
+}
+
 impl DatatableFilterOption {
     pub fn new(value: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
@@ -54,7 +60,7 @@ pub struct DatatableFilterField {
     #[ts(optional)]
     pub help: Option<String>,
     pub nullable: bool,
-    #[ts(type = "{ items: DatatableFilterOption[] }")]
+    #[ts(as = "DatatableFilterOptions")]
     pub options: Collection<DatatableFilterOption>,
 }
 

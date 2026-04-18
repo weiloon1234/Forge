@@ -320,6 +320,8 @@ async fn refresh(
 }
 ```
 
+Refreshing now preserves the original token name and scoped abilities automatically. Invalid refresh tokens also return a standardized auth error code (`invalid_refresh_token`) instead of a raw framework string.
+
 `TokenResponse` also works well as a WebSocket payload for token-auth portals:
 
 ```rust

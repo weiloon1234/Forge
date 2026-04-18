@@ -159,6 +159,10 @@ pub(crate) fn fallback_message(field: &str, code: &str, params: &[(&str, &str)])
         ),
         "allowed_mimes" => format!("The {} file type is not allowed.", field),
         "allowed_extensions" => format!("The {} file extension is not allowed.", field),
+        "invalid_request_body" => "The request body is invalid.".to_string(),
+        "multipart_not_supported" => {
+            "Multipart form-data is not supported for this endpoint.".to_string()
+        }
         _ => format!("The {} is invalid.", field),
     }
 }

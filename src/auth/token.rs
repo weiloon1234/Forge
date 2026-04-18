@@ -7,11 +7,11 @@ use clap::{Arg, Command};
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::TokenConfig;
-use crate::database::{DatabaseManager, DbValue, FromDbValue};
+use crate::database::{DatabaseManager, DbRecord, DbValue, FromDbValue};
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::{sha256_hex_str, CommandId, GuardId, PermissionId, Token};
 
-use super::{Actor, Authenticatable, BearerAuthenticator};
+use super::{Actor, AuthError, AuthErrorCode, Authenticatable, BearerAuthenticator};
 
 const TOKEN_PRUNE_COMMAND: CommandId = CommandId::new("token:prune");
 
@@ -158,13 +158,9 @@ impl TokenManager {
         let mut actor = Actor::new(actor_id, GuardId::owned(guard));
 
         // Parse token-scoped abilities into Actor permissions.
-        if let Some(abilities_value) = row.get("abilities") {
-            if let Ok(abilities_json) = serde_json::Value::from_db_value(abilities_value) {
-                if let Ok(abilities) = serde_json::from_value::<Vec<String>>(abilities_json) {
-                    actor = actor
-                        .with_permissions(abilities.iter().map(|a| PermissionId::owned(a.clone())));
-                }
-            }
+        let abilities = token_abilities_from_row(row);
+        if !abilities.is_empty() {
+            actor = actor.with_permissions(abilities.into_iter().map(PermissionId::owned));
         }
 
         Ok(Some(actor))
@@ -201,7 +197,7 @@ impl TokenManager {
                     WHERE refresh_token_hash = $1
                       AND revoked_at IS NULL
                       AND refresh_expires_at > NOW()
-                    RETURNING guard, actor_id::text
+                    RETURNING guard, actor_id::text, name, abilities
                     "#,
                     &[DbValue::Text(hash)],
                 )
@@ -211,6 +207,8 @@ impl TokenManager {
                 .raw_query(
                     r#"
                     SELECT guard, actor_id::text
+                         , name
+                         , abilities
                     FROM personal_access_tokens
                     WHERE refresh_token_hash = $1
                       AND revoked_at IS NULL
@@ -221,20 +219,16 @@ impl TokenManager {
                 .await?
         };
 
-        let row = rows
-            .first()
-            .ok_or_else(|| Error::message("invalid or expired refresh token"))?;
+        let row = rows.first().ok_or_else(invalid_refresh_token_error)?;
+        let refresh_record = TokenRowMetadata::from_row(row)?;
 
-        let guard = String::from_db_value(
-            row.get("guard")
-                .ok_or_else(|| Error::message("missing guard column"))?,
-        )?;
-        let actor_id = String::from_db_value(
-            row.get("actor_id")
-                .ok_or_else(|| Error::message("missing actor_id column"))?,
-        )?;
-
-        self.insert_token_pair(&guard, &actor_id, "", &[]).await
+        self.insert_token_pair(
+            &refresh_record.guard,
+            &refresh_record.actor_id,
+            &refresh_record.name,
+            &refresh_record.abilities,
+        )
+        .await
     }
 
     /// Revoke a specific access token.
@@ -331,6 +325,44 @@ impl TokenManager {
             token_type: "Bearer".to_string(),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenRowMetadata {
+    guard: String,
+    actor_id: String,
+    name: String,
+    abilities: Vec<String>,
+}
+
+impl TokenRowMetadata {
+    fn from_row(row: &DbRecord) -> Result<Self> {
+        Ok(Self {
+            guard: String::from_db_value(
+                row.get("guard")
+                    .ok_or_else(|| Error::message("missing guard column"))?,
+            )?,
+            actor_id: String::from_db_value(
+                row.get("actor_id")
+                    .ok_or_else(|| Error::message("missing actor_id column"))?,
+            )?,
+            name: row.optional_text("name").unwrap_or_default(),
+            abilities: token_abilities_from_row(row),
+        })
+    }
+}
+
+fn token_abilities_from_row(row: &DbRecord) -> Vec<String> {
+    row.get("abilities")
+        .and_then(|abilities_value| serde_json::Value::from_db_value(abilities_value).ok())
+        .and_then(|abilities_json| serde_json::from_value::<Vec<String>>(abilities_json).ok())
+        .unwrap_or_default()
+}
+
+fn invalid_refresh_token_error() -> Error {
+    Error::from(AuthError::unauthorized_code(
+        AuthErrorCode::InvalidRefreshToken,
+    ))
 }
 
 /// A [`BearerAuthenticator`] that validates access tokens from the `personal_access_tokens` table.
@@ -445,4 +477,49 @@ pub trait HasToken: super::Authenticatable {
     /// The actor ID used for token operations. Override if your model's
     /// primary key field is not named `id` or needs special formatting.
     fn token_actor_id(&self) -> String;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{invalid_refresh_token_error, token_abilities_from_row, TokenRowMetadata};
+    use crate::database::{DbRecord, DbValue};
+
+    #[test]
+    fn token_row_metadata_preserves_name_and_abilities() {
+        let mut row = DbRecord::new();
+        row.insert("guard", DbValue::Text("api".to_string()));
+        row.insert("actor_id", DbValue::Text("user-1".to_string()));
+        row.insert("name", DbValue::Text("mobile-app".to_string()));
+        row.insert(
+            "abilities",
+            DbValue::Json(serde_json::json!(["reports:view", "ws:chat"])),
+        );
+
+        let metadata = TokenRowMetadata::from_row(&row).unwrap();
+
+        assert_eq!(metadata.guard, "api");
+        assert_eq!(metadata.actor_id, "user-1");
+        assert_eq!(metadata.name, "mobile-app");
+        assert_eq!(metadata.abilities, vec!["reports:view", "ws:chat"]);
+    }
+
+    #[test]
+    fn token_abilities_defaults_to_empty_when_missing_or_invalid() {
+        let empty_row = DbRecord::new();
+        assert!(token_abilities_from_row(&empty_row).is_empty());
+
+        let mut invalid_row = DbRecord::new();
+        invalid_row.insert(
+            "abilities",
+            DbValue::Json(serde_json::json!({"unexpected": true})),
+        );
+        assert!(token_abilities_from_row(&invalid_row).is_empty());
+    }
+
+    #[test]
+    fn invalid_refresh_token_error_uses_standardized_auth_code() {
+        let payload = invalid_refresh_token_error().payload();
+        assert_eq!(payload["status"], 401);
+        assert_eq!(payload["error_code"], "invalid_refresh_token");
+    }
 }

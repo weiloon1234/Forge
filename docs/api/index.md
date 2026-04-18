@@ -38,7 +38,7 @@ Load only the file you need — don't read them all at once.
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 35L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
 | [typescript](modules/typescript.md) |  | 13L |
-| [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 147L |
+| [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 56L |
 
-**Total: 33 modules, 2891 lines across all files.**
+**Total: 33 modules, 2893 lines across all files.**

@@ -131,6 +131,8 @@ trait RequestValidator
   fn validate<'life0, 'life1, 'async_trait>(
   fn messages(&self) -> Vec<(String, String, String)>
   fn attributes(&self) -> Vec<(String, String)>
+  fn request_messages() -> Vec<(String, String, String)>
+  fn request_attributes() -> Vec<(String, String)>
 trait ValidationRule
   fn validate<'life0, 'life1, 'life2, 'async_trait>(
 ```

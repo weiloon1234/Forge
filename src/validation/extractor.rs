@@ -1,6 +1,7 @@
 use std::ops::{Deref, DerefMut};
 
 use async_trait::async_trait;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRef, FromRequest, Request};
 use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
@@ -26,6 +27,28 @@ pub trait RequestValidator: Send + Sync {
     ///
     /// Key: `field_name` -> display name (used as `{{attribute}}` in messages).
     fn attributes(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Custom extractor-level request messages for parse/content-type failures.
+    ///
+    /// These messages are resolved before the DTO exists, so they are static
+    /// and keyed the same way as validation messages: `(field, code, message)`.
+    ///
+    /// The framework uses the synthetic `request` field with codes such as
+    /// `invalid_request_body` and `multipart_not_supported`.
+    fn request_messages() -> Vec<(String, String, String)>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
+
+    /// Custom display names for extractor-level request messages.
+    fn request_attributes() -> Vec<(String, String)>
+    where
+        Self: Sized,
+    {
         Vec::new()
     }
 }
@@ -89,7 +112,12 @@ where
                 let mut multipart = axum::extract::Multipart::from_request(req, state)
                     .await
                     .map_err(|rejection| {
-                        (StatusCode::BAD_REQUEST, rejection.body_text()).into_response()
+                        request_error_response::<T>(
+                            &app,
+                            locale.as_deref(),
+                            rejection.status(),
+                            "invalid_request_body",
+                        )
                     })?;
 
                 T::from_multipart(&mut multipart)
@@ -97,7 +125,7 @@ where
                     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?
             } else {
                 let Json(v) = Json::<T>::from_request(req, state).await.map_err(|error| {
-                    (StatusCode::BAD_REQUEST, error.body_text()).into_response()
+                    json_rejection_response::<T>(&app, locale.as_deref(), error)
                 })?;
                 v
             };
@@ -120,16 +148,74 @@ where
         state: &S,
     ) -> impl std::future::Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
         let app = AppContext::from_ref(state);
+        let content_type = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let locale = resolve_request_locale(&app, req.headers(), req.extensions());
 
         async move {
+            if content_type.starts_with("multipart/form-data") {
+                return Err(request_error_response::<T>(
+                    &app,
+                    locale.as_deref(),
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "multipart_not_supported",
+                ));
+            }
+
             let Json(value) = Json::<T>::from_request(req, state)
                 .await
-                .map_err(|error| (error.status(), error.body_text()).into_response())?;
+                .map_err(|error| json_rejection_response::<T>(&app, locale.as_deref(), error))?;
 
             validate_value(value, app, locale).await.map(Self)
         }
     }
+}
+
+fn json_rejection_response<T>(
+    app: &AppContext,
+    locale: Option<&str>,
+    rejection: JsonRejection,
+) -> Response
+where
+    T: RequestValidator,
+{
+    request_error_response::<T>(app, locale, rejection.status(), "invalid_request_body")
+}
+
+fn request_error_response<T>(
+    app: &AppContext,
+    locale: Option<&str>,
+    status: StatusCode,
+    code: &'static str,
+) -> Response
+where
+    T: RequestValidator,
+{
+    let message = resolve_request_message::<T>(app, locale, code);
+    Error::http_with_code(status.as_u16(), message, code).into_response()
+}
+
+fn resolve_request_message<T>(app: &AppContext, locale: Option<&str>, code: &str) -> String
+where
+    T: RequestValidator,
+{
+    let mut validator = Validator::new(app.clone());
+    if let Some(locale) = locale {
+        validator.set_locale(locale.to_string());
+    }
+
+    for (field, message_code, message) in T::request_messages() {
+        validator.custom_message(field, message_code, message);
+    }
+    for (field, name) in T::request_attributes() {
+        validator.custom_attribute(field, name);
+    }
+
+    validator.resolve_message("request", code, &[], None)
 }
 
 async fn validate_value<T>(

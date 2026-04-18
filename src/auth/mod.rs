@@ -196,6 +196,7 @@ impl Actor {
 #[serde(rename_all = "snake_case")]
 pub enum AuthErrorCode {
     InvalidBearerToken,
+    InvalidRefreshToken,
     MissingSessionCookie,
     InvalidSession,
     MissingAuthorizationHeader,
@@ -213,6 +214,7 @@ impl AuthErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidBearerToken => "invalid_bearer_token",
+            Self::InvalidRefreshToken => "invalid_refresh_token",
             Self::MissingSessionCookie => "missing_session_cookie",
             Self::InvalidSession => "invalid_session",
             Self::MissingAuthorizationHeader => "missing_authorization_header",
@@ -230,6 +232,7 @@ impl AuthErrorCode {
     pub const fn translation_key(self) -> &'static str {
         match self {
             Self::InvalidBearerToken => "auth.invalid_bearer_token",
+            Self::InvalidRefreshToken => "auth.invalid_refresh_token",
             Self::MissingSessionCookie => "auth.missing_session_cookie",
             Self::InvalidSession => "auth.invalid_session",
             Self::MissingAuthorizationHeader => "auth.missing_authorization_header",

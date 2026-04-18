@@ -132,6 +132,8 @@ pub fn builtin_cli_registrar() -> CommandRegistrar {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
 
     use super::export_all;
@@ -142,6 +144,7 @@ mod tests {
         export_all(dir.path()).unwrap();
 
         for file in [
+            "DatatableFilterField.ts",
             "DatatableJsonResponse.ts",
             "DatatableRequest.ts",
             "MessageResponse.ts",
@@ -154,5 +157,67 @@ mod tests {
                 "expected generated TypeScript file: {file}"
             );
         }
+
+        let datatable_filter_field =
+            fs::read_to_string(dir.path().join("DatatableFilterField.ts")).unwrap();
+        assert!(
+            datatable_filter_field.contains("import type { DatatableFilterOptions } from \"./DatatableFilterOptions\";"),
+            "expected DatatableFilterField.ts to import DatatableFilterOptions:\n{datatable_filter_field}"
+        );
+
+        let datatable_filter_options =
+            fs::read_to_string(dir.path().join("DatatableFilterOptions.ts")).unwrap();
+        assert!(
+            datatable_filter_options
+                .contains("import type { DatatableFilterOption } from \"./DatatableFilterOption\";"),
+            "expected DatatableFilterOptions.ts to import DatatableFilterOption:\n{datatable_filter_options}"
+        );
+
+        let datatable_request = fs::read_to_string(dir.path().join("DatatableRequest.ts")).unwrap();
+        assert!(
+            datatable_request.contains("page: number"),
+            "expected DatatableRequest.ts page field to use number:\n{datatable_request}"
+        );
+        assert!(
+            datatable_request.contains("per_page: number"),
+            "expected DatatableRequest.ts per_page field to use number:\n{datatable_request}"
+        );
+        assert!(
+            !datatable_request.contains("bigint"),
+            "did not expect bigint in DatatableRequest.ts:\n{datatable_request}"
+        );
+
+        let datatable_filter_value =
+            fs::read_to_string(dir.path().join("DatatableFilterValue.ts")).unwrap();
+        assert!(
+            datatable_filter_value.contains("{ \"number\": number }"),
+            "expected DatatableFilterValue::Number to use number:\n{datatable_filter_value}"
+        );
+        assert!(
+            !datatable_filter_value.contains("bigint"),
+            "did not expect bigint in DatatableFilterValue.ts:\n{datatable_filter_value}"
+        );
+
+        let datatable_json_response =
+            fs::read_to_string(dir.path().join("DatatableJsonResponse.ts")).unwrap();
+        assert!(
+            datatable_json_response.contains("DatatablePaginationMeta"),
+            "expected DatatableJsonResponse.ts to reference pagination metadata:\n{datatable_json_response}"
+        );
+
+        let datatable_pagination_meta =
+            fs::read_to_string(dir.path().join("DatatablePaginationMeta.ts")).unwrap();
+        assert!(
+            datatable_pagination_meta.contains("page: number"),
+            "expected DatatablePaginationMeta.ts page field to use number:\n{datatable_pagination_meta}"
+        );
+        assert!(
+            datatable_pagination_meta.contains("total_pages: number"),
+            "expected DatatablePaginationMeta.ts total_pages field to use number:\n{datatable_pagination_meta}"
+        );
+        assert!(
+            !datatable_pagination_meta.contains("bigint"),
+            "did not expect bigint in DatatablePaginationMeta.ts:\n{datatable_pagination_meta}"
+        );
     }
 }

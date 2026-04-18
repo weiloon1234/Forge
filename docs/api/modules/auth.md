@@ -25,7 +25,7 @@ enum AuthError { Unauthorized, Forbidden, Internal }
   fn code(&self) -> Option<AuthErrorCode>
   fn message(&self) -> &str
   fn payload(&self) -> Value
-enum AuthErrorCode { InvalidBearerToken, MissingSessionCookie, InvalidSession, MissingAuthorizationHeader, InvalidAuthorizationHeader, InvalidAuthorizationScheme, MissingBearerToken, MissingAuthCredentials, MissingRequiredPermission, AuthenticatedActorNotFound, AuthenticatedModelNotFound, MaxConnectionsPerUserExceeded }
+enum AuthErrorCode { Show 13 variants    InvalidBearerToken, InvalidRefreshToken, MissingSessionCookie, InvalidSession, MissingAuthorizationHeader, InvalidAuthorizationHeader, InvalidAuthorizationScheme, MissingBearerToken, MissingAuthCredentials, MissingRequiredPermission, AuthenticatedActorNotFound, AuthenticatedModelNotFound, MaxConnectionsPerUserExceeded }
   const fn as_str(self) -> &'static str
   const fn translation_key(self) -> &'static str
   const fn default_message(self) -> &'static str

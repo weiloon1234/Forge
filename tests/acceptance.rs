@@ -227,6 +227,51 @@ fn write_config(dir: &Path, port: u16) {
     .unwrap();
 }
 
+fn write_i18n_config(dir: &Path) {
+    let locales_dir = dir.join("locales");
+    let en_dir = locales_dir.join("en");
+    let ms_dir = locales_dir.join("ms");
+
+    fs::create_dir_all(&en_dir).unwrap();
+    fs::create_dir_all(&ms_dir).unwrap();
+
+    fs::write(
+        en_dir.join("validation.json"),
+        r#"{
+            "validation": {
+                "invalid_request_body": "The request body is invalid.",
+                "multipart_not_supported": "Multipart form-data is not supported for this endpoint."
+            }
+        }"#,
+    )
+    .unwrap();
+
+    fs::write(
+        ms_dir.join("validation.json"),
+        r#"{
+            "validation": {
+                "invalid_request_body": "Badan permintaan tidak sah.",
+                "multipart_not_supported": "Multipart form-data tidak disokong untuk endpoint ini."
+            }
+        }"#,
+    )
+    .unwrap();
+
+    fs::write(
+        dir.join("10-i18n.toml"),
+        format!(
+            r#"
+            [i18n]
+            default_locale = "en"
+            fallback_locale = "en"
+            resource_path = "{}"
+        "#,
+            locales_dir.display()
+        ),
+    )
+    .unwrap();
+}
+
 fn build_app(config_dir: &Path, events: Arc<Mutex<Vec<String>>>) -> AppBuilder {
     App::builder()
         .load_config_dir(config_dir)
@@ -337,6 +382,70 @@ async fn run_http_async_supports_json_only_validated_requests() {
         multipart.status(),
         reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn run_http_async_translates_json_only_request_rejections() {
+    let config_dir = tempdir().unwrap();
+    let port = free_port();
+    write_config(config_dir.path(), port);
+    write_i18n_config(config_dir.path());
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let task = tokio::spawn({
+        let builder = build_app(config_dir.path(), events);
+        async move { builder.run_http_async().await.unwrap() }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}");
+
+    for _ in 0..30 {
+        if client.get(format!("{url}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let invalid_json = client
+        .post(format!("{url}/json-users"))
+        .header("Accept-Language", "ms")
+        .header("Content-Type", "application/json")
+        .body("{")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_json.status(), reqwest::StatusCode::BAD_REQUEST);
+    let invalid_json_payload: serde_json::Value = invalid_json.json().await.unwrap();
+    assert_eq!(
+        invalid_json_payload["message"],
+        "Badan permintaan tidak sah."
+    );
+    assert_eq!(invalid_json_payload["error_code"], "invalid_request_body");
+
+    let multipart = client
+        .post(format!("{url}/json-users"))
+        .header("Accept-Language", "ms")
+        .multipart(
+            reqwest::multipart::Form::new()
+                .text("email", "json@example.com")
+                .text("password", "supersecret"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        multipart.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    let multipart_payload: serde_json::Value = multipart.json().await.unwrap();
+    assert_eq!(
+        multipart_payload["message"],
+        "Multipart form-data tidak disokong untuk endpoint ini."
+    );
+    assert_eq!(multipart_payload["error_code"], "multipart_not_supported");
 
     task.abort();
 }

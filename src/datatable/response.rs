@@ -42,9 +42,13 @@ pub struct DatatableColumnMeta {
 #[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
 #[ts(export)]
 pub struct DatatablePaginationMeta {
+    #[ts(type = "number")]
     pub page: u64,
+    #[ts(type = "number")]
     pub per_page: u64,
+    #[ts(type = "number")]
     pub total: u64,
+    #[ts(type = "number")]
     pub total_pages: u64,
 }
 

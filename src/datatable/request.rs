@@ -38,7 +38,7 @@ pub enum DatatableFilterOp {
 pub enum DatatableFilterValue {
     Text(String),
     Bool(bool),
-    Number(i64),
+    Number(#[ts(type = "number")] i64),
     Values(Vec<String>),
 }
 
@@ -78,8 +78,10 @@ const fn default_per_page() -> u64 {
 #[ts(export)]
 pub struct DatatableRequest {
     #[serde(default = "default_page")]
+    #[ts(type = "number")]
     pub page: u64,
     #[serde(default = "default_per_page")]
+    #[ts(type = "number")]
     pub per_page: u64,
     #[serde(default)]
     pub sort: Vec<DatatableSortInput>,

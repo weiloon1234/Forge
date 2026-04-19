@@ -7,8 +7,13 @@ HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources
 ## forge::http
 
 ```rust
+pub type HttpAuthorizeCallback = Arc<dyn Fn(HttpAuthorizeContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 pub type HttpRouter = Router<AppContext>;
 pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
+struct HttpAuthorizeContext
+  fn app(&self) -> &AppContext
+  fn actor(&self) -> &Actor
+  async fn resolve_actor<M: Authenticatable>(&self) -> Result<Option<M>>
 struct HttpRegistrar
   fn new() -> Self
   fn route( &mut self, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
@@ -38,6 +43,7 @@ struct HttpRouteBuilder
   fn guard<I>(&mut self, guard: I) -> &mut Self
   fn permission<I>(&mut self, permission: I) -> &mut Self
   fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+  fn authorize<F, Fut>(&mut self, f: F) -> &mut Self
   fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
   fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
   fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
@@ -52,6 +58,7 @@ struct HttpRouteOptions
   fn guard<I>(self, guard: I) -> Self
   fn permission<I>(self, permission: I) -> Self
   fn permissions<I, P>(self, permissions: I) -> Self
+  fn authorize<F, Fut>(self, f: F) -> Self
   fn middleware(self, config: MiddlewareConfig) -> Self
   fn middleware_group(self, name: impl Into<String>) -> Self
   fn rate_limit(self, rate_limit: RateLimit) -> Self
@@ -69,6 +76,7 @@ struct HttpScope
   fn guard<I>(&mut self, guard: I) -> &mut Self
   fn permission<I>(&mut self, permission: I) -> &mut Self
   fn permissions<I, P>(&mut self, permissions: I) -> &mut Self
+  fn authorize<F, Fut>(&mut self, f: F) -> &mut Self
   fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
   fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
   fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self

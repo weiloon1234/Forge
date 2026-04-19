@@ -6,6 +6,8 @@ pub mod routes;
 pub(crate) mod spa;
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -15,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
 use axum::Router;
 
-use crate::auth::{AccessScope, AuthError};
+use crate::auth::{AccessScope, Actor, AuthError, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
 use crate::logging::AuthOutcome;
@@ -24,12 +26,40 @@ pub use crate::validation::{JsonValidated, Validated};
 
 pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
 pub type HttpRouter = Router<AppContext>;
+pub type HttpAuthorizeCallback = Arc<
+    dyn Fn(HttpAuthorizeContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
+>;
+
+#[derive(Clone)]
+pub struct HttpAuthorizeContext {
+    app: AppContext,
+    actor: Actor,
+}
+
+impl HttpAuthorizeContext {
+    fn new(app: AppContext, actor: Actor) -> Self {
+        Self { app, actor }
+    }
+
+    pub fn app(&self) -> &AppContext {
+        &self.app
+    }
+
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    pub async fn resolve_actor<M: Authenticatable>(&self) -> Result<Option<M>> {
+        self.actor.resolve::<M>(&self.app).await
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct HttpRouteOptions {
     pub access: AccessScope,
     middlewares: Vec<MiddlewareConfig>,
     middleware_group_name: Option<String>,
+    pub(crate) authorize: Option<HttpAuthorizeCallback>,
     pub(crate) post_auth_rate_limit: Option<middleware::RateLimit>,
     pub(crate) doc: Option<crate::openapi::RouteDoc>,
 }
@@ -61,6 +91,20 @@ impl HttpRouteOptions {
         P: Into<PermissionId>,
     {
         self.access = self.access.with_permissions(permissions);
+        self
+    }
+
+    /// Add a dynamic authorization callback for this route.
+    ///
+    /// Called after guard and permission checks succeed. Return `Ok(())` to
+    /// allow the request or `Err(...)` to reject with a project-defined
+    /// response such as 401, 403, or 404.
+    pub fn authorize<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.authorize = Some(wrap_http_authorize_callback(f));
         self
     }
 
@@ -145,7 +189,7 @@ impl HttpRouteOptions {
     }
 
     fn requires_auth(&self) -> bool {
-        self.access.requires_auth()
+        self.access.requires_auth() || self.authorize.is_some()
     }
 
     fn guard_id(&self) -> Option<&GuardId> {
@@ -165,6 +209,9 @@ impl HttpRouteOptions {
 
         if self.middleware_group_name.is_none() {
             self.middleware_group_name = defaults.middleware_group_name.clone();
+        }
+        if self.authorize.is_none() {
+            self.authorize = defaults.authorize.clone();
         }
         if self.post_auth_rate_limit.is_none() {
             self.post_auth_rate_limit = defaults.post_auth_rate_limit.clone();
@@ -327,6 +374,7 @@ impl<'a> HttpScope<'a> {
 
     pub fn public(&mut self) -> &mut Self {
         self.state.options.access = AccessScope::Public;
+        self.state.options.authorize = None;
         self
     }
 
@@ -362,6 +410,15 @@ impl<'a> HttpScope<'a> {
             .access
             .clone()
             .with_permissions(permissions);
+        self
+    }
+
+    pub fn authorize<F, Fut>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.state.options.authorize = Some(wrap_http_authorize_callback(f));
         self
     }
 
@@ -529,6 +586,7 @@ impl HttpRouteBuilder {
 
     pub fn public(&mut self) -> &mut Self {
         self.options.access = AccessScope::Public;
+        self.options.authorize = None;
         self
     }
 
@@ -554,6 +612,15 @@ impl HttpRouteBuilder {
         P: Into<PermissionId>,
     {
         self.options.access = self.options.access.clone().with_permissions(permissions);
+        self
+    }
+
+    pub fn authorize<F, Fut>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.options.authorize = Some(wrap_http_authorize_callback(f));
         self
     }
 
@@ -631,6 +698,14 @@ fn apply_rate_limit(options: &mut HttpRouteOptions, rate_limit: middleware::Rate
             options.post_auth_rate_limit = Some(rate_limit);
         }
     }
+}
+
+fn wrap_http_authorize_callback<F, Fut>(f: F) -> HttpAuthorizeCallback
+where
+    F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    Arc::new(move |ctx| Box::pin(f(ctx)))
 }
 
 fn join_path_prefix(base: &str, path: &str) -> String {
@@ -1069,6 +1144,14 @@ async fn http_auth_middleware(
         return error.into_response();
     }
 
+    if let Some(ref authorize) = state.options.authorize {
+        let ctx = HttpAuthorizeContext::new(state.app.clone(), actor.clone());
+        if let Err(error) = authorize(ctx).await {
+            record_auth_outcome(&state.app, auth_outcome_from_route_error(&error));
+            return error.into_response();
+        }
+    }
+
     // Post-auth rate limiting (for by_actor / by_actor_or_ip)
     if let Some(ref rl_state) = state.post_auth_rl {
         let key_id = format!("actor:{}", actor.id);
@@ -1092,6 +1175,18 @@ fn auth_outcome_from_error(error: &AuthError) -> AuthOutcome {
         AuthError::Unauthorized(_) => AuthOutcome::Unauthorized,
         AuthError::Forbidden(_) => AuthOutcome::Forbidden,
         AuthError::Internal(_) => AuthOutcome::Error,
+    }
+}
+
+fn auth_outcome_from_route_error(error: &Error) -> AuthOutcome {
+    match error {
+        Error::Http { status, .. } => match *status {
+            401 => AuthOutcome::Unauthorized,
+            403 | 404 => AuthOutcome::Forbidden,
+            _ => AuthOutcome::Error,
+        },
+        Error::NotFound(_) => AuthOutcome::Forbidden,
+        Error::Message(_) | Error::Other(_) | Error::Validation(_) => AuthOutcome::Error,
     }
 }
 
@@ -1412,7 +1507,8 @@ mod tests {
                 admin
                     .name_prefix("admin")
                     .guard(GuardId::new("admin"))
-                    .permission(PermissionId::new("admin.access"));
+                    .permission(PermissionId::new("admin.access"))
+                    .authorize(|_ctx| async { Ok(()) });
 
                 admin.get("/login", "login", ok, |route| {
                     route.public();
@@ -1424,6 +1520,7 @@ mod tests {
         let route = route_by_path(&registrar, "/admin/login");
         assert_eq!(route.options.guard_id(), None);
         assert!(route.options.permissions_set().is_empty());
+        assert!(route.options.authorize.is_none());
         assert!(!route.options.requires_auth());
     }
 
@@ -1451,6 +1548,46 @@ mod tests {
         assert_eq!(route.options.guard_id(), None);
         assert!(route.options.permissions_set().is_empty());
         assert!(!route.options.requires_auth());
+    }
+
+    #[test]
+    fn scope_authorize_is_inherited_by_routes() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin
+                    .name_prefix("admin")
+                    .guard(GuardId::new("admin"))
+                    .authorize(|_ctx| async { Ok(()) });
+
+                admin.get("/dashboard", "dashboard", ok, |_| {});
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/dashboard");
+        assert_eq!(route.options.guard_id(), Some(&GuardId::new("admin")));
+        assert!(route.options.authorize.is_some());
+        assert!(route.options.requires_auth());
+    }
+
+    #[test]
+    fn route_builder_authorize_marks_route_as_authenticated() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/reports", |reports| {
+                reports.name_prefix("reports");
+                reports.get("/audit", "audit", ok, |route| {
+                    route.authorize(|_ctx| async { Ok(()) });
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/reports/audit");
+        assert_eq!(route.options.guard_id(), None);
+        assert!(route.options.authorize.is_some());
+        assert!(route.options.requires_auth());
     }
 
     #[test]

@@ -54,8 +54,8 @@ pub use crate::http::resource::ApiResource;
 pub use crate::http::response::MessageResponse;
 pub use crate::http::routes::RouteRegistry;
 pub use crate::http::{
-    HttpRegistrar, HttpResourceRoutes, HttpRouteBuilder, HttpRouteOptions, HttpScope,
-    JsonValidated, Validated,
+    HttpAuthorizeContext, HttpRegistrar, HttpResourceRoutes, HttpRouteBuilder, HttpRouteOptions,
+    HttpScope, JsonValidated, Validated,
 };
 pub use crate::i18n::{I18n, I18nManager, Locale};
 pub use crate::imaging::{ImageFormat, ImageProcessor, Rotation};

@@ -29,6 +29,7 @@ struct ObservabilityOptions
   fn guard<I>(self, guard: I) -> Self
   fn permission<I>(self, permission: I) -> Self
   fn permissions<I, P>(self, permissions: I) -> Self
+  fn authorize<F, Fut>(self, f: F) -> Self
   fn access(&self) -> &AccessScope
 struct ProbeResult
   fn healthy<I>(id: I) -> Self

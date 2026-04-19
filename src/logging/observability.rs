@@ -11,20 +11,62 @@ use crate::auth::AccessScope;
 use crate::config::ObservabilityConfig;
 use crate::database::DbValue;
 use crate::foundation::{AppContext, Error, Result};
-use crate::http::{HttpRegistrar, HttpRouteOptions};
+use crate::http::{HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions};
 use crate::openapi::spec::{generate_openapi_spec, DocumentedRoute};
 use crate::support::{GuardId, PermissionId};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ObservabilityOptions {
     access: AccessScope,
+    authorize: Option<crate::http::HttpAuthorizeCallback>,
 }
+
+impl Clone for ObservabilityOptions {
+    fn clone(&self) -> Self {
+        Self {
+            access: self.access.clone(),
+            authorize: self.authorize.clone(),
+        }
+    }
+}
+
+impl Default for ObservabilityOptions {
+    fn default() -> Self {
+        Self {
+            access: AccessScope::default(),
+            authorize: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for ObservabilityOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObservabilityOptions")
+            .field("access", &self.access)
+            .field("has_authorize", &self.authorize.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for ObservabilityOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.access == other.access
+            && match (&self.authorize, &other.authorize) {
+                (None, None) => true,
+                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for ObservabilityOptions {}
 
 impl ObservabilityOptions {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
+impl ObservabilityOptions {
     pub fn guard<I>(mut self, guard: I) -> Self
     where
         I: Into<GuardId>,
@@ -50,6 +92,19 @@ impl ObservabilityOptions {
         self
     }
 
+    /// Add a dynamic authorization callback for all observability routes.
+    ///
+    /// Called after guard and permission checks succeed. Return `Ok(())` to
+    /// allow access or `Err(...)` to reject with a project-defined response.
+    pub fn authorize<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        self.authorize = Some(std::sync::Arc::new(move |ctx| Box::pin(f(ctx))));
+        self
+    }
+
     pub fn access(&self) -> &AccessScope {
         &self.access
     }
@@ -57,6 +112,7 @@ impl ObservabilityOptions {
     pub(crate) fn http_route_options(&self) -> HttpRouteOptions {
         let mut opts = HttpRouteOptions::new();
         opts.access = self.access.clone();
+        opts.authorize = self.authorize.clone();
         opts
     }
 }

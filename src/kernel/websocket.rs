@@ -21,19 +21,17 @@ use crate::support::runtime::RuntimeBackend;
 use crate::support::{ChannelEventId, ChannelId, GuardId};
 use crate::websocket::{
     presence_key, presence_member_value, ClientAction, ClientMessage, RegisteredChannel,
-    ServerMessage, WebSocketContext, WebSocketRegistrar, WebSocketRouteRegistrar, ACK_EVENT,
-    ERROR_EVENT, PRESENCE_JOIN_EVENT, PRESENCE_LEAVE_EVENT, SUBSCRIBED_EVENT, SYSTEM_CHANNEL,
-    UNSUBSCRIBED_EVENT,
+    ServerMessage, WebSocketContext, ACK_EVENT, ERROR_EVENT, PRESENCE_JOIN_EVENT,
+    PRESENCE_LEAVE_EVENT, SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT,
 };
 
 pub struct WebSocketKernel {
     app: AppContext,
-    routes: Vec<WebSocketRouteRegistrar>,
 }
 
 impl WebSocketKernel {
-    pub fn new(app: AppContext, routes: Vec<WebSocketRouteRegistrar>) -> Self {
-        Self { app, routes }
+    pub fn new(app: AppContext) -> Self {
+        Self { app }
     }
 
     pub fn app(&self) -> &AppContext {
@@ -60,12 +58,11 @@ impl WebSocketKernel {
 
     async fn build_router(&self) -> Result<axum::Router> {
         let ws_config = self.app.config().websocket()?;
-        let mut registrar = WebSocketRegistrar::new();
-        for route in &self.routes {
-            route(&mut registrar)?;
-        }
-
-        let registered_channels = registrar.into_channels();
+        let registry = self
+            .app
+            .container()
+            .resolve::<crate::websocket::WebSocketChannelRegistry>()?;
+        let registered_channels: Vec<RegisteredChannel> = registry.registered_channels().to_vec();
         let backend = RuntimeBackend::from_config(self.app.config())?;
         let state =
             WebSocketServerState::new(self.app.clone(), registered_channels, backend, ws_config);
@@ -473,10 +470,6 @@ async fn process_client_message(
     connection_id: u64,
     payload: String,
 ) -> Result<()> {
-    if let Ok(diagnostics) = state.app.diagnostics() {
-        diagnostics.record_websocket_inbound_message();
-    }
-
     // Per-connection rate limiting.
     if !state
         .hub
@@ -500,6 +493,9 @@ async fn process_client_message(
     }
 
     let message: ClientMessage = serde_json::from_str(&payload).map_err(Error::other)?;
+    if let Ok(diagnostics) = state.app.diagnostics() {
+        diagnostics.record_websocket_inbound_message_on(&message.channel);
+    }
     let Some(channel) = state.channels.get(&message.channel) else {
         return Err(Error::message(format!(
             "websocket channel `{}` is not registered",
@@ -881,8 +877,8 @@ impl ConnectionHub {
         let state = self.connections.write().await.remove(&connection_id);
         if let Some(state) = state {
             if let Some(diagnostics) = &self.diagnostics {
-                for _ in 0..state.subscriptions.len() {
-                    diagnostics.record_websocket_subscription_closed();
+                for key in &state.subscriptions {
+                    diagnostics.record_websocket_subscription_closed_on(&key.channel);
                 }
                 diagnostics.record_websocket_connection(WebSocketConnectionState::Closed);
             }
@@ -934,7 +930,7 @@ impl ConnectionHub {
             });
             if created {
                 if let Some(diagnostics) = &self.diagnostics {
-                    diagnostics.record_websocket_subscription_opened();
+                    diagnostics.record_websocket_subscription_opened_on(channel);
                 }
             }
             return created;
@@ -956,7 +952,7 @@ impl ConnectionHub {
             });
             if removed {
                 if let Some(diagnostics) = &self.diagnostics {
-                    diagnostics.record_websocket_subscription_closed();
+                    diagnostics.record_websocket_subscription_closed_on(channel);
                 }
             }
             return removed;
@@ -966,6 +962,11 @@ impl ConnectionHub {
     }
 
     async fn send(&self, connection_id: u64, command: WriterCommand) -> Result<()> {
+        let channel = if let WriterCommand::Json(ref msg) = command {
+            Some(msg.channel.clone())
+        } else {
+            None
+        };
         let sender = self
             .connections
             .read()
@@ -977,7 +978,11 @@ impl ConnectionHub {
             .send(command)
             .map_err(|_| Error::message("websocket connection closed"))?;
         if let Some(diagnostics) = &self.diagnostics {
-            diagnostics.record_websocket_outbound_message();
+            if let Some(ref ch) = channel {
+                diagnostics.record_websocket_outbound_message_on(ch);
+            } else {
+                unreachable!("WriterCommand::Ping and WriterCommand::Close are not routed through ConnectionHub::send")
+            }
         }
         Ok(())
     }
@@ -1148,8 +1153,8 @@ impl ConnectionHub {
         for id in &to_remove {
             if let Some(state) = connections.remove(id) {
                 if let Some(diagnostics) = &self.diagnostics {
-                    for _ in 0..state.subscriptions.len() {
-                        diagnostics.record_websocket_subscription_closed();
+                    for key in &state.subscriptions {
+                        diagnostics.record_websocket_subscription_closed_on(&key.channel);
                     }
                     diagnostics.record_websocket_connection(WebSocketConnectionState::Closed);
                 }

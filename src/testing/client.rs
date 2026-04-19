@@ -44,6 +44,23 @@ impl TestApp {
             router: self.router.clone(),
         }
     }
+
+    /// Seed a presence member into the Redis-backed presence set for testing.
+    ///
+    /// Only available in tests — reaches into the framework's internal presence
+    /// storage to simulate a connected user without needing a real WebSocket
+    /// handshake.
+    pub async fn seed_presence(
+        &self,
+        channel: &crate::support::ChannelId,
+        actor_id: &str,
+        joined_at: i64,
+    ) -> crate::foundation::Result<()> {
+        let backend = crate::support::runtime::RuntimeBackend::from_config(self.app.config())?;
+        let key = crate::websocket::presence_key(channel);
+        let member = crate::websocket::presence_member_value(actor_id, channel, joined_at);
+        backend.sadd(&key, &member).await
+    }
 }
 
 /// Builder for TestApp.
@@ -81,6 +98,27 @@ impl TestAppBuilder {
         config: crate::http::middleware::MiddlewareConfig,
     ) -> Self {
         self.inner = self.inner.register_middleware(config);
+        self
+    }
+
+    pub fn register_websocket_routes<F>(mut self, registrar: F) -> Self
+    where
+        F: Fn(&mut crate::websocket::WebSocketRegistrar) -> Result<()> + Send + Sync + 'static,
+    {
+        self.inner = self.inner.register_websocket_routes(registrar);
+        self
+    }
+
+    pub fn enable_observability(mut self) -> Self {
+        self.inner = self.inner.enable_observability();
+        self
+    }
+
+    pub fn enable_observability_with(
+        mut self,
+        options: crate::logging::ObservabilityOptions,
+    ) -> Self {
+        self.inner = self.inner.enable_observability_with(options);
         self
     }
 

@@ -119,6 +119,10 @@ impl AppContext {
         self.resolve::<WebSocketPublisher>()
     }
 
+    pub fn websocket_channels(&self) -> Result<Arc<crate::websocket::WebSocketChannelRegistry>> {
+        self.resolve::<crate::websocket::WebSocketChannelRegistry>()
+    }
+
     pub fn database(&self) -> Result<Arc<DatabaseManager>> {
         self.resolve::<DatabaseManager>()
     }
@@ -690,7 +694,7 @@ impl AppBuilder {
 
     pub async fn build_websocket_kernel(self) -> Result<WebSocketKernel> {
         let boot = self.bootstrap().await?;
-        Ok(WebSocketKernel::new(boot.app, boot.websocket_routes))
+        Ok(WebSocketKernel::new(boot.app))
     }
 
     async fn bootstrap(self) -> Result<BootArtifacts> {
@@ -1034,6 +1038,17 @@ impl AppBuilder {
         let mut boot_websocket_routes = prepared_plugins.websocket_routes;
         boot_websocket_routes.extend(websocket_routes);
 
+        let mut ws_registrar = crate::websocket::WebSocketRegistrar::new();
+        for route in &boot_websocket_routes {
+            route(&mut ws_registrar)?;
+        }
+        let ws_registry = crate::websocket::WebSocketChannelRegistry::from_registrar(ws_registrar);
+        for descriptor in ws_registry.descriptors() {
+            diagnostics.register_websocket_channel(&descriptor.id);
+        }
+        app.container()
+            .singleton_arc(std::sync::Arc::new(ws_registry))?;
+
         let mut boot_middlewares = prepared_plugins.middlewares;
         boot_middlewares.extend(middlewares);
 
@@ -1042,7 +1057,6 @@ impl AppBuilder {
             routes: boot_routes,
             commands: boot_commands,
             schedules: boot_schedules,
-            websocket_routes: boot_websocket_routes,
             middlewares: boot_middlewares,
             observability,
             spa_dir,
@@ -1067,7 +1081,6 @@ struct BootArtifacts {
     routes: Vec<RouteRegistrar>,
     commands: Vec<CommandRegistrar>,
     schedules: Vec<ScheduleRegistrar>,
-    websocket_routes: Vec<WebSocketRouteRegistrar>,
     middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
     spa_dir: Option<PathBuf>,
@@ -1193,5 +1206,46 @@ mod tests {
         let redis = kernel.app().redis().unwrap();
 
         assert_eq!(redis.namespace(), "forge:development");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_registers_websocket_channel_registry() {
+        use crate::support::ChannelId;
+
+        let builder = crate::App::builder().register_websocket_routes(|r| {
+            r.channel(ChannelId::new("chat"), |_ctx, _payload| async { Ok(()) })?;
+            Ok(())
+        });
+
+        let kernel = builder
+            .build_websocket_kernel()
+            .await
+            .expect("kernel builds");
+        let registry = kernel
+            .app()
+            .container()
+            .resolve::<crate::websocket::WebSocketChannelRegistry>()
+            .expect("registry registered during bootstrap");
+
+        let descriptors = registry.descriptors();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].id, ChannelId::new("chat"));
+    }
+
+    #[tokio::test]
+    async fn app_context_exposes_websocket_channels() {
+        use crate::support::ChannelId;
+
+        let builder = crate::App::builder().register_websocket_routes(|r| {
+            r.channel(ChannelId::new("alerts"), |_ctx, _payload| async { Ok(()) })?;
+            Ok(())
+        });
+
+        let kernel = builder.build_websocket_kernel().await.unwrap();
+        let registry = kernel.app().websocket_channels().unwrap();
+
+        let descriptors = registry.descriptors();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].id, ChannelId::new("alerts"));
     }
 }

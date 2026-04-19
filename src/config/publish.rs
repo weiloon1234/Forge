@@ -158,6 +158,9 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # otlp_endpoint = "http://localhost:4317"
 # service_name = "forge"
 
+# [observability.websocket]
+# include_payloads = false         # Include full payloads in /_forge/ws/history/:channel
+
 # -----------------------------------------------------------------------------
 # Cache
 # -----------------------------------------------------------------------------

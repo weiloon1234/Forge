@@ -77,7 +77,7 @@ impl RuntimeBackend {
         }
     }
 
-    pub async fn subscribe_ws(&self, topics: &[String]) -> Result<BackendSubscription> {
+    pub(crate) async fn subscribe_ws(&self, topics: &[String]) -> Result<BackendSubscription> {
         match self {
             Self::Redis(runtime) => runtime.subscribe_ws(topics).await,
             Self::Memory(runtime) => runtime.subscribe_ws(topics).await,

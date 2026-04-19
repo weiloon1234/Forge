@@ -394,6 +394,10 @@ Ensure all dashboard endpoints follow consistent pattern:
 /_forge/jobs/failed     — failed jobs
 /_forge/openapi.json    — OpenAPI spec
 /_forge/sql             — slow query log (NEW)
+/_forge/ws/channels     — registered WebSocket channels
+/_forge/ws/presence/:channel — live presence members
+/_forge/ws/history/:channel  — recent buffered messages (metadata by default)
+/_forge/ws/stats        — global + per-channel WebSocket counters
 ```
 
 All gated by `ObservabilityConfig.base_path` (configurable). All JSON except metrics (text/plain).

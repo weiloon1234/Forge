@@ -212,7 +212,8 @@ impl WebSocketPublisher {
 
     pub async fn publish_message(&self, message: ServerMessage) -> Result<()> {
         let payload = serde_json::to_string(&message).map_err(Error::other)?;
-        self.diagnostics.record_websocket_outbound_message();
+        self.diagnostics
+            .record_websocket_outbound_message_on(&message.channel);
         self.backend
             .publish_ws(message.channel.as_str(), &payload)
             .await?;
@@ -441,9 +442,79 @@ pub(crate) struct RegisteredChannel {
     pub handler: Arc<dyn ChannelHandler>,
 }
 
+/// Public projection of a registered WebSocket channel's configuration.
+///
+/// Emitted by the `/_forge/ws/channels` dashboard endpoint and returned
+/// from [`AppContext::websocket_channels`](crate::foundation::AppContext::websocket_channels).
+#[derive(Debug, Clone, Serialize)]
+pub struct WebSocketChannelDescriptor {
+    pub id: ChannelId,
+    pub presence: bool,
+    pub replay_count: u32,
+    pub allow_client_events: bool,
+    pub requires_auth: bool,
+    pub guard: Option<GuardId>,
+    pub permissions: Vec<PermissionId>,
+}
+
+impl From<&RegisteredChannel> for WebSocketChannelDescriptor {
+    fn from(channel: &RegisteredChannel) -> Self {
+        Self {
+            id: channel.id.clone(),
+            presence: channel.options.presence,
+            replay_count: channel.options.replay_count,
+            allow_client_events: channel.options.allow_client_events,
+            requires_auth: channel.options.requires_auth(),
+            guard: channel.options.guard_id().cloned(),
+            permissions: channel.options.permissions_set().into_iter().collect(),
+        }
+    }
+}
+
+/// Shared registry of `RegisteredChannel` entries, stored in the `AppContext`
+/// container so both the WebSocket kernel and dashboard handlers read from the
+/// same source of truth.
+#[derive(Clone, Default)]
+pub struct WebSocketChannelRegistry {
+    channels: Arc<Vec<RegisteredChannel>>,
+}
+
+impl std::fmt::Debug for WebSocketChannelRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSocketChannelRegistry")
+            .field("channel_count", &self.channels.len())
+            .finish()
+    }
+}
+
+impl WebSocketChannelRegistry {
+    pub fn from_registrar(registrar: WebSocketRegistrar) -> Self {
+        let mut channels = registrar.into_channels();
+        channels.sort_by(|a, b| a.id.cmp(&b.id));
+        Self {
+            channels: Arc::new(channels),
+        }
+    }
+
+    pub fn descriptors(&self) -> Vec<WebSocketChannelDescriptor> {
+        self.channels.iter().map(Into::into).collect()
+    }
+
+    pub fn find(&self, id: &ChannelId) -> Option<WebSocketChannelDescriptor> {
+        self.channels.iter().find(|c| c.id == *id).map(Into::into)
+    }
+
+    pub(crate) fn registered_channels(&self) -> &[RegisteredChannel] {
+        &self.channels
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ChannelId, WebSocketRegistrar};
+    use super::{
+        ChannelId, GuardId, PermissionId, WebSocketChannelOptions, WebSocketChannelRegistry,
+        WebSocketRegistrar,
+    };
 
     #[test]
     fn rejects_duplicate_channel_registration() {
@@ -461,5 +532,38 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn descriptor_is_projected_from_registered_channel() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel_with_options(
+                ChannelId::new("chat"),
+                |_ctx, _payload| async { Ok(()) },
+                WebSocketChannelOptions::new()
+                    .presence(true)
+                    .replay(25)
+                    .allow_client_events(true)
+                    .guard(GuardId::new("api"))
+                    .permissions([PermissionId::new("chat:read")]),
+            )
+            .unwrap();
+
+        let registry = WebSocketChannelRegistry::from_registrar(registrar);
+
+        let descriptors = registry.descriptors();
+        assert_eq!(descriptors.len(), 1);
+        let descriptor = &descriptors[0];
+        assert_eq!(descriptor.id, ChannelId::new("chat"));
+        assert!(descriptor.presence);
+        assert_eq!(descriptor.replay_count, 25);
+        assert!(descriptor.allow_client_events);
+        assert!(descriptor.requires_auth);
+        assert_eq!(descriptor.guard.as_ref(), Some(&GuardId::new("api")));
+        assert_eq!(descriptor.permissions, vec![PermissionId::new("chat:read")]);
+
+        assert!(registry.find(&ChannelId::new("chat")).is_some());
+        assert!(registry.find(&ChannelId::new("missing")).is_none());
     }
 }

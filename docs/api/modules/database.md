@@ -48,6 +48,7 @@ struct Column
   fn is_null(&self) -> Condition
   fn is_not_null(&self) -> Condition
   fn like(&self, value: impl Into<String>) -> Condition
+  fn ieq(&self, value: impl Into<String>) -> Condition
   fn not_like(&self, value: impl Into<String>) -> Condition
   fn json(&self) -> JsonExprBuilder
 struct ColumnInfo
@@ -513,7 +514,7 @@ trait ToDbValue
 ```rust
 enum AggregateFn { Count, Sum, Avg, Min, Max }
 enum BinaryOperator { Add, Subtract, Multiply, Divide, Concat, Custom }
-enum ComparisonOp { Eq, NotEq, Gt, Gte, Lt, Lte, Like, NotLike, ILike }
+enum ComparisonOp { Eq, IEq, NotEq, Gt, Gte, Lt, Lte, Like, NotLike, ILike }
 enum Condition { Comparison, InList, JsonPredicate, And, Or, Not, IsNull, IsNotNull, Exists, Raw }
   fn compare(left: Expr, op: ComparisonOp, right: Expr) -> Self
   fn json(expr: Expr, op: JsonPredicateOp, value: JsonPredicateValue) -> Self

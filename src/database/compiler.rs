@@ -806,12 +806,19 @@ impl CompilerState {
 
     fn compile_condition(&mut self, condition: &Condition) -> Result<String> {
         match condition {
-            Condition::Comparison { left, op, right } => Ok(format!(
-                "{} {} {}",
-                self.compile_expr(left)?,
-                self.compile_comparison_op(*op),
-                self.compile_expr(right)?,
-            )),
+            Condition::Comparison { left, op, right } => match op {
+                ComparisonOp::IEq => Ok(format!(
+                    "LOWER({}) = LOWER({})",
+                    self.compile_expr(left)?,
+                    self.compile_expr(right)?,
+                )),
+                _ => Ok(format!(
+                    "{} {} {}",
+                    self.compile_expr(left)?,
+                    self.compile_comparison_op(*op),
+                    self.compile_expr(right)?,
+                )),
+            },
             Condition::InList { expr, values } => {
                 if values.is_empty() {
                     return Ok("FALSE".to_string());
@@ -997,6 +1004,7 @@ impl CompilerState {
     fn compile_comparison_op(&self, op: ComparisonOp) -> &'static str {
         match op {
             ComparisonOp::Eq => "=",
+            ComparisonOp::IEq => unreachable!("IEq is compiled explicitly in compile_condition"),
             ComparisonOp::NotEq => "<>",
             ComparisonOp::Gt => ">",
             ComparisonOp::Gte => ">=",
@@ -1505,6 +1513,38 @@ mod tests {
 
         let numeric = Numeric::new("123.45").unwrap();
         assert_eq!(numeric.as_str(), "123.45");
+    }
+
+    #[test]
+    fn compiles_case_insensitive_equality_operator() {
+        let compiled = compile(QueryAst::select(SelectNode {
+            from: FromItem::Table(TableRef::new("users")),
+            distinct: false,
+            columns: vec![SelectItem::new(Expr::column(ColumnRef::new("users", "id")))],
+            joins: Vec::new(),
+            condition: Some(Condition::compare(
+                Expr::column(ColumnRef::new("users", "email")),
+                ComparisonOp::IEq,
+                Expr::value("Test@Example.com"),
+            )),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            lock: None,
+            relations: Vec::new(),
+            aggregates: Vec::new(),
+        }));
+
+        assert_eq!(
+            compiled.sql,
+            "SELECT \"users\".\"id\" FROM \"users\" WHERE LOWER(\"users\".\"email\") = LOWER($1::text)"
+        );
+        assert_eq!(
+            compiled.bindings,
+            vec![DbValue::Text("Test@Example.com".into())]
+        );
     }
 
     #[test]

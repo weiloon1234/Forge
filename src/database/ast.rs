@@ -1002,6 +1002,7 @@ impl From<JsonPathExpr> for Expr {
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonOp {
     Eq,
+    IEq,
     NotEq,
     Gt,
     Gte,
@@ -1016,6 +1017,7 @@ impl fmt::Display for ComparisonOp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Eq => "=",
+            Self::IEq => "IEQ",
             Self::NotEq => "<>",
             Self::Gt => ">",
             Self::Gte => ">=",

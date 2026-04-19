@@ -716,6 +716,14 @@ impl<M, T> Column<M, T> {
         )
     }
 
+    pub fn ieq(&self, value: impl Into<String>) -> Condition {
+        Condition::compare(
+            Expr::column(self.column_ref()),
+            ComparisonOp::IEq,
+            Expr::value(DbValue::Text(value.into())),
+        )
+    }
+
     pub fn not_like(&self, value: impl Into<String>) -> Condition {
         Condition::compare(
             Expr::column(self.column_ref()),

@@ -1069,6 +1069,62 @@ async fn manual_primary_keys_require_explicit_values_on_create() {
 }
 
 #[tokio::test]
+async fn text_columns_support_case_insensitive_exact_match_without_pattern_wildcards() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active, nickname) VALUES (1, 'Exact%Match@Example.com', true, 'VIP')"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active, nickname) VALUES (2, 'ExactXMatch@Example.com', true, 'Regular')"
+            ),
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active, nickname) VALUES (3, 'someone@example.com', true, NULL)"
+            ),
+        ],
+    )
+    .await;
+
+    let typed = User::query()
+        .where_(User::EMAIL.ieq("exact%match@example.com"))
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(typed.len(), 1);
+    assert_eq!(typed[0].id, 1);
+    assert_eq!(typed[0].email, "Exact%Match@Example.com");
+
+    let generic = Query::table(USERS_TABLE)
+        .select(["id", "email"])
+        .where_ieq("email", "EXACT%MATCH@EXAMPLE.COM")
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(generic.len(), 1);
+    assert_eq!(generic[0].decode::<i64>("id").unwrap(), 1);
+    assert_eq!(
+        generic[0].decode::<String>("email").unwrap(),
+        "Exact%Match@Example.com"
+    );
+
+    let nullable = User::query()
+        .where_(User::NICKNAME.ieq("vip"))
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(nullable.len(), 1);
+    assert_eq!(nullable[0].id, 1);
+    assert_eq!(nullable[0].nickname.as_deref(), Some("VIP"));
+}
+
+#[tokio::test]
 async fn safe_model_ids_auto_generate_and_sort_newest_first() {
     let Some(runtime) = test_app_runtime().await else {
         return;

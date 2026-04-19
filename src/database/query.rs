@@ -723,6 +723,18 @@ impl Query {
         ))
     }
 
+    pub fn where_ieq(
+        self,
+        column: impl Into<super::ast::ColumnRef>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.where_(Condition::compare(
+            Expr::column(column.into()),
+            ComparisonOp::IEq,
+            Expr::value(DbValue::Text(value.into())),
+        ))
+    }
+
     pub fn group_by(mut self, expr: impl Into<Expr>) -> Self {
         if let QueryBody::Select(select) = &mut self.ast.body {
             select.group_by.push(expr.into());

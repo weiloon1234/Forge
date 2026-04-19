@@ -100,8 +100,9 @@ pub use crate::validation::{
 };
 pub use crate::websocket::{
     ChannelHandler, ClientAction, ClientMessage, PresenceInfo, ServerMessage,
-    WebSocketChannelOptions, WebSocketContext, WebSocketPublisher, WebSocketRegistrar, ERROR_EVENT,
-    SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT,
+    WebSocketChannelDescriptor, WebSocketChannelOptions, WebSocketChannelRegistry,
+    WebSocketContext, WebSocketPublisher, WebSocketRegistrar, ERROR_EVENT, SUBSCRIBED_EVENT,
+    SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT,
 };
 pub use axum::extract::State;
 pub use axum::http::StatusCode;

@@ -264,6 +264,7 @@ REDIS__URL=redis://127.0.0.1/
 # OBSERVABILITY__TRACING_ENABLED=false
 # OBSERVABILITY__OTLP_ENDPOINT=http://localhost:4317
 # OBSERVABILITY__SERVICE_NAME=forge
+# OBSERVABILITY__WEBSOCKET__INCLUDE_PAYLOADS=false
 
 # -----------------------------------------------------------------------------
 # Internationalization

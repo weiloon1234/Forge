@@ -378,6 +378,7 @@ pub struct ObservabilityConfig {
     pub tracing_enabled: bool,
     pub otlp_endpoint: String,
     pub service_name: String,
+    pub websocket: WebSocketObservabilityConfig,
 }
 
 impl Default for ObservabilityConfig {
@@ -387,8 +388,20 @@ impl Default for ObservabilityConfig {
             tracing_enabled: false,
             otlp_endpoint: "http://localhost:4317".to_string(),
             service_name: "forge".to_string(),
+            websocket: WebSocketObservabilityConfig::default(),
         }
     }
+}
+
+/// Observability options specific to the WebSocket dashboard endpoints.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct WebSocketObservabilityConfig {
+    /// When `true`, `/_forge/ws/history/:channel` includes full `ServerMessage.payload`
+    /// for each buffered message. When `false` (the default), payloads are replaced
+    /// with their serialized byte length under `payload_size_bytes`, so dashboard
+    /// readers cannot see raw message contents.
+    pub include_payloads: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1028,6 +1041,31 @@ mod tests {
         let observability: ObservabilityConfig = config.observability().unwrap();
 
         assert_eq!(observability.base_path, "/_ops");
+    }
+
+    #[test]
+    fn loads_websocket_observability_overrides() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-observability.toml"),
+            r#"
+                [observability.websocket]
+                include_payloads = true
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let observability: ObservabilityConfig = config.observability().unwrap();
+
+        assert!(observability.websocket.include_payloads);
+    }
+
+    #[test]
+    fn websocket_observability_defaults_to_redacted() {
+        let observability = ObservabilityConfig::default();
+        assert!(!observability.websocket.include_payloads);
     }
 
     #[test]

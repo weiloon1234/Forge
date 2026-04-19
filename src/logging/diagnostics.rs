@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,7 @@ use super::types::{
     SchedulerLeadershipState, WebSocketConnectionState,
 };
 use crate::foundation::{AppContext, Result};
+use crate::support::ChannelId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
@@ -43,6 +46,17 @@ pub struct WebSocketRuntimeSnapshot {
     pub opened_total: u64,
     pub closed_total: u64,
     pub active_connections: u64,
+    pub subscriptions_total: u64,
+    pub unsubscribes_total: u64,
+    pub active_subscriptions: u64,
+    pub inbound_messages_total: u64,
+    pub outbound_messages_total: u64,
+    pub channels: Vec<WebSocketChannelSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketChannelSnapshot {
+    pub id: ChannelId,
     pub subscriptions_total: u64,
     pub unsubscribes_total: u64,
     pub active_subscriptions: u64,
@@ -113,6 +127,15 @@ impl AuthCounters {
 }
 
 #[derive(Default)]
+struct PerChannelWebSocketCounters {
+    subscriptions_total: AtomicU64,
+    unsubscribes_total: AtomicU64,
+    active_subscriptions: AtomicU64,
+    inbound_messages_total: AtomicU64,
+    outbound_messages_total: AtomicU64,
+}
+
+#[derive(Default)]
 struct WebSocketCounters {
     opened_total: AtomicU64,
     closed_total: AtomicU64,
@@ -122,10 +145,26 @@ struct WebSocketCounters {
     active_subscriptions: AtomicU64,
     inbound_messages_total: AtomicU64,
     outbound_messages_total: AtomicU64,
+    per_channel: RwLock<HashMap<ChannelId, Arc<PerChannelWebSocketCounters>>>,
 }
 
 impl WebSocketCounters {
     fn snapshot(&self) -> WebSocketRuntimeSnapshot {
+        let map = self.per_channel.read().expect("per_channel lock poisoned");
+        let mut channels: Vec<WebSocketChannelSnapshot> = map
+            .iter()
+            .map(|(id, counters)| WebSocketChannelSnapshot {
+                id: id.clone(),
+                subscriptions_total: counters.subscriptions_total.load(Ordering::Relaxed),
+                unsubscribes_total: counters.unsubscribes_total.load(Ordering::Relaxed),
+                active_subscriptions: counters.active_subscriptions.load(Ordering::Relaxed),
+                inbound_messages_total: counters.inbound_messages_total.load(Ordering::Relaxed),
+                outbound_messages_total: counters.outbound_messages_total.load(Ordering::Relaxed),
+            })
+            .collect();
+        drop(map);
+        channels.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+
         WebSocketRuntimeSnapshot {
             opened_total: self.opened_total.load(Ordering::Relaxed),
             closed_total: self.closed_total.load(Ordering::Relaxed),
@@ -135,7 +174,23 @@ impl WebSocketCounters {
             active_subscriptions: self.active_subscriptions.load(Ordering::Relaxed),
             inbound_messages_total: self.inbound_messages_total.load(Ordering::Relaxed),
             outbound_messages_total: self.outbound_messages_total.load(Ordering::Relaxed),
+            channels,
         }
+    }
+
+    fn entry(&self, channel: &ChannelId) -> Arc<PerChannelWebSocketCounters> {
+        // Fast path: read lock and return if present.
+        {
+            let map = self.per_channel.read().expect("per_channel lock poisoned");
+            if let Some(existing) = map.get(channel) {
+                return existing.clone();
+            }
+        }
+        // Slow path: upgrade to write lock and insert.
+        let mut map = self.per_channel.write().expect("per_channel lock poisoned");
+        map.entry(channel.clone())
+            .or_insert_with(|| Arc::new(PerChannelWebSocketCounters::default()))
+            .clone()
     }
 }
 
@@ -317,6 +372,10 @@ impl RuntimeDiagnostics {
         }
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `record_websocket_subscription_opened_on(&channel)` — the global-only variant bypasses per-channel tracking"
+    )]
     pub fn record_websocket_subscription_opened(&self) {
         self.websocket
             .subscriptions_total
@@ -326,6 +385,10 @@ impl RuntimeDiagnostics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `record_websocket_subscription_closed_on(&channel)` — the global-only variant bypasses per-channel tracking"
+    )]
     pub fn record_websocket_subscription_closed(&self) {
         self.websocket
             .unsubscribes_total
@@ -333,16 +396,70 @@ impl RuntimeDiagnostics {
         decrement_saturating(&self.websocket.active_subscriptions);
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `record_websocket_inbound_message_on(&channel)` — the global-only variant bypasses per-channel tracking"
+    )]
     pub fn record_websocket_inbound_message(&self) {
         self.websocket
             .inbound_messages_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `record_websocket_outbound_message_on(&channel)` — the global-only variant bypasses per-channel tracking"
+    )]
     pub fn record_websocket_outbound_message(&self) {
         self.websocket
             .outbound_messages_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_websocket_subscription_opened_on(&self, channel: &ChannelId) {
+        self.websocket
+            .subscriptions_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.websocket
+            .active_subscriptions
+            .fetch_add(1, Ordering::Relaxed);
+        let entry = self.websocket.entry(channel);
+        entry.subscriptions_total.fetch_add(1, Ordering::Relaxed);
+        entry.active_subscriptions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_websocket_subscription_closed_on(&self, channel: &ChannelId) {
+        self.websocket
+            .unsubscribes_total
+            .fetch_add(1, Ordering::Relaxed);
+        decrement_saturating(&self.websocket.active_subscriptions);
+        let entry = self.websocket.entry(channel);
+        entry.unsubscribes_total.fetch_add(1, Ordering::Relaxed);
+        decrement_saturating(&entry.active_subscriptions);
+    }
+
+    pub fn record_websocket_inbound_message_on(&self, channel: &ChannelId) {
+        self.websocket
+            .inbound_messages_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.websocket
+            .entry(channel)
+            .inbound_messages_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_websocket_outbound_message_on(&self, channel: &ChannelId) {
+        self.websocket
+            .outbound_messages_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.websocket
+            .entry(channel)
+            .outbound_messages_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn register_websocket_channel(&self, channel: &ChannelId) {
+        let _ = self.websocket.entry(channel);
     }
 
     pub fn record_scheduler_tick(&self) {
@@ -413,4 +530,47 @@ fn decrement_saturating(value: &AtomicU64) {
     let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_sub(1))
     });
+}
+
+#[cfg(test)]
+impl Default for RuntimeDiagnostics {
+    fn default() -> Self {
+        Self::new(
+            crate::logging::types::RuntimeBackendKind::Memory,
+            super::probes::ReadinessRegistry { checks: Vec::new() },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_channel_counters_start_at_zero_and_increment() {
+        use crate::support::ChannelId;
+
+        let diagnostics = RuntimeDiagnostics::default();
+        let chat = ChannelId::new("chat");
+
+        diagnostics.record_websocket_subscription_opened_on(&chat);
+        diagnostics.record_websocket_inbound_message_on(&chat);
+        diagnostics.record_websocket_outbound_message_on(&chat);
+        diagnostics.record_websocket_outbound_message_on(&chat);
+
+        let snapshot = diagnostics.snapshot().websocket;
+        let channel = snapshot
+            .channels
+            .iter()
+            .find(|c| c.id == chat)
+            .expect("channel snapshot missing");
+        assert_eq!(channel.subscriptions_total, 1);
+        assert_eq!(channel.active_subscriptions, 1);
+        assert_eq!(channel.inbound_messages_total, 1);
+        assert_eq!(channel.outbound_messages_total, 2);
+
+        assert_eq!(snapshot.subscriptions_total, 1);
+        assert_eq!(snapshot.inbound_messages_total, 1);
+        assert_eq!(snapshot.outbound_messages_total, 2);
+    }
 }

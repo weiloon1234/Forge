@@ -100,6 +100,26 @@ pub(crate) fn register_observability_routes(
     registrar.route_with_options(
         &join_route(&config.base_path, "sql"),
         get(slow_queries),
+        route_options.clone(),
+    );
+    registrar.route_with_options(
+        &join_route(&config.base_path, "ws/presence/{channel}"),
+        get(ws_presence),
+        route_options.clone(),
+    );
+    registrar.route_with_options(
+        &join_route(&config.base_path, "ws/channels"),
+        get(ws_channels),
+        route_options.clone(),
+    );
+    registrar.route_with_options(
+        &join_route(&config.base_path, "ws/history/{channel}"),
+        get(ws_history),
+        route_options.clone(),
+    );
+    registrar.route_with_options(
+        &join_route(&config.base_path, "ws/stats"),
+        get(ws_stats),
         route_options,
     );
     Ok(())
@@ -235,6 +255,78 @@ async fn slow_queries(State(_app): State<AppContext>) -> Response {
         .into_response()
 }
 
+async fn ws_channels(State(app): State<AppContext>) -> Response {
+    let registry = match app.websocket_channels() {
+        Ok(registry) => registry,
+        Err(error) => return internal_error_response(error),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "channels": registry.descriptors() })),
+    )
+        .into_response()
+}
+
+async fn ws_presence(
+    State(app): State<AppContext>,
+    axum::extract::Path(channel): axum::extract::Path<crate::support::ChannelId>,
+) -> Response {
+    let registry = match app.websocket_channels() {
+        Ok(registry) => registry,
+        Err(error) => return internal_error_response(error),
+    };
+    let descriptor = match registry.find(&channel) {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "channel not registered" })),
+            )
+                .into_response();
+        }
+    };
+    if !descriptor.presence {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "presence not enabled for channel" })),
+        )
+            .into_response();
+    }
+
+    let backend = match crate::support::runtime::RuntimeBackend::from_config(app.config()) {
+        Ok(b) => b,
+        Err(error) => return internal_error_response(error),
+    };
+    let raw = match backend
+        .smembers(&crate::websocket::presence_key(&channel))
+        .await
+    {
+        Ok(members) => members,
+        Err(error) => return internal_error_response(error),
+    };
+
+    let members: Vec<serde_json::Value> = raw
+        .iter()
+        .filter_map(|s| serde_json::from_str::<crate::websocket::PresenceInfo>(s).ok())
+        .map(|info| {
+            serde_json::json!({
+                "actor_id": info.actor_id,
+                "joined_at": info.joined_at,
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "channel": channel.as_str(),
+            "count": members.len(),
+            "members": members,
+        })),
+    )
+        .into_response()
+}
+
 fn db_value_to_json(value: &DbValue) -> serde_json::Value {
     match value {
         DbValue::Text(s) => serde_json::Value::String(s.clone()),
@@ -295,6 +387,134 @@ async fn openapi_spec_handler() -> Response {
         )
             .into_response(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct WsHistoryQuery {
+    limit: Option<i64>,
+}
+
+async fn ws_history(
+    State(app): State<AppContext>,
+    axum::extract::Path(channel): axum::extract::Path<crate::support::ChannelId>,
+    axum::extract::Query(params): axum::extract::Query<WsHistoryQuery>,
+) -> Response {
+    const HISTORY_BUFFER_MAX: i64 = 50;
+
+    let registry = match app.websocket_channels() {
+        Ok(registry) => registry,
+        Err(error) => return internal_error_response(error),
+    };
+    if registry.find(&channel).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "channel not registered" })),
+        )
+            .into_response();
+    }
+
+    let limit = params
+        .limit
+        .unwrap_or(HISTORY_BUFFER_MAX)
+        .clamp(1, HISTORY_BUFFER_MAX);
+
+    let backend = match crate::support::runtime::RuntimeBackend::from_config(app.config()) {
+        Ok(backend) => backend,
+        Err(error) => return internal_error_response(error),
+    };
+
+    let history_key = format!("ws:history:{}", channel.as_str());
+    let entries = match backend.lrange(&history_key, 0, limit - 1).await {
+        Ok(e) => e,
+        Err(error) => return internal_error_response(error),
+    };
+
+    let include_payloads = match app.config().observability() {
+        Ok(cfg) => cfg.websocket.include_payloads,
+        Err(error) => return internal_error_response(error),
+    };
+
+    let messages: Vec<serde_json::Value> = entries
+        .iter()
+        .filter_map(|raw| {
+            let message = serde_json::from_str::<crate::websocket::ServerMessage>(raw).ok()?;
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "channel".to_string(),
+                serde_json::Value::String(message.channel.as_str().to_string()),
+            );
+            obj.insert(
+                "event".to_string(),
+                serde_json::Value::String(message.event.as_str().to_string()),
+            );
+            obj.insert(
+                "room".to_string(),
+                match message.room {
+                    Some(r) => serde_json::Value::String(r),
+                    None => serde_json::Value::Null,
+                },
+            );
+            if include_payloads {
+                obj.insert("payload".to_string(), message.payload);
+            } else {
+                let size = serde_json::to_vec(&message.payload)
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(0);
+                obj.insert("payload_size_bytes".to_string(), size.into());
+            }
+            Some(serde_json::Value::Object(obj))
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "channel": channel.as_str(),
+            "messages": messages,
+        })),
+    )
+        .into_response()
+}
+
+async fn ws_stats(State(app): State<AppContext>) -> Response {
+    let diagnostics = match app.diagnostics() {
+        Ok(d) => d,
+        Err(error) => return internal_error_response(error),
+    };
+    let ws = diagnostics.snapshot().websocket;
+
+    let channels: Vec<serde_json::Value> = ws
+        .channels
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id.as_str(),
+                "subscriptions_total": c.subscriptions_total,
+                "unsubscribes_total": c.unsubscribes_total,
+                "active_subscriptions": c.active_subscriptions,
+                "inbound_messages_total": c.inbound_messages_total,
+                "outbound_messages_total": c.outbound_messages_total,
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "global": {
+                "active_connections": ws.active_connections,
+                "active_subscriptions": ws.active_subscriptions,
+                "subscriptions_total": ws.subscriptions_total,
+                "unsubscribes_total": ws.unsubscribes_total,
+                "inbound_messages_total": ws.inbound_messages_total,
+                "outbound_messages_total": ws.outbound_messages_total,
+                "opened_total": ws.opened_total,
+                "closed_total": ws.closed_total,
+            },
+            "channels": channels,
+        })),
+    )
+        .into_response()
 }
 
 fn join_route(base_path: &str, suffix: &str) -> String {

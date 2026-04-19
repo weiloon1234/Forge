@@ -162,7 +162,12 @@ async fn wait_for_log(log: &Arc<Mutex<Vec<String>>>, prefix: &str) {
 
 async fn wait_for_worker_job(app: &AppContext) {
     for _ in 0..80 {
-        if Worker::from_app(app.clone()).unwrap().run_once().await.unwrap() {
+        if Worker::from_app(app.clone())
+            .unwrap()
+            .run_once()
+            .await
+            .unwrap()
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

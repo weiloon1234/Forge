@@ -133,6 +133,49 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         snapshot.websocket.outbound_messages_total,
     );
 
+    // Per-channel WebSocket series
+    write_help_type(
+        &mut out,
+        "forge_websocket_subscriptions_total",
+        "Total WebSocket subscriptions per channel",
+        "counter",
+    );
+    write_help_type(
+        &mut out,
+        "forge_websocket_active_subscriptions",
+        "Currently active WebSocket subscriptions per channel",
+        "gauge",
+    );
+    write_help_type(
+        &mut out,
+        "forge_websocket_channel_messages_total",
+        "Total WebSocket messages per channel",
+        "counter",
+    );
+    for channel in &snapshot.websocket.channels {
+        let id = channel.id.as_str();
+        let _ = writeln!(
+            out,
+            "forge_websocket_subscriptions_total{{channel=\"{id}\"}} {}",
+            channel.subscriptions_total
+        );
+        let _ = writeln!(
+            out,
+            "forge_websocket_active_subscriptions{{channel=\"{id}\"}} {}",
+            channel.active_subscriptions
+        );
+        let _ = writeln!(
+            out,
+            "forge_websocket_channel_messages_total{{channel=\"{id}\",direction=\"inbound\"}} {}",
+            channel.inbound_messages_total
+        );
+        let _ = writeln!(
+            out,
+            "forge_websocket_channel_messages_total{{channel=\"{id}\",direction=\"outbound\"}} {}",
+            channel.outbound_messages_total
+        );
+    }
+
     // Scheduler counters
     write_help_type(
         &mut out,
@@ -264,6 +307,7 @@ mod tests {
                 active_subscriptions: 10,
                 inbound_messages_total: 100,
                 outbound_messages_total: 200,
+                channels: Vec::new(),
             },
             scheduler: SchedulerRuntimeSnapshot {
                 ticks_total: 500,
@@ -294,5 +338,79 @@ mod tests {
         assert!(output.contains("forge_scheduler_leader_active 1"));
         assert!(output.contains("# TYPE forge_http_requests_total counter"));
         assert!(output.contains("# TYPE forge_bootstrap_complete gauge"));
+    }
+
+    #[test]
+    fn format_prometheus_emits_per_channel_websocket_series() {
+        use crate::logging::diagnostics::WebSocketChannelSnapshot;
+        use crate::support::ChannelId;
+
+        let snapshot = RuntimeSnapshot {
+            backend: RuntimeBackendKind::Memory,
+            bootstrap_complete: false,
+            http: HttpRuntimeSnapshot {
+                requests_total: 0,
+                informational_total: 0,
+                success_total: 0,
+                redirection_total: 0,
+                client_error_total: 0,
+                server_error_total: 0,
+            },
+            auth: AuthRuntimeSnapshot {
+                success_total: 0,
+                unauthorized_total: 0,
+                forbidden_total: 0,
+                error_total: 0,
+            },
+            websocket: WebSocketRuntimeSnapshot {
+                opened_total: 0,
+                closed_total: 0,
+                active_connections: 5,
+                subscriptions_total: 0,
+                unsubscribes_total: 0,
+                active_subscriptions: 0,
+                inbound_messages_total: 0,
+                outbound_messages_total: 0,
+                channels: vec![WebSocketChannelSnapshot {
+                    id: ChannelId::new("chat"),
+                    subscriptions_total: 10,
+                    unsubscribes_total: 2,
+                    active_subscriptions: 8,
+                    inbound_messages_total: 100,
+                    outbound_messages_total: 300,
+                }],
+            },
+            scheduler: SchedulerRuntimeSnapshot {
+                ticks_total: 0,
+                executed_schedules_total: 0,
+                leadership_acquired_total: 0,
+                leadership_lost_total: 0,
+                leader_active: false,
+            },
+            jobs: JobRuntimeSnapshot {
+                enqueued_total: 0,
+                leased_total: 0,
+                started_total: 0,
+                succeeded_total: 0,
+                retried_total: 0,
+                expired_requeues_total: 0,
+                dead_lettered_total: 0,
+            },
+        };
+
+        let output = format_prometheus(&snapshot);
+
+        assert!(output.contains("forge_websocket_active_connections 5"));
+        assert!(
+            output.contains("forge_websocket_subscriptions_total{channel=\"chat\"} 10"),
+            "missing per-channel subscriptions series:\n{output}"
+        );
+        assert!(output.contains("forge_websocket_active_subscriptions{channel=\"chat\"} 8"));
+        assert!(output.contains(
+            "forge_websocket_channel_messages_total{channel=\"chat\",direction=\"inbound\"} 100"
+        ));
+        assert!(output.contains(
+            "forge_websocket_channel_messages_total{channel=\"chat\",direction=\"outbound\"} 300"
+        ));
     }
 }

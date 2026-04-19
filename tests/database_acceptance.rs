@@ -19,6 +19,7 @@ const TAGS_TABLE: &str = "forge_test_tags";
 const MERCHANT_TAGS_TABLE: &str = "forge_test_merchant_tags";
 const PAYMENTS_TABLE: &str = "forge_test_payments";
 const POSTS_TABLE: &str = "forge_test_posts";
+const NUMERIC_POSTS_TABLE: &str = "forge_test_numeric_posts";
 const SAFE_USERS_TABLE: &str = "forge_test_safe_uuid_users";
 const PASSWORD_USERS_TABLE: &str = "forge_test_password_users";
 const COUNTRIES_RUNTIME_TABLE: &str = "forge_test_runtime_countries";
@@ -122,6 +123,7 @@ async fn reset_schema(database: &DatabaseManager) {
             &format!("DROP TABLE IF EXISTS {TAGS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PAYMENTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {POSTS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {NUMERIC_POSTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PASSWORD_USERS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {MERCHANTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PRODUCTS_TABLE}"),
@@ -149,6 +151,9 @@ async fn reset_schema(database: &DatabaseManager) {
             ),
             &format!(
                 "CREATE TABLE {POSTS_TABLE} (id BIGINT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, deleted_at TIMESTAMPTZ NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {NUMERIC_POSTS_TABLE} (id BIGINT PRIMARY KEY, amount NUMERIC(20,8) NOT NULL, note TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, deleted_at TIMESTAMPTZ NULL)"
             ),
             &format!(
                 "CREATE TABLE {PASSWORD_USERS_TABLE} (id BIGINT PRIMARY KEY, email TEXT NOT NULL, password TEXT NOT NULL)"
@@ -262,6 +267,17 @@ struct PostRecord {
     id: i64,
     title: String,
     body: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+    deleted_at: Option<DateTime>,
+}
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = NUMERIC_POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true)]
+struct NumericPostRecord {
+    id: i64,
+    amount: Numeric,
+    note: String,
     created_at: DateTime,
     updated_at: DateTime,
     deleted_at: Option<DateTime>,
@@ -1282,6 +1298,128 @@ async fn timestamps_and_soft_deletes_work_on_model_first_writes() {
         .unwrap();
     assert_eq!(forced, 1);
     assert!(PostRecord::query()
+        .with_trashed()
+        .get(database)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn numeric_models_and_raw_queries_support_postgres_numeric_columns() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let created = NumericPostRecord::create()
+        .set(NumericPostRecord::ID, 1_i64)
+        .set(
+            NumericPostRecord::AMOUNT,
+            Numeric::new("10.50000000").unwrap(),
+        )
+        .set(NumericPostRecord::NOTE, "starter balance")
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(created.amount.as_str(), "10.50000000");
+    assert!(created.deleted_at.is_none());
+
+    let fetched = NumericPostRecord::query()
+        .where_(NumericPostRecord::ID.eq(1_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.amount.as_str(), "10.50000000");
+
+    let amount_only = database
+        .raw_query(
+            &format!("SELECT amount FROM {NUMERIC_POSTS_TABLE} WHERE id = $1 ORDER BY id LIMIT 1"),
+            &[1_i64.into()],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        amount_only.decode::<Numeric>("amount").unwrap().as_str(),
+        "10.50000000"
+    );
+
+    let full_row = database
+        .raw_query(
+            &format!("SELECT * FROM {NUMERIC_POSTS_TABLE} WHERE id = $1"),
+            &[1_i64.into()],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(full_row.decode::<i64>("id").unwrap(), 1);
+    assert_eq!(
+        full_row.decode::<Numeric>("amount").unwrap().as_str(),
+        "10.50000000"
+    );
+    assert_eq!(
+        full_row.decode::<String>("note").unwrap(),
+        "starter balance".to_string()
+    );
+
+    let numeric_array = database
+        .raw_query(
+            &format!(
+                "SELECT ARRAY[amount, amount + 1]::numeric[] AS amounts FROM {NUMERIC_POSTS_TABLE} WHERE id = $1"
+            ),
+            &[1_i64.into()],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        numeric_array
+            .decode::<Vec<Numeric>>("amounts")
+            .unwrap()
+            .iter()
+            .map(Numeric::as_str)
+            .collect::<Vec<_>>(),
+        vec!["10.50000000", "11.50000000"]
+    );
+
+    let updated = fetched
+        .update()
+        .set(
+            NumericPostRecord::AMOUNT,
+            Numeric::new("12.75000000").unwrap(),
+        )
+        .set(NumericPostRecord::NOTE, "updated balance")
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(updated.amount.as_str(), "12.75000000");
+    assert_eq!(updated.note, "updated balance");
+
+    let deleted = updated.delete().execute(app).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    let trashed = NumericPostRecord::query()
+        .with_trashed()
+        .where_(NumericPostRecord::ID.eq(1_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(trashed.amount.as_str(), "12.75000000");
+    assert!(trashed.deleted_at.is_some());
+
+    let forced = NumericPostRecord::force_delete()
+        .where_(NumericPostRecord::ID.eq(1_i64))
+        .execute(app)
+        .await
+        .unwrap();
+    assert_eq!(forced, 1);
+    assert!(NumericPostRecord::query()
         .with_trashed()
         .get(database)
         .await

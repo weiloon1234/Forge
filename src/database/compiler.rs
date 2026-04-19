@@ -530,8 +530,12 @@ impl CompilerState {
     }
 
     fn compile_select_item(&mut self, item: &SelectItem) -> Result<String> {
-        let expression = self.compile_projection_expr(&item.expr)?;
-        if let Some(alias) = &item.alias {
+        let (mut expression, expr_alias) = self.compile_projection_expr(&item.expr)?;
+        if matches!(self.expr_db_type(&item.expr), Some(DbType::Numeric)) {
+            expression = format!("({expression})::text");
+        }
+
+        if let Some(alias) = item.alias.as_deref().or(expr_alias.as_deref()) {
             Ok(format!("{expression} AS {}", quote_identifier(alias)))
         } else {
             Ok(expression)
@@ -553,12 +557,11 @@ impl CompilerState {
         ))
     }
 
-    fn compile_projection_expr(&mut self, expr: &Expr) -> Result<String> {
-        let expression = self.compile_expr(expr)?;
-        Ok(match self.expr_db_type(expr) {
-            Some(DbType::Numeric) => format!("({expression})::text"),
-            _ => expression,
-        })
+    fn compile_projection_expr(&mut self, expr: &Expr) -> Result<(String, Option<String>)> {
+        match expr {
+            Expr::Column(column) => Ok((self.compile_column_name(column), column.alias.clone())),
+            _ => Ok((self.compile_expr(expr)?, None)),
+        }
     }
 
     fn compile_aggregate_expr(&mut self, aggregate: &AggregateExpr) -> Result<String> {
@@ -1441,6 +1444,34 @@ mod tests {
         assert_eq!(
             compiled.sql,
             "SELECT COUNT(DISTINCT \"payments\".\"merchant_id\") AS \"merchant_count\", (AVG(\"payments\".\"amount\"))::text AS \"avg_amount\", (MIN(\"payments\".\"amount\"))::text AS \"min_amount\", (MAX(\"payments\".\"amount\"))::text AS \"max_amount\" FROM \"payments\""
+        );
+    }
+
+    #[test]
+    fn compiles_aliased_numeric_projection_casts_before_alias() {
+        let compiled = compile(QueryAst::select(SelectNode {
+            from: FromItem::Table(TableRef::new("users")),
+            distinct: false,
+            columns: vec![SelectItem::new(Expr::column(
+                ColumnRef::new("users", "credit_1")
+                    .typed(DbType::Numeric)
+                    .aliased("credit_1"),
+            ))],
+            joins: Vec::new(),
+            condition: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            lock: None,
+            relations: Vec::new(),
+            aggregates: Vec::new(),
+        }));
+
+        assert_eq!(
+            compiled.sql,
+            "SELECT (\"users\".\"credit_1\")::text AS \"credit_1\" FROM \"users\""
         );
     }
 

@@ -58,7 +58,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["any", "sqlite", "postgres", "mysql", "runtime-tokio-rustls", "chrono", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["any", "sqlite", "postgres", "mysql", "runtime-tokio-rustls", "chrono", "uuid", "bigdecimal"] }
 thiserror = "2"
 tokio = { version = "1.37", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 ts-rs = { version = "10", features = ["serde-compat"] }

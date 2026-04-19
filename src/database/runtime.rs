@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, PgPoolOptions, PgRow};
+use sqlx::types::BigDecimal;
 use sqlx::{Column as _, PgPool, Postgres, Row, Transaction, TypeInfo as _};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
@@ -1386,9 +1387,9 @@ fn decode_column_as(row: &PgRow, name: &str, db_type: DbType) -> Result<DbValue>
             })
             .map_err(Error::other),
         DbType::Numeric => row
-            .try_get::<Option<String>, _>(name)
+            .try_get::<Option<BigDecimal>, _>(name)
             .map(|value| match value {
-                Some(value) => Numeric::new(value).map(DbValue::Numeric),
+                Some(value) => decode_numeric_value(value).map(DbValue::Numeric),
                 None => Ok(DbValue::Null(DbType::Numeric)),
             })
             .map_err(Error::other)?
@@ -1510,13 +1511,9 @@ fn decode_column_as(row: &PgRow, name: &str, db_type: DbType) -> Result<DbValue>
             })
             .map_err(Error::other),
         DbType::NumericArray => row
-            .try_get::<Option<Vec<String>>, _>(name)
+            .try_get::<Option<Vec<BigDecimal>>, _>(name)
             .map(|value| match value {
-                Some(values) => values
-                    .into_iter()
-                    .map(Numeric::new)
-                    .collect::<Result<Vec<_>>>()
-                    .map(DbValue::NumericArray),
+                Some(values) => decode_numeric_values(values).map(DbValue::NumericArray),
                 None => Ok(DbValue::Null(DbType::NumericArray)),
             })
             .map_err(Error::other)?
@@ -1599,6 +1596,14 @@ fn decode_column_as(row: &PgRow, name: &str, db_type: DbType) -> Result<DbValue>
             })
             .map_err(Error::other),
     }
+}
+
+fn decode_numeric_value(value: BigDecimal) -> Result<Numeric> {
+    Numeric::new(value.to_string())
+}
+
+fn decode_numeric_values(values: Vec<BigDecimal>) -> Result<Vec<Numeric>> {
+    values.into_iter().map(decode_numeric_value).collect()
 }
 
 fn unsupported_type_error(

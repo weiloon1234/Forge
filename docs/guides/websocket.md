@@ -436,6 +436,8 @@ curl -s "http://localhost:3000/_forge/ws/history/chat?limit=10" | jq
 
 Each entry includes `{ channel, event, room, payload_size_bytes }`. The raw `payload` is **not** included by default.
 
+History lists are capped at 50 entries per channel. Each publish also refreshes a TTL on the history key (default 7 days, configured via `websocket.history_ttl_seconds`), so channels that go silent are auto-reaped by Redis — no manual cleanup scheduler needed. Set `history_ttl_seconds = 0` to disable and retain history indefinitely.
+
 ### Including payloads in history
 
 If you need to see message bodies (e.g., in staging or internal tooling), opt in via config:

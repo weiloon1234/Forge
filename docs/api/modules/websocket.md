@@ -21,6 +21,7 @@ enum ClientAction { Subscribe, Unsubscribe, Message, ClientEvent }
 struct ClientMessage
 struct PresenceInfo
 struct ServerMessage
+struct WebSocketChannelDescriptor
 struct WebSocketChannelOptions
   fn new() -> Self
   fn presence(self, enabled: bool) -> Self
@@ -32,6 +33,10 @@ struct WebSocketChannelOptions
   fn on_join<F, Fut>(self, f: F) -> Self
   fn on_leave<F, Fut>(self, f: F) -> Self
   fn replay(self, count: u32) -> Self
+struct WebSocketChannelRegistry
+  fn from_registrar(registrar: WebSocketRegistrar) -> Self
+  fn descriptors(&self) -> Vec<WebSocketChannelDescriptor>
+  fn find(&self, id: &ChannelId) -> Option<WebSocketChannelDescriptor>
 struct WebSocketContext
   fn app(&self) -> &AppContext
   fn connection_id(&self) -> u64

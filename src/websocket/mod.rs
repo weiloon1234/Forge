@@ -180,13 +180,19 @@ where
 pub struct WebSocketPublisher {
     backend: RuntimeBackend,
     diagnostics: Arc<RuntimeDiagnostics>,
+    history_ttl_seconds: u64,
 }
 
 impl WebSocketPublisher {
-    pub(crate) fn new(backend: RuntimeBackend, diagnostics: Arc<RuntimeDiagnostics>) -> Self {
+    pub(crate) fn new(
+        backend: RuntimeBackend,
+        diagnostics: Arc<RuntimeDiagnostics>,
+        history_ttl_seconds: u64,
+    ) -> Self {
         Self {
             backend,
             diagnostics,
+            history_ttl_seconds,
         }
     }
 
@@ -221,6 +227,12 @@ impl WebSocketPublisher {
         // Buffer for replay so new subscribers can catch up on recent messages.
         let history_key = format!("ws:history:{}", message.channel);
         let _ = self.backend.lpush_capped(&history_key, &payload, 50).await;
+        if self.history_ttl_seconds > 0 {
+            let _ = self
+                .backend
+                .expire(&history_key, self.history_ttl_seconds)
+                .await;
+        }
 
         Ok(())
     }

@@ -61,6 +61,17 @@ impl TestApp {
         let member = crate::websocket::presence_member_value(actor_id, channel, joined_at);
         backend.sadd(&key, &member).await
     }
+
+    /// Read the remaining TTL (seconds) on the replay history list for a channel.
+    /// Returns `None` if no expiration is set or the key does not exist.
+    pub async fn history_ttl(
+        &self,
+        channel: &crate::support::ChannelId,
+    ) -> crate::foundation::Result<Option<u64>> {
+        let backend = crate::support::runtime::RuntimeBackend::from_config(self.app.config())?;
+        let key = format!("ws:history:{}", channel.as_str());
+        backend.ttl(&key).await
+    }
 }
 
 /// Builder for TestApp.

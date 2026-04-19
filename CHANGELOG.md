@@ -14,6 +14,7 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 - Per-channel WebSocket Prometheus series on `/_forge/metrics` (`forge_websocket_subscriptions_total{channel=...}`, `forge_websocket_active_subscriptions{channel=...}`, `forge_websocket_channel_messages_total{channel=...,direction=...}`).
 - `AppContext::websocket_channels()` accessor returning the registered channel registry.
 - `WebSocketChannelDescriptor` and `WebSocketChannelRegistry` public types exposing registered WebSocket channels.
+- Configurable TTL on WebSocket replay history (`websocket.history_ttl_seconds`, default 7 days). Every publish refreshes the TTL on `ws:history:<channel>`, so active channels never expire; channels idle past the window are auto-reaped by Redis. Set to `0` to disable.
 
 ### Changed
 

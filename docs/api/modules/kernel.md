@@ -49,7 +49,7 @@ struct BoundWebSocketServer
   fn local_addr(&self) -> SocketAddr
   async fn serve(self) -> Result<()>
 struct WebSocketKernel
-  fn new(app: AppContext, routes: Vec<WebSocketRouteRegistrar>) -> Self
+  fn new(app: AppContext) -> Self
   fn app(&self) -> &AppContext
   async fn bind(self) -> Result<BoundWebSocketServer>
   async fn serve(self) -> Result<()>

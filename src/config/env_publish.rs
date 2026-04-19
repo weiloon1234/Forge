@@ -175,6 +175,7 @@ REDIS__URL=redis://127.0.0.1/
 # WEBSOCKET__HEARTBEAT_TIMEOUT_SECONDS=10
 # WEBSOCKET__MAX_MESSAGES_PER_SECOND=50
 # WEBSOCKET__MAX_CONNECTIONS_PER_USER=5
+# WEBSOCKET__HISTORY_TTL_SECONDS=604800   # 7 days; set to 0 to disable
 
 # -----------------------------------------------------------------------------
 # Email

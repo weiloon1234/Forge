@@ -63,6 +63,7 @@ struct AppContext
   fn authorizer(&self) -> Result<Arc<Authorizer>>
   fn jobs(&self) -> Result<Arc<JobDispatcher>>
   fn websocket(&self) -> Result<Arc<WebSocketPublisher>>
+  fn websocket_channels(&self) -> Result<Arc<WebSocketChannelRegistry>>
   fn database(&self) -> Result<Arc<DatabaseManager>>
   fn redis(&self) -> Result<Arc<RedisManager>>
   fn storage(&self) -> Result<Arc<StorageManager>>

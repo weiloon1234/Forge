@@ -273,3 +273,92 @@ async fn ws_stats_exposes_global_and_per_channel_counters() {
     assert_eq!(idle["subscriptions_total"], 0);
     assert_eq!(idle["outbound_messages_total"], 0);
 }
+
+#[tokio::test]
+async fn publish_sets_history_ttl_by_default() {
+    use forge::support::ChannelEventId;
+
+    let app = TestApp::builder()
+        .register_websocket_routes(|r| {
+            r.channel(ChannelId::new("ttl-default"), |_ctx, _payload| async {
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .build()
+        .await;
+
+    assert_eq!(
+        app.history_ttl(&ChannelId::new("ttl-default"))
+            .await
+            .unwrap(),
+        None,
+        "no TTL before first publish",
+    );
+
+    app.app()
+        .websocket()
+        .unwrap()
+        .publish(
+            ChannelId::new("ttl-default"),
+            ChannelEventId::new("created"),
+            None,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.history_ttl(&ChannelId::new("ttl-default"))
+            .await
+            .unwrap(),
+        Some(604_800),
+        "publish applies the default 7-day history TTL",
+    );
+}
+
+#[tokio::test]
+async fn publish_skips_ttl_when_configured_to_zero() {
+    use forge::support::ChannelEventId;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("00-websocket.toml"),
+        r#"
+[websocket]
+history_ttl_seconds = 0
+"#,
+    )
+    .unwrap();
+
+    let app = TestApp::builder()
+        .load_config_dir(tmp.path())
+        .register_websocket_routes(|r| {
+            r.channel(ChannelId::new("ttl-disabled"), |_ctx, _payload| async {
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .build()
+        .await;
+
+    app.app()
+        .websocket()
+        .unwrap()
+        .publish(
+            ChannelId::new("ttl-disabled"),
+            ChannelEventId::new("created"),
+            None,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.history_ttl(&ChannelId::new("ttl-disabled"))
+            .await
+            .unwrap(),
+        None,
+        "history_ttl_seconds = 0 disables expire()",
+    );
+}

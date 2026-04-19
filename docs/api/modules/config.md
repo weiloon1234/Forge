@@ -58,5 +58,6 @@ struct SessionConfig
 struct TokenConfig
 struct TypeScriptConfig
 struct WebSocketConfig
+struct WebSocketObservabilityConfig
 ```
 

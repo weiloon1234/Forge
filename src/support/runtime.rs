@@ -442,6 +442,59 @@ return 0
         }
     }
 
+    /// Set an expiration on a key in seconds (`EXPIRE key ttl`).
+    ///
+    /// For the memory backend this only records the requested TTL — keys are
+    /// not actually evicted — so tests can assert the correct TTL was applied
+    /// without simulating wall-clock expiry.
+    pub async fn expire(&self, key: &str, ttl_seconds: u64) -> Result<()> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let _: bool = conn
+                    .expire(&full_key, ttl_seconds as i64)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(())
+            }
+            Self::Memory(runtime) => {
+                let mut ttls = runtime.ttls.lock().await;
+                ttls.insert(key.to_string(), ttl_seconds);
+                Ok(())
+            }
+        }
+    }
+
+    /// Return the remaining TTL for a key in seconds, or `None` if the key has
+    /// no expiration / does not exist (`TTL key`).
+    pub async fn ttl(&self, key: &str) -> Result<Option<u64>> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let seconds: i64 = conn.ttl(&full_key).await.map_err(Error::other)?;
+                if seconds < 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(seconds as u64))
+                }
+            }
+            Self::Memory(runtime) => {
+                let ttls = runtime.ttls.lock().await;
+                Ok(ttls.get(key).copied())
+            }
+        }
+    }
+
     /// Return a range of elements from a list.
     ///
     /// Equivalent to `LRANGE key start stop`.
@@ -587,6 +640,7 @@ pub(crate) struct MemoryRuntime {
     pub(crate) unique_keys: Mutex<HashMap<String, (String, std::time::Instant)>>,
     pub(crate) sets: Mutex<HashMap<String, HashSet<String>>>,
     pub(crate) lists: Mutex<HashMap<String, VecDeque<String>>>,
+    pub(crate) ttls: Mutex<HashMap<String, u64>>,
     pub(crate) notify: Notify,
 }
 
@@ -630,6 +684,7 @@ impl MemoryRuntime {
             unique_keys: Mutex::new(HashMap::new()),
             sets: Mutex::new(HashMap::new()),
             lists: Mutex::new(HashMap::new()),
+            ttls: Mutex::new(HashMap::new()),
             notify: Notify::new(),
         }
     }

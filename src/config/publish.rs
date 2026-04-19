@@ -139,6 +139,7 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # heartbeat_timeout_seconds = 10
 # max_messages_per_second = 50
 # max_connections_per_user = 5
+# history_ttl_seconds = 604800          # Auto-reap ws:history:<channel> after 7 days idle (0 = never)
 
 # -----------------------------------------------------------------------------
 # Logging

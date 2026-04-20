@@ -243,7 +243,7 @@ impl ServiceRegistrar {
 
     pub fn register_datatable<D>(&self) -> Result<()>
     where
-        D: crate::datatable::ModelDatatable,
+        D: crate::datatable::Datatable,
     {
         self.datatable_registry
             .lock()

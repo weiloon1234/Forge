@@ -198,6 +198,8 @@ struct ModelQuery
   fn use_write_pool(self) -> Self
   fn with_stream_batch_size(self, batch_size: usize) -> Self
   fn with_cte(self, cte: Cte) -> Self
+  fn group_by(self, expr: impl Into<Expr>) -> Self
+  fn having(self, condition: Condition) -> Self
   fn search<T>(self, columns: &[Column<M, T>], query: &str) -> Self
   fn with_trashed(self) -> Self
   fn only_trashed(self) -> Self
@@ -247,6 +249,8 @@ struct ProjectionField
   const fn info(&self) -> ProjectionFieldInfo
   const fn alias(&self) -> &'static str
   const fn db_type(&self) -> DbType
+  fn column_ref(&self) -> ColumnRef
+  fn column_ref_from(&self, table_alias: &str) -> ColumnRef
   fn decode(&self, record: &DbRecord) -> Result<T>
   fn select(&self, expr: impl Into<Expr>) -> SelectItem
   fn select_from(&self, table_alias: &str) -> Result<SelectItem>

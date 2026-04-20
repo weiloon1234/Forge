@@ -2,37 +2,129 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::auth::Actor;
-use crate::database::{Model, ModelQuery, ProjectionQuery};
+use crate::database::{
+    Condition, Model, ModelQuery, OrderBy, Paginated, Pagination, ProjectionQuery, QueryExecutor,
+};
 use crate::foundation::{AppContext, Result};
+use crate::support::Collection;
 
 use super::column::DatatableColumn;
 use super::context::DatatableContext;
 use super::filter_meta::DatatableFilterRow;
 use super::mapping::DatatableMapping;
 use super::request::DatatableRequest;
-use super::response::DatatableExportAccepted;
-use super::response::DatatableJsonResponse;
+use super::response::{DatatableExportAccepted, DatatableJsonResponse};
 use super::sort::DatatableSort;
 
-// ---------------------------------------------------------------------------
-// ModelDatatable — primary path
-// ---------------------------------------------------------------------------
+mod private {
+    pub trait Sealed {}
+}
 
 #[async_trait]
-pub trait ModelDatatable: Send + Sync + 'static {
-    type Model: Model + Serialize;
+pub trait DatatableQuery<Row>: private::Sealed + Clone + Send + Sync + 'static {
+    fn apply_where(self, condition: Condition) -> Self;
+
+    fn apply_having(self, condition: Condition) -> Self;
+
+    fn apply_order(self, order: OrderBy) -> Self;
+
+    async fn get<E>(&self, executor: &E) -> Result<Collection<Row>>
+    where
+        E: QueryExecutor;
+
+    async fn paginate<E>(&self, executor: &E, pagination: Pagination) -> Result<Paginated<Row>>
+    where
+        E: QueryExecutor;
+}
+
+impl<M> private::Sealed for ModelQuery<M> where M: Model + Serialize + Send + Sync + 'static {}
+
+#[async_trait]
+impl<M> DatatableQuery<M> for ModelQuery<M>
+where
+    M: Model + Serialize + Send + Sync + 'static,
+{
+    fn apply_where(self, condition: Condition) -> Self {
+        self.where_(condition)
+    }
+
+    fn apply_having(self, condition: Condition) -> Self {
+        self.having(condition)
+    }
+
+    fn apply_order(self, order: OrderBy) -> Self {
+        self.order_by(order)
+    }
+
+    async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
+    where
+        E: QueryExecutor,
+    {
+        ModelQuery::get(self, executor).await
+    }
+
+    async fn paginate<E>(&self, executor: &E, pagination: Pagination) -> Result<Paginated<M>>
+    where
+        E: QueryExecutor,
+    {
+        ModelQuery::paginate(self, executor, pagination).await
+    }
+}
+
+impl<P> private::Sealed for ProjectionQuery<P>
+where
+    P: Clone + Serialize + Send + Sync + 'static,
+{
+}
+
+#[async_trait]
+impl<P> DatatableQuery<P> for ProjectionQuery<P>
+where
+    P: Clone + Serialize + Send + Sync + 'static,
+{
+    fn apply_where(self, condition: Condition) -> Self {
+        self.where_(condition)
+    }
+
+    fn apply_having(self, condition: Condition) -> Self {
+        self.having(condition)
+    }
+
+    fn apply_order(self, order: OrderBy) -> Self {
+        self.order_by(order)
+    }
+
+    async fn get<E>(&self, executor: &E) -> Result<Collection<P>>
+    where
+        E: QueryExecutor,
+    {
+        ProjectionQuery::get(self, executor).await
+    }
+
+    async fn paginate<E>(&self, executor: &E, pagination: Pagination) -> Result<Paginated<P>>
+    where
+        E: QueryExecutor,
+    {
+        ProjectionQuery::paginate(self, executor, pagination).await
+    }
+}
+
+#[async_trait]
+pub trait Datatable: Send + Sync + 'static {
+    type Row: Serialize + Send + Sync + 'static;
+    type Query: DatatableQuery<Self::Row>;
 
     const ID: &'static str;
 
     /// Base scoped query. Receives context so the implementor can scope
     /// by actor, tenant, or any other contextual constraint.
-    fn query(ctx: &DatatableContext) -> ModelQuery<Self::Model>;
+    fn query(ctx: &DatatableContext) -> Self::Query;
 
     /// Declared columns that participate in rendering, filtering, sorting, export.
-    fn columns() -> Vec<DatatableColumn<Self::Model>>;
+    fn columns() -> Vec<DatatableColumn<Self::Row>>;
 
     /// Output-only computed fields. Mappings override columns with the same name.
-    fn mappings() -> Vec<DatatableMapping<Self::Model>> {
+    fn mappings() -> Vec<DatatableMapping<Self::Row>> {
         Vec::new()
     }
 
@@ -40,8 +132,8 @@ pub trait ModelDatatable: Send + Sync + 'static {
     /// so the implementor can add further refinements.
     async fn filters(
         _ctx: &DatatableContext,
-        query: ModelQuery<Self::Model>,
-    ) -> Result<ModelQuery<Self::Model>> {
+        query: Self::Query,
+    ) -> Result<Self::Query> {
         Ok(query)
     }
 
@@ -51,7 +143,7 @@ pub trait ModelDatatable: Send + Sync + 'static {
     }
 
     /// Default sort when no sort is specified in the request.
-    fn default_sort() -> Vec<DatatableSort<Self::Model>> {
+    fn default_sort() -> Vec<DatatableSort<Self::Row>> {
         Vec::new()
     }
 
@@ -62,7 +154,7 @@ pub trait ModelDatatable: Send + Sync + 'static {
         actor: Option<&Actor>,
         request: DatatableRequest,
     ) -> Result<DatatableJsonResponse> {
-        super::json::build_json_response::<Self::Model, Self>(app, actor, request).await
+        super::json::build_json_response::<Self>(app, actor, request).await
     }
 
     async fn download(
@@ -70,7 +162,7 @@ pub trait ModelDatatable: Send + Sync + 'static {
         actor: Option<&Actor>,
         request: DatatableRequest,
     ) -> Result<axum::response::Response> {
-        super::download::build_download_response::<Self::Model, Self>(app, actor, request).await
+        super::download::build_download_response::<Self>(app, actor, request).await
     }
 
     async fn queue_email(
@@ -80,24 +172,5 @@ pub trait ModelDatatable: Send + Sync + 'static {
         recipient: &str,
     ) -> Result<DatatableExportAccepted> {
         super::export_job::dispatch_export::<Self>(app, actor, request, recipient).await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ProjectionDatatable — escape hatch for grouped/aggregate reports
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-pub trait ProjectionDatatable: Send + Sync + 'static {
-    type Row: Clone + Send + Sync + Serialize + 'static;
-
-    const ID: &'static str;
-
-    fn query(ctx: &DatatableContext) -> ProjectionQuery<Self::Row>;
-
-    fn columns() -> Vec<DatatableColumn<Self::Row>>;
-
-    fn mappings() -> Vec<DatatableMapping<Self::Row>> {
-        Vec::new()
     }
 }

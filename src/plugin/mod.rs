@@ -604,7 +604,7 @@ impl PluginRegistrar {
 
     pub fn register_datatable<D>(&mut self) -> &mut Self
     where
-        D: crate::datatable::ModelDatatable,
+        D: crate::datatable::Datatable,
     {
         self.registrar_actions
             .push(Box::new(|r| r.register_datatable::<D>()));

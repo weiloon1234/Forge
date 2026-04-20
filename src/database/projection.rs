@@ -81,6 +81,15 @@ impl<P, T> ProjectionField<P, T> {
         self.info.db_type
     }
 
+    pub fn column_ref(&self) -> ColumnRef {
+        ColumnRef::bare(self.alias()).typed(self.db_type())
+    }
+
+    pub fn column_ref_from(&self, table_alias: &str) -> ColumnRef {
+        let source_column = self.info.source_column.unwrap_or(self.alias());
+        ColumnRef::new(table_alias, source_column).typed(self.db_type())
+    }
+
     pub fn decode(&self, record: &DbRecord) -> Result<T>
     where
         T: FromDbValue,
@@ -94,6 +103,18 @@ impl<P, T> ProjectionField<P, T> {
 
     pub fn select_from(&self, table_alias: &str) -> Result<SelectItem> {
         self.info.select_from(table_alias)
+    }
+}
+
+impl<P, T> From<ProjectionField<P, T>> for ColumnRef {
+    fn from(value: ProjectionField<P, T>) -> Self {
+        value.column_ref()
+    }
+}
+
+impl<P, T> From<&ProjectionField<P, T>> for ColumnRef {
+    fn from(value: &ProjectionField<P, T>) -> Self {
+        value.column_ref()
     }
 }
 

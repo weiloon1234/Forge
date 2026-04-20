@@ -21,6 +21,7 @@ impl ServiceProvider for AppServiceProvider {
                 ]),
             ),
         )?;
+        crate::app::datatables::register(registrar)?;
         Ok(())
     }
 

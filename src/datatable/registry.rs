@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crate::auth::Actor;
 use crate::foundation::{AppContext, Error, Result};
 
-use super::datatable_trait::ModelDatatable;
+use super::datatable_trait::Datatable;
 use super::request::DatatableRequest;
 use super::response::{DatatableExportAccepted, DatatableJsonResponse};
 
@@ -42,7 +42,7 @@ pub trait DynDatatable: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Adapter: ModelDatatable -> DynDatatable
+// Adapter: Datatable -> DynDatatable
 // ---------------------------------------------------------------------------
 
 pub struct DatatableAdapter<D>(std::marker::PhantomData<D>);
@@ -62,7 +62,7 @@ impl<D> DatatableAdapter<D> {
 #[async_trait]
 impl<D> DynDatatable for DatatableAdapter<D>
 where
-    D: ModelDatatable,
+    D: Datatable,
 {
     fn id(&self) -> &str {
         D::ID
@@ -132,7 +132,7 @@ impl DatatableRegistryBuilder {
 
     pub(crate) fn register<D>(&mut self) -> Result<()>
     where
-        D: ModelDatatable,
+        D: Datatable,
     {
         let id = D::ID.to_string();
         if self.datatables.contains_key(&id) {

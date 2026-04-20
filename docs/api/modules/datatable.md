@@ -8,13 +8,17 @@ Server-side datatables: filtering, sorting, pagination, XLSX export
 
 ```rust
 struct DatatableColumn
-  fn field<T>(column: Column<M, T>) -> Self
+  fn field(field: impl Into<DatatableFieldRef<Row>>) -> Self
   fn label(self, label: impl Into<String>) -> Self
   fn sortable(self) -> Self
+  fn sort_by(self, expr: impl Into<Expr>) -> Self
   fn filterable(self) -> Self
+  fn filter_by(self, expr: impl Into<Expr>) -> Self
+  fn filter_having(self, expr: impl Into<Expr>) -> Self
   fn exportable(self) -> Self
   fn relation(self, relation: impl Into<String>) -> Self
   fn db_type(&self) -> DbType
+struct DatatableFieldRef
 ```
 
 ## forge::datatable::context
@@ -28,26 +32,28 @@ struct DatatableContext
 ## forge::datatable::datatable_trait
 
 ```rust
-trait ModelDatatable
-  fn query(ctx: &DatatableContext<'_>) -> ModelQuery<Self::Model>
-  fn columns() -> Vec<DatatableColumn<Self::Model>>
-  fn mappings() -> Vec<DatatableMapping<Self::Model>>
+trait Datatable
+  fn query(ctx: &DatatableContext<'_>) -> Self::Query
+  fn columns() -> Vec<DatatableColumn<Self::Row>>
+  fn mappings() -> Vec<DatatableMapping<Self::Row>>
   fn filters<'life0, 'async_trait>(
   fn available_filters<'life0, 'async_trait>(
-  fn default_sort() -> Vec<DatatableSort<Self::Model>>
+  fn default_sort() -> Vec<DatatableSort<Self::Row>>
   fn json<'life0, 'life1, 'async_trait>(
   fn download<'life0, 'life1, 'async_trait>(
   fn queue_email<'life0, 'life1, 'life2, 'async_trait>(
-trait ProjectionDatatable
-  fn query(ctx: &DatatableContext<'_>) -> ProjectionQuery<Self::Row>
-  fn columns() -> Vec<DatatableColumn<Self::Row>>
-  fn mappings() -> Vec<DatatableMapping<Self::Row>>
+trait DatatableQuery: Clone
+  fn apply_where(self, condition: Condition) -> Self
+  fn apply_having(self, condition: Condition) -> Self
+  fn apply_order(self, order: OrderBy) -> Self
+  fn get<'life0, 'life1, 'async_trait, E>(
+  fn paginate<'life0, 'life1, 'async_trait, E>(
 ```
 
 ## forge::datatable::download
 
 ```rust
-fn async fn build_download_response<M, D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<Response>where M: Model + Serialize, D: ModelDatatable<Model = M> + ?Sized,
+fn async fn build_download_response<D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<Response>where D: Datatable + ?Sized, D::Row: Serialize,
 ```
 
 ## forge::datatable::export
@@ -64,15 +70,15 @@ trait DatatableExportDelivery
 ```rust
 struct DatatableExportJob
 struct DatatableExportJobPayload
-fn async fn dispatch_export<D: ModelDatatable + ?Sized>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, recipient: &str, ) -> Result<DatatableExportAccepted>
+fn async fn dispatch_export<D: Datatable + ?Sized>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, recipient: &str, ) -> Result<DatatableExportAccepted>
 ```
 
 ## forge::datatable::filter_engine
 
 ```rust
-fn apply_auto_filters<M: Model>( query: ModelQuery<M>, filters: &[DatatableFilterInput], columns: &[DatatableColumn<M>], table_name: &str, ) -> Result<ModelQuery<M>>
-fn apply_default_sorts<M: Model>( query: ModelQuery<M>, sorts: &[DatatableSort<M>], table_name: &str, ) -> Result<ModelQuery<M>>
-fn apply_sorts<M: Model>( query: ModelQuery<M>, sorts: &[DatatableSortInput], columns: &[DatatableColumn<M>], table_name: &str, ) -> Result<ModelQuery<M>>
+fn apply_auto_filters<Row: 'static, Q>( query: Q, filters: &[DatatableFilterInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>where Q: DatatableQuery<Row>,
+fn apply_default_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSort<Row>], ) -> Result<Q>where Q: DatatableQuery<Row>,
+fn apply_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSortInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>where Q: DatatableQuery<Row>,
 ```
 
 ## forge::datatable::filter_meta
@@ -100,7 +106,7 @@ struct DatatableFilterRow
 ## forge::datatable::json
 
 ```rust
-fn async fn build_json_response<M, D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<DatatableJsonResponse>where M: Model + Serialize, D: ModelDatatable<Model = M> + ?Sized,
+fn async fn build_json_response<D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<DatatableJsonResponse>where D: Datatable + ?Sized, D::Row: Serialize,
 ```
 
 ## forge::datatable::mapping
@@ -157,8 +163,8 @@ struct DatatablePaginationMeta
 
 ```rust
 struct DatatableSort
-  fn asc<T>(column: Column<M, T>) -> Self
-  fn desc<T>(column: Column<M, T>) -> Self
+  fn asc(field: impl Into<DatatableFieldRef<Row>>) -> Self
+  fn desc(field: impl Into<DatatableFieldRef<Row>>) -> Self
 ```
 
 ## forge::datatable::value

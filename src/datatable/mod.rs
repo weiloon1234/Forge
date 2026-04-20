@@ -17,7 +17,7 @@ pub mod value;
 
 pub use column::DatatableColumn;
 pub use context::DatatableContext;
-pub use datatable_trait::{ModelDatatable, ProjectionDatatable};
+pub use datatable_trait::{Datatable, DatatableQuery};
 pub use export::{DatatableExportDelivery, GeneratedDatatableExport, NoopExportDelivery};
 pub use filter_meta::{
     DatatableFilterField, DatatableFilterKind, DatatableFilterOption, DatatableFilterRow,

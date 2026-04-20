@@ -1703,6 +1703,16 @@ where
         self
     }
 
+    pub fn group_by(mut self, expr: impl Into<Expr>) -> Self {
+        self.select.group_by.push(expr.into());
+        self
+    }
+
+    pub fn having(mut self, condition: Condition) -> Self {
+        self.select.having = merge_condition(self.select.having.take(), condition);
+        self
+    }
+
     /// Filter results using PostgreSQL full-text search.
     ///
     /// Generates a `WHERE to_tsvector('english', col1 || ' ' || col2) @@ plainto_tsquery('english', ?)`

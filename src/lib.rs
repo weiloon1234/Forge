@@ -199,7 +199,7 @@ pub use datatable::{
     DatatableFilterOp, DatatableFilterOption, DatatableFilterRow, DatatableFilterValue,
     DatatableJsonResponse, DatatableMapping, DatatablePaginationMeta, DatatableRegistry,
     DatatableRequest, DatatableSort, DatatableSortInput, DatatableValue, GeneratedDatatableExport,
-    ModelDatatable, ProjectionDatatable,
+    Datatable, DatatableQuery,
 };
 
 pub use app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption, ForgeAppEnum};

@@ -114,9 +114,10 @@ pub use serde::{Deserialize, Serialize};
 
 pub use crate::datatable::{
     DatatableColumn, DatatableContext, DatatableExportDelivery, DatatableFilterField,
-    DatatableFilterInput, DatatableFilterKind, DatatableFilterOption, DatatableFilterRow,
-    DatatableJsonResponse, DatatableMapping, DatatableRegistry, DatatableRequest, DatatableSort,
-    DatatableSortInput, DatatableValue, GeneratedDatatableExport, ModelDatatable,
+    DatatableFilterInput, DatatableFilterKind, DatatableFilterOp, DatatableFilterOption,
+    DatatableFilterRow, DatatableFilterValue, DatatableJsonResponse, DatatableMapping,
+    DatatableRegistry, DatatableRequest, DatatableSort, DatatableSortInput, DatatableValue,
+    GeneratedDatatableExport, Datatable,
 };
 
 pub use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption, ForgeAppEnum};

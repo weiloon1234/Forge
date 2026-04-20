@@ -1,36 +1,33 @@
-use crate::database::{
-    ColumnRef, ComparisonOp, Condition, DbType, DbValue, Expr, Model, ModelQuery, OrderBy,
-};
+use crate::database::{ComparisonOp, Condition, DbType, DbValue, Expr, OrderBy};
 use crate::foundation::{Error, Result};
 use crate::support::{Date, DateTime, LocalDateTime};
 
-use super::column::DatatableColumn;
+use super::column::{DatatableColumn, DatatableFilterScope};
+use super::datatable_trait::DatatableQuery;
 use super::request::{
     DatatableFilterInput, DatatableFilterOp, DatatableFilterValue, DatatableSortInput,
 };
+use super::sort::DatatableSort;
 
 // ---------------------------------------------------------------------------
 // Auto-filter application
 // ---------------------------------------------------------------------------
 
-/// Apply structured filter inputs to a model query.
-///
-/// Only columns declared as `filterable` participate. Each filter generates
-/// the appropriate `Condition` using runtime `ColumnRef` construction.
-pub fn apply_auto_filters<M: Model>(
-    mut query: ModelQuery<M>,
+/// Apply structured filter inputs to a datatable query.
+pub fn apply_auto_filters<Row: 'static, Q>(
+    mut query: Q,
     filters: &[DatatableFilterInput],
-    columns: &[DatatableColumn<M>],
-    table_name: &str,
-) -> Result<ModelQuery<M>> {
+    columns: &[DatatableColumn<Row>],
+) -> Result<Q>
+where
+    Q: DatatableQuery<Row>,
+{
     for filter in filters {
-        // LikeAny is special — pipe-delimited field list
         if filter.op == DatatableFilterOp::LikeAny {
-            query = apply_like_any(query, filter, columns, table_name)?;
+            query = apply_like_any(query, filter, columns)?;
             continue;
         }
 
-        // Find the declared column
         let col = match columns.iter().find(|c| c.name == filter.field) {
             Some(c) if c.filterable => c,
             Some(_) => {
@@ -47,22 +44,29 @@ pub fn apply_auto_filters<M: Model>(
             }
         };
 
-        let col_ref = ColumnRef::new(table_name, &col.name).typed(col.db_type());
-        let col_expr = Expr::column(col_ref);
+        let target = col.filter_target().ok_or_else(|| {
+            Error::message(format!(
+                "column '{}' has no filter target; use filter_by(...) or filter_having(...)",
+                col.name
+            ))
+        })?;
 
-        let condition = build_filter_condition(&filter.op, col_expr, &filter.value, col.db_type())?;
-        query = query.where_(condition);
+        let condition =
+            build_filter_condition(&filter.op, target.expr.clone(), &filter.value, col.db_type())?;
+        query = apply_filter(query, target.scope, condition);
     }
 
     Ok(query)
 }
 
-fn apply_like_any<M: Model>(
-    query: ModelQuery<M>,
+fn apply_like_any<Row: 'static, Q>(
+    query: Q,
     filter: &DatatableFilterInput,
-    columns: &[DatatableColumn<M>],
-    table_name: &str,
-) -> Result<ModelQuery<M>> {
+    columns: &[DatatableColumn<Row>],
+) -> Result<Q>
+where
+    Q: DatatableQuery<Row>,
+{
     let text = match &filter.value {
         DatatableFilterValue::Text(s) => s.clone(),
         _ => return Err(Error::message("LikeAny requires a text value")),
@@ -71,15 +75,31 @@ fn apply_like_any<M: Model>(
     let pattern = format!("%{text}%");
     let field_names: Vec<&str> = filter.field.split('|').collect();
 
+    let mut scope = None;
     let mut conditions = Vec::new();
     for name in &field_names {
-        let col = match columns.iter().find(|c| c.name == *name) {
-            Some(c) if c.filterable => c,
-            _ => continue,
+        let Some(col) = columns.iter().find(|c| c.name == *name) else {
+            continue;
         };
-        let col_ref = ColumnRef::new(table_name, &col.name).typed(col.db_type());
+        if !col.filterable {
+            continue;
+        }
+        let Some(target) = col.filter_target() else {
+            continue;
+        };
+
+        if let Some(existing_scope) = scope {
+            if existing_scope != target.scope {
+                return Err(Error::message(
+                    "LikeAny cannot mix WHERE and HAVING filter targets",
+                ));
+            }
+        } else {
+            scope = Some(target.scope);
+        }
+
         conditions.push(Condition::compare(
-            Expr::column(col_ref),
+            target.expr.clone(),
             ComparisonOp::ILike,
             Expr::value(DbValue::Text(pattern.clone())),
         ));
@@ -89,12 +109,16 @@ fn apply_like_any<M: Model>(
         return Ok(query);
     }
 
-    Ok(query.where_(Condition::or(conditions)))
+    Ok(apply_filter(
+        query,
+        scope.expect("LikeAny scope should exist when conditions are present"),
+        Condition::or(conditions),
+    ))
 }
 
 fn build_filter_condition(
     op: &DatatableFilterOp,
-    col_expr: Expr,
+    target_expr: Expr,
     value: &DatatableFilterValue,
     db_type: DbType,
 ) -> Result<Condition> {
@@ -102,7 +126,7 @@ fn build_filter_condition(
         DatatableFilterOp::Eq => {
             let db_val = filter_value_to_db(value, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Eq,
                 Expr::value(db_val),
             ))
@@ -110,7 +134,7 @@ fn build_filter_condition(
         DatatableFilterOp::NotEq => {
             let db_val = filter_value_to_db(value, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::NotEq,
                 Expr::value(db_val),
             ))
@@ -119,7 +143,7 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let pattern = format!("%{text}%");
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::ILike,
                 Expr::value(DbValue::Text(pattern)),
             ))
@@ -127,7 +151,7 @@ fn build_filter_condition(
         DatatableFilterOp::Gt => {
             let db_val = filter_value_to_db(value, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Gt,
                 Expr::value(db_val),
             ))
@@ -135,7 +159,7 @@ fn build_filter_condition(
         DatatableFilterOp::Gte => {
             let db_val = filter_value_to_db(value, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Gte,
                 Expr::value(db_val),
             ))
@@ -143,7 +167,7 @@ fn build_filter_condition(
         DatatableFilterOp::Lt => {
             let db_val = filter_value_to_db(value, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Lt,
                 Expr::value(db_val),
             ))
@@ -151,7 +175,7 @@ fn build_filter_condition(
         DatatableFilterOp::Lte => {
             let db_val = filter_value_to_db(value, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Lte,
                 Expr::value(db_val),
             ))
@@ -163,7 +187,7 @@ fn build_filter_condition(
                 .map(|v| text_to_db_value(v, db_type))
                 .collect::<Result<Vec<_>>>()?;
             Ok(Condition::InList {
-                expr: col_expr,
+                expr: target_expr,
                 values: db_values,
             })
         }
@@ -171,7 +195,7 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Eq,
                 Expr::value(db_val),
             ))
@@ -180,7 +204,7 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Gte,
                 Expr::value(db_val),
             ))
@@ -189,7 +213,7 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Lte,
                 Expr::value(db_val),
             ))
@@ -198,7 +222,7 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Eq,
                 Expr::value(db_val),
             ))
@@ -207,7 +231,7 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Gte,
                 Expr::value(db_val),
             ))
@@ -216,37 +240,34 @@ fn build_filter_condition(
             let text = expect_text(value)?;
             let db_val = text_to_db_value(&text, db_type)?;
             Ok(Condition::compare(
-                col_expr,
+                target_expr,
                 ComparisonOp::Lte,
                 Expr::value(db_val),
             ))
         }
-        DatatableFilterOp::Has => {
-            let col_ref = match col_expr {
-                Expr::Column(col_ref) => col_ref,
-                _ => unreachable!("column expression should be ColumnRef"),
-            };
-            Ok(Condition::IsNotNull(col_ref))
-        }
-        DatatableFilterOp::HasLike => {
-            let text = expect_text(value)?;
-            let pattern = format!("%{text}%");
-            let col_ref = match col_expr {
-                Expr::Column(col_ref) => col_ref,
-                _ => unreachable!("column expression should be ColumnRef"),
-            };
-            let not_null = Condition::IsNotNull(col_ref.clone());
-            let like = Condition::compare(
-                Expr::column(col_ref),
-                ComparisonOp::ILike,
-                Expr::value(DbValue::Text(pattern)),
-            );
-            Ok(Condition::and(vec![not_null, like]))
-        }
-        DatatableFilterOp::LikeAny => {
-            // Handled separately in apply_like_any
-            Err(Error::message("LikeAny should be handled separately"))
-        }
+        DatatableFilterOp::Has => match target_expr {
+            Expr::Column(col_ref) => Ok(Condition::IsNotNull(col_ref)),
+            _ => Err(Error::message(
+                "Has filters require a column expression target",
+            )),
+        },
+        DatatableFilterOp::HasLike => match target_expr {
+            Expr::Column(col_ref) => {
+                let text = expect_text(value)?;
+                let pattern = format!("%{text}%");
+                let not_null = Condition::IsNotNull(col_ref.clone());
+                let like = Condition::compare(
+                    Expr::column(col_ref),
+                    ComparisonOp::ILike,
+                    Expr::value(DbValue::Text(pattern)),
+                );
+                Ok(Condition::and(vec![not_null, like]))
+            }
+            _ => Err(Error::message(
+                "HasLike filters require a column expression target",
+            )),
+        },
+        DatatableFilterOp::LikeAny => Err(Error::message("LikeAny should be handled separately")),
     }
 }
 
@@ -254,15 +275,15 @@ fn build_filter_condition(
 // Sort application
 // ---------------------------------------------------------------------------
 
-/// Apply sort inputs to a model query.
-///
-/// Only columns declared as `sortable` participate.
-pub fn apply_sorts<M: Model>(
-    mut query: ModelQuery<M>,
+/// Apply sort inputs to a datatable query.
+pub fn apply_sorts<Row: 'static, Q>(
+    mut query: Q,
     sorts: &[DatatableSortInput],
-    columns: &[DatatableColumn<M>],
-    table_name: &str,
-) -> Result<ModelQuery<M>> {
+    columns: &[DatatableColumn<Row>],
+) -> Result<Q>
+where
+    Q: DatatableQuery<Row>,
+{
     for sort in sorts {
         let col = match columns.iter().find(|c| c.name == sort.field) {
             Some(c) if c.sortable => c,
@@ -280,30 +301,36 @@ pub fn apply_sorts<M: Model>(
             }
         };
 
-        let col_ref = ColumnRef::new(table_name, &col.name).typed(col.db_type());
+        let expr = col.sort_expr().cloned().ok_or_else(|| {
+            Error::message(format!(
+                "column '{}' has no sort target; use sort_by(...) to define one",
+                col.name
+            ))
+        })?;
         let order_by = OrderBy {
-            expr: Expr::column(col_ref),
+            expr,
             direction: sort.direction,
         };
-        query = query.order_by(order_by);
+        query = query.apply_order(order_by);
     }
 
     Ok(query)
 }
 
 /// Apply default sort declarations (used when request has no sort).
-pub fn apply_default_sorts<M: Model>(
-    mut query: ModelQuery<M>,
-    sorts: &[super::sort::DatatableSort<M>],
-    table_name: &str,
-) -> Result<ModelQuery<M>> {
+pub fn apply_default_sorts<Row: 'static, Q>(
+    mut query: Q,
+    sorts: &[DatatableSort<Row>],
+) -> Result<Q>
+where
+    Q: DatatableQuery<Row>,
+{
     for sort in sorts {
-        let col_ref = ColumnRef::new(table_name, &sort.column_name);
         let order_by = OrderBy {
-            expr: Expr::column(col_ref),
+            expr: sort.expr.clone(),
             direction: sort.direction,
         };
-        query = query.order_by(order_by);
+        query = query.apply_order(order_by);
     }
     Ok(query)
 }
@@ -311,6 +338,16 @@ pub fn apply_default_sorts<M: Model>(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn apply_filter<Row: 'static, Q>(query: Q, scope: DatatableFilterScope, condition: Condition) -> Q
+where
+    Q: DatatableQuery<Row>,
+{
+    match scope {
+        DatatableFilterScope::Where => query.apply_where(condition),
+        DatatableFilterScope::Having => query.apply_having(condition),
+    }
+}
 
 fn expect_text(value: &DatatableFilterValue) -> Result<String> {
     match value {
@@ -396,5 +433,45 @@ fn number_to_db_value(n: i64, db_type: DbType) -> Result<DbValue> {
         DbType::Float32 => Ok(DbValue::Float32(n as f32)),
         DbType::Float64 => Ok(DbValue::Float64(n as f64)),
         _ => Ok(DbValue::Int64(n)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_auto_filters;
+    use crate::database::{Expr, ProjectionQuery};
+    use crate::datatable::{DatatableColumn, DatatableFilterInput, DatatableFilterOp, DatatableFilterValue};
+
+    #[derive(Clone, serde::Serialize, forge_macros::Projection)]
+    struct ReportRow {
+        total: i64,
+        merchant_id: i64,
+    }
+
+    #[test]
+    fn like_any_rejects_mixed_where_and_having_targets() {
+        let columns = vec![
+            DatatableColumn::field(ReportRow::MERCHANT_ID)
+                .filter_by(ReportRow::MERCHANT_ID.column_ref()),
+            DatatableColumn::field(ReportRow::TOTAL)
+                .filter_having(Expr::function("SUM", [Expr::column(ReportRow::TOTAL.column_ref())])),
+        ];
+        let filters = vec![DatatableFilterInput {
+            field: "merchant_id|total".to_string(),
+            op: DatatableFilterOp::LikeAny,
+            value: DatatableFilterValue::Text("10".to_string()),
+        }];
+
+        let result =
+            apply_auto_filters(ProjectionQuery::<ReportRow>::table("orders"), &filters, &columns);
+        let error = match result {
+            Ok(_) => panic!("mixed scopes should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("LikeAny cannot mix WHERE and HAVING"),
+            "unexpected error: {error}"
+        );
     }
 }

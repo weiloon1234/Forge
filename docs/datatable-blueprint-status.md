@@ -25,7 +25,7 @@ All datatable modules live under `src/datatable/`:
 | `filter_meta.rs` | `DatatableFilterField`, `DatatableFilterRow`, `DatatableFilterOption` |
 | `filter_engine.rs` | Auto-filter application + legacy param normalization |
 | `context.rs` | `DatatableContext` (scoped execution context) |
-| `datatable_trait.rs` | `ModelDatatable` + `ProjectionDatatable` traits |
+| `datatable_trait.rs` | Unified `Datatable` + sealed `DatatableQuery` traits |
 | `response.rs` | `DatatableJsonResponse`, column/pagination meta |
 | `json.rs` | JSON output mode (paginated) |
 | `download.rs` | XLSX download mode (fully implemented with `rust_xlsxwriter`) |
@@ -38,11 +38,11 @@ All datatable modules live under `src/datatable/`:
 
 ### Core Types (Blueprint: Columns and Mappings)
 
-- `DatatableColumn<M>` with `::field(column)` constructor capturing column name and db type
-- Builder methods: `.sortable()`, `.filterable()`, `.exportable()`, `.label()`, `.relation()`
+- `DatatableColumn<Row>` with `::field(column_or_projection_field)` constructor
+- Builder methods: `.sortable()`, `.sort_by()`, `.filterable()`, `.filter_by()`, `.filter_having()`, `.exportable()`, `.label()`, `.relation()`
 - `DatatableMapping<M>` with `::new(name, |row, ctx| ...)` for computed/override fields
 - `DatatableValue` enum with constructors and `Into<serde_json::Value>` conversion
-- `DatatableSort<M>` with typed `::asc(column)` / `::desc(column)` constructors
+- `DatatableSort<Row>` with typed `::asc(field)` / `::desc(field)` constructors
 
 ### Request Shape (Blueprint: Request Shape)
 
@@ -65,15 +65,15 @@ All datatable modules live under `src/datatable/`:
 
 - Legacy param normalization: `normalize_legacy_params()` supporting f-like-, f-date-, f-gte-, etc.
 - `DatatableRequest::from_query_params()` for legacy input
-- `apply_auto_filters()` building `Condition` from `ColumnRef` + `DbType`
-- `apply_sorts()` with column validation against declared sortable columns
+- `apply_auto_filters()` building `Condition` from declared filter expressions + `DbType`
+- `apply_sorts()` with column validation against declared sort expressions
 - Supports all filter ops: Eq, Like, Gt/Gte/Lt/Lte, Date/DateFrom/DateTo, DateTime ranges, In, Has, HasLike, LikeAny
 
 ### Traits (Blueprint: Core Datatable Shape)
 
-- `ModelDatatable` trait with associated `Model` type, `ID`, `query()`, `columns()`, `mappings()`, `filters()`, `available_filters()`, `default_sort()`
+- Unified `Datatable` trait with associated `Row` and `Query`, plus `query()`, `columns()`, `mappings()`, `filters()`, `available_filters()`, `default_sort()`
 - Provided methods: `json()`, `download()`, `queue_email()` delegating to output modules
-- `ProjectionDatatable` trait as escape hatch for grouped/aggregate tables
+- `DatatableQuery<Row>` sealed adapter implemented for `ModelQuery<Row>` and `ProjectionQuery<Row>`
 - `DatatableContext` with `app`, `actor`, `request`, `locale`, `timezone` + `t()` helper
 
 ### Output Modes (Blueprint: Output Modes)
@@ -94,7 +94,7 @@ All datatable modules live under `src/datatable/`:
 - `DatatableRegistry` with `get(id)` and `ids()` for type-erased lookup
 - `DatatableRegistryBuilder` with shared-handle pattern (Arc<Mutex<>>)
 - `DynDatatable` trait as type-erased interface
-- `DatatableAdapter<D>` bridging `ModelDatatable` to `DynDatatable`
+- `DatatableAdapter<D>` bridging `Datatable` to `DynDatatable`
 - `ServiceRegistrar::register_datatable::<D>()` for provider registration
 - `AppContext::datatables()` for runtime resolution
 

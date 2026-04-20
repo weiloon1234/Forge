@@ -1,35 +1,43 @@
 use std::marker::PhantomData;
 
-use crate::database::{Column, OrderDirection};
+use crate::database::{Expr, OrderDirection};
+
+use super::column::DatatableFieldRef;
 
 /// A default sort declaration for a datatable column.
-///
-/// Constructed from typed `Column<M, T>` references.
-pub struct DatatableSort<M> {
-    pub column_name: String,
+pub struct DatatableSort<Row> {
+    pub field_name: String,
     pub direction: OrderDirection,
-    _marker: PhantomData<M>,
+    pub(crate) expr: Expr,
+    _marker: PhantomData<Row>,
 }
 
-impl<M> DatatableSort<M> {
-    pub fn asc<T>(column: Column<M, T>) -> Self
+impl<Row> DatatableSort<Row> {
+    pub fn asc(field: impl Into<DatatableFieldRef<Row>>) -> Self
     where
-        M: 'static,
+        Row: 'static,
     {
-        Self {
-            column_name: column.name().to_string(),
-            direction: OrderDirection::Asc,
-            _marker: PhantomData,
-        }
+        Self::from_field(field.into(), OrderDirection::Asc)
     }
 
-    pub fn desc<T>(column: Column<M, T>) -> Self
+    pub fn desc(field: impl Into<DatatableFieldRef<Row>>) -> Self
     where
-        M: 'static,
+        Row: 'static,
     {
+        Self::from_field(field.into(), OrderDirection::Desc)
+    }
+
+    fn from_field(field: DatatableFieldRef<Row>, direction: OrderDirection) -> Self {
+        let expr = field.sort_expr.unwrap_or_else(|| {
+            panic!(
+                "datatable sort for `{}` requires a sort target",
+                field.name
+            )
+        });
         Self {
-            column_name: column.name().to_string(),
-            direction: OrderDirection::Desc,
+            field_name: field.name,
+            direction,
+            expr,
             _marker: PhantomData,
         }
     }

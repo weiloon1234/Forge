@@ -89,7 +89,7 @@ impl Job for DatatableExportJob {
 // ---------------------------------------------------------------------------
 
 /// Dispatch a queued datatable export job.
-pub async fn dispatch_export<D: super::datatable_trait::ModelDatatable + ?Sized>(
+pub async fn dispatch_export<D: super::datatable_trait::Datatable + ?Sized>(
     app: &AppContext,
     actor: Option<&Actor>,
     request: DatatableRequest,

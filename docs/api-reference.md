@@ -243,7 +243,7 @@ fn register_readiness_check<I, C>(id: I, check: C) -> Result<()>
 fn register_storage_driver(name: &str, factory: StorageDriverFactory) -> Result<()>
 fn register_email_driver(name: &str, factory: EmailDriverFactory) -> Result<()>
 fn register_notification_channel<I, N>(id: I, channel: N) -> Result<()>
-fn register_datatable<D: ModelDatatable>() -> Result<()>
+fn register_datatable<D: Datatable>() -> Result<()>
 ```
 
 ---
@@ -2099,7 +2099,7 @@ fn listen_event<E: Event, L: EventListener<E>>(&mut self, listener: L) -> &mut S
 fn register_job<J: Job>(&mut self) -> &mut Self
 fn register_job_middleware<M: JobMiddleware>(&mut self, middleware: M) -> &mut Self
 fn register_notification_channel<I: Into<NotificationChannelId>, N: NotificationChannel>(&mut self, id: I, channel: N) -> &mut Self
-fn register_datatable<D: ModelDatatable>(&mut self) -> &mut Self
+fn register_datatable<D: Datatable>(&mut self) -> &mut Self
 fn register_readiness_check<I: Into<ProbeId>, C: ReadinessCheck>(&mut self, id: I, check: C) -> &mut Self
 fn register_storage_driver(&mut self, name: impl Into<String>, factory: StorageDriverFactory) -> &mut Self
 fn register_email_driver(&mut self, name: impl Into<String>, factory: EmailDriverFactory) -> &mut Self
@@ -2153,26 +2153,27 @@ Server-side filtering, sorting, pagination, export.
 ### Traits
 
 ```rust
-trait ModelDatatable: Send + Sync + 'static {
+trait DatatableQuery<Row>: Clone + Send + Sync + 'static {
+    fn apply_where(self, condition: Condition) -> Self;
+    fn apply_having(self, condition: Condition) -> Self;
+    fn apply_order(self, order: OrderBy) -> Self;
+    async fn get(&self, executor: &E) -> Result<Collection<Row>>;
+    async fn paginate(&self, executor: &E, pagination: Pagination) -> Result<Paginated<Row>>;
+}
+
+trait Datatable: Send + Sync + 'static {
     const ID: &'static str;
-    type Model: Model + Serialize;
-    fn query(ctx: &DatatableContext) -> ModelQuery<Self::Model>;
-    fn columns() -> Vec<DatatableColumn<Self::Model>>;
-    fn mappings() -> Vec<DatatableMapping<Self::Model>> { vec![] }
-    async fn filters(ctx: &DatatableContext, query: ModelQuery<Self::Model>) -> Result<ModelQuery<Self::Model>> { Ok(query) }
+    type Row: Serialize + Send + Sync + 'static;
+    type Query: DatatableQuery<Self::Row>;
+    fn query(ctx: &DatatableContext) -> Self::Query;
+    fn columns() -> Vec<DatatableColumn<Self::Row>>;
+    fn mappings() -> Vec<DatatableMapping<Self::Row>> { vec![] }
+    async fn filters(ctx: &DatatableContext, query: Self::Query) -> Result<Self::Query> { Ok(query) }
     async fn available_filters(ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> { Ok(vec![]) }
-    fn default_sort() -> Vec<DatatableSort<Self::Model>> { vec![] }
+    fn default_sort() -> Vec<DatatableSort<Self::Row>> { vec![] }
     async fn json(app, actor, request) -> Result<DatatableJsonResponse>;
     async fn download(app, actor, request) -> Result<Response>;
     async fn queue_email(app, actor, request, recipient) -> Result<DatatableExportAccepted>;
-}
-
-trait ProjectionDatatable: Send + Sync + 'static {
-    const ID: &'static str;
-    type Row: Clone + Send + Sync + Serialize + 'static;
-    fn query(ctx: &DatatableContext) -> ProjectionQuery<Self::Row>;
-    fn columns() -> Vec<DatatableColumn<Self::Row>>;
-    fn mappings() -> Vec<DatatableMapping<Self::Row>> { vec![] }
 }
 
 trait DatatableExportDelivery: Send + Sync + 'static {

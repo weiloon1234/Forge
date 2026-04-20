@@ -79,15 +79,12 @@ fn expand_enum_with_ts(
 ) -> TokenStream {
     match syn::parse::<syn::DeriveInput>(input) {
         Ok(parsed) => {
-            let ts_tokens = typescript::expand(parsed.clone());
-            let enum_values_tokens = typescript::expand_enum_values(&parsed);
+            let app_enum_tokens = typescript::expand_app_enum(&parsed);
             match f(parsed) {
                 Ok(main_tokens) => {
-                    let ts = ts_tokens.unwrap_or_default();
                     let combined = quote::quote! {
                         #main_tokens
-                        #ts
-                        #enum_values_tokens
+                        #app_enum_tokens
                     };
                     combined.into()
                 }

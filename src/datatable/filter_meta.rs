@@ -1,7 +1,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
-use crate::app_enum::{EnumKey, ForgeAppEnum};
+use crate::app_enum::{EnumKey, EnumOption, ForgeAppEnum};
 use crate::support::Collection;
 
 use super::column::DatatableFieldRef;
@@ -66,6 +66,7 @@ impl DatatableFilterBinding {
 #[ts(export)]
 pub struct DatatableFilterOption {
     pub value: String,
+    /// For AppEnum-backed filters this carries the translation key.
     pub label: String,
 }
 
@@ -81,6 +82,26 @@ impl DatatableFilterOption {
             value: value.into(),
             label: label.into(),
         }
+    }
+}
+
+impl From<EnumOption> for DatatableFilterOption {
+    fn from(option: EnumOption) -> Self {
+        let value = match option.value {
+            EnumKey::String(value) => value,
+            EnumKey::Int(value) => value.to_string(),
+        };
+
+        Self {
+            value,
+            label: option.label_key,
+        }
+    }
+}
+
+impl From<Collection<EnumOption>> for Collection<DatatableFilterOption> {
+    fn from(options: Collection<EnumOption>) -> Self {
+        options.map_into(Into::into)
     }
 }
 
@@ -312,6 +333,11 @@ impl DatatableFilterField {
         self
     }
 
+    /// Populate select options directly from an `AppEnum`.
+    pub fn enum_options<E: ForgeAppEnum>(self) -> Self {
+        self.options(E::options())
+    }
+
     pub fn help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
@@ -357,6 +383,10 @@ impl DatatableFilterField {
 
     /// Create a select filter with options auto-populated from an `AppEnum`.
     ///
+    /// The option label preserves the enum's label metadata unchanged. For
+    /// default `AppEnum` usage this means the datatable payload carries the
+    /// translation key such as `enum.order_status.pending`.
+    ///
     /// Works with both string-backed (`{ Pending, Completed }`) and
     /// int-backed (`{ Pending = 0, Completed = 1 }`) enums.
     ///
@@ -364,18 +394,7 @@ impl DatatableFilterField {
     /// DatatableFilterField::enum_select::<CountryStatus>("status", "Status")
     /// ```
     pub fn enum_select<E: ForgeAppEnum>(name: impl Into<String>, label: impl Into<String>) -> Self {
-        let options: Vec<DatatableFilterOption> = E::options()
-            .iter()
-            .map(|opt| {
-                let value = match &opt.value {
-                    EnumKey::String(s) => s.clone(),
-                    EnumKey::Int(i) => i.to_string(),
-                };
-                DatatableFilterOption::new(value.clone(), value)
-            })
-            .collect();
-
-        Self::select(name, label).options(options)
+        Self::select(name, label).options(E::options())
     }
 }
 
@@ -433,10 +452,23 @@ mod tests {
 
     use serde_json::json;
 
+    use crate::app_enum::ForgeAppEnum;
     use crate::database::{DbType, ProjectionField};
     use crate::datatable::{DatatableFilterOp, DatatableFilterValueKind};
 
     use super::DatatableFilterField;
+
+    #[derive(Clone, Debug, PartialEq, Eq, crate::AppEnum)]
+    enum PaymentStatus {
+        Pending,
+        Completed,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, crate::AppEnum)]
+    enum PaymentPriority {
+        Low = 1,
+        High = 2,
+    }
 
     #[derive(Debug, serde::Serialize, crate::Model)]
     #[forge(model = "datatable_filter_models", primary_key_strategy = "manual")]
@@ -558,6 +590,58 @@ mod tests {
         assert_eq!(
             decimal_min.binding.value_kind,
             DatatableFilterValueKind::Decimal
+        );
+    }
+
+    #[test]
+    fn select_options_accepts_enum_options_directly() {
+        let filter =
+            DatatableFilterField::select("status", "Status").options(PaymentStatus::options());
+
+        assert_eq!(
+            serde_json::to_value(&filter).unwrap()["options"],
+            json!({
+                "items": [
+                    {
+                        "value": "pending",
+                        "label": "enum.payment_status.pending"
+                    },
+                    {
+                        "value": "completed",
+                        "label": "enum.payment_status.completed"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn enum_options_builder_uses_enum_metadata() {
+        let filter =
+            DatatableFilterField::select("status", "Status").enum_options::<PaymentStatus>();
+
+        assert_eq!(filter.options[0].label, "enum.payment_status.pending");
+        assert_eq!(filter.options[1].label, "enum.payment_status.completed");
+    }
+
+    #[test]
+    fn enum_select_preserves_label_keys_and_stringifies_int_values() {
+        let filter = DatatableFilterField::enum_select::<PaymentPriority>("priority", "Priority");
+
+        assert_eq!(
+            serde_json::to_value(&filter).unwrap()["options"],
+            json!({
+                "items": [
+                    {
+                        "value": "1",
+                        "label": "enum.payment_priority.low"
+                    },
+                    {
+                        "value": "2",
+                        "label": "enum.payment_priority.high"
+                    }
+                ]
+            })
         );
     }
 

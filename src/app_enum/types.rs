@@ -54,11 +54,11 @@ mod tests {
             options: Collection::from(vec![
                 EnumOption {
                     value: EnumKey::String("pending".into()),
-                    label_key: "Pending".into(),
+                    label_key: "enum.status.pending".into(),
                 },
                 EnumOption {
                     value: EnumKey::String("active".into()),
-                    label_key: "Active".into(),
+                    label_key: "enum.status.active".into(),
                 },
             ]),
         };

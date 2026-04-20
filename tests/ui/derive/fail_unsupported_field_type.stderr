@@ -12,18 +12,18 @@ help: the trait `forge::ForgeAppEnum` is not implemented for `CustomType`
 help: the following other types implement trait `forge::ForgeAppEnum`
   --> src/jobs/mod.rs
    |
-   | #[derive(Clone, Copy, Debug, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS)]
+   | #[derive(Clone, Copy, Debug, PartialEq, Eq, forge_macros::AppEnum)]
    |                                             ^^^^^^^^^^^^^^^^^^^^^ `JobHistoryStatus`
    |
   ::: src/countries/mod.rs
    |
-   |     Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS,
-   |                                           ^^^^^^^^^^^^^^^^^^^^^ `CountryStatus`
+   | #[derive(Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum)]
+   |                                                ^^^^^^^^^^^^^^^^^^^^^ `CountryStatus`
    |
   ::: src/settings/mod.rs
    |
-   |     Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum, ts_rs::TS, forge_macros::TS,
-   |                                           ^^^^^^^^^^^^^^^^^^^^^ `SettingType`
+   | #[derive(Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum)]
+   |                                                ^^^^^^^^^^^^^^^^^^^^^ `SettingType`
    = note: this error originates in the derive macro `forge_macros::AppEnum` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `CustomType: FromDbValue` is not satisfied

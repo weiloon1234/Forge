@@ -13,7 +13,7 @@ Define enums that automatically serialize, store in the database, validate, and 
 ```rust
 #[derive(Clone, Copy, AppEnum)]
 enum OrderStatus {
-    Pending,          // key: "pending",  label: "Pending",  DB: TEXT
+    Pending,          // key: "pending",  label_key: "enum.order_status.pending",  DB: TEXT
     Processing,       // key: "processing"
     Shipped,          // key: "shipped"
     Delivered,        // key: "delivered"
@@ -26,7 +26,7 @@ enum OrderStatus {
 ```rust
 #[derive(Clone, Copy, AppEnum)]
 enum Priority {
-    Low = 1,          // key: 1,  label: "Low",  DB: INT4
+    Low = 1,          // key: 1,  label_key: "enum.priority.low",  DB: INT4
     Medium = 2,
     High = 3,
     Critical = 4,
@@ -37,19 +37,19 @@ enum Priority {
 
 ```rust
 #[derive(Clone, Copy, AppEnum)]
-#[forge(id = "ticket_status")]                    // override enum ID (default: snake_case)
+#[forge(label_prefix = "admin.tickets.statuses")] // override the default enum.{id} namespace
 enum TicketStatus {
-    #[forge(key = "open")]                        // override key
-    Open,
-    #[forge(label_key = "Under Review")]          // override label
+    Open,                                         // label_key: "admin.tickets.statuses.open"
     Reviewing,
+    #[forge(key = "resolved")]                    // override stored key
     #[forge(aliases = ["done", "finished"])]      // parse alternatives
     Resolved,
+    #[forge(label_key = "legacy.ticket_status.closed")] // override one variant only
     Closed,
 }
 
 // TicketStatus::parse_key("done")    → Some(TicketStatus::Resolved)
-// TicketStatus::parse_key("open")    → Some(TicketStatus::Open)
+// TicketStatus::Open.label_key()     → "admin.tickets.statuses.open"
 ```
 
 ### What `#[derive(AppEnum)]` Gives You
@@ -104,7 +104,7 @@ OrderStatus::options()             // Collection<EnumOption> with key + label
 OrderStatus::meta()                // EnumMeta { id, key_kind, options }
 OrderStatus::key_kind()            // EnumKeyKind::String
 OrderStatus::Pending.key()         // EnumKey::String("pending")
-OrderStatus::Pending.label_key()   // "Pending"
+OrderStatus::Pending.label_key()   // "enum.order_status.pending"
 OrderStatus::parse_key("shipped")  // Some(OrderStatus::Shipped)
 ```
 

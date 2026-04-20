@@ -3,15 +3,21 @@
 //! Types that derive `ApiSchema`, `AppEnum`, or `forge::TS` are automatically
 //! registered for TypeScript export via the `inventory` crate.
 //!
-//! `AppEnum` types also export a runtime values array:
+//! `AppEnum` types also export runtime metadata:
 //! ```ts
 //! export type CountryStatus = "enabled" | "disabled";
-//! export const CountryStatusValues: CountryStatus[] = ["enabled", "disabled"];
+//! export const CountryStatusValues = ["enabled", "disabled"] as const;
+//! export const CountryStatusOptions = [
+//!   { value: "enabled", labelKey: "enum.country_status.enabled" },
+//!   { value: "disabled", labelKey: "enum.country_status.disabled" },
+//! ] as const;
 //! ```
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta};
 use crate::cli::CommandRegistrar;
 use crate::foundation::{Error, Result};
 use crate::support::CommandId;
@@ -26,13 +32,79 @@ pub struct TsType {
 
 inventory::collect!(TsType);
 
-/// A registered AppEnum with runtime values for TypeScript export.
-pub struct TsEnumValues {
+/// A registered AppEnum with runtime metadata for TypeScript export.
+pub struct TsAppEnum {
     pub name: &'static str,
-    pub values_fn: fn() -> Vec<String>,
+    pub meta_fn: fn() -> EnumMeta,
 }
 
-inventory::collect!(TsEnumValues);
+inventory::collect!(TsAppEnum);
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("string literal serialization should not fail")
+}
+
+fn enum_key_kind_literal(kind: EnumKeyKind) -> &'static str {
+    match kind {
+        EnumKeyKind::String => "string",
+        EnumKeyKind::Int => "int",
+    }
+}
+
+fn enum_key_literal(value: &EnumKey) -> String {
+    match value {
+        EnumKey::String(value) => json_string(value),
+        EnumKey::Int(value) => value.to_string(),
+    }
+}
+
+fn render_array(items: &[String]) -> String {
+    if items.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[\n  {},\n]", items.join(",\n  "))
+    }
+}
+
+fn render_app_enum(name: &str, meta: &EnumMeta) -> String {
+    let value_literals: Vec<String> = meta
+        .options
+        .iter()
+        .map(|option| enum_key_literal(&option.value))
+        .collect();
+    let type_union = if value_literals.is_empty() {
+        "never".to_string()
+    } else {
+        value_literals.join(" | ")
+    };
+    let option_literals: Vec<String> = meta
+        .options
+        .iter()
+        .map(|option| {
+            format!(
+                "{{ value: {}, labelKey: {} }}",
+                enum_key_literal(&option.value),
+                json_string(&option.label_key),
+            )
+        })
+        .collect();
+
+    format!(
+        "// Auto-generated from AppEnum. Do not edit.\n\n\
+         export type {name} = {type_union};\n\n\
+         export const {name}Values = {} as const;\n\n\
+         export const {name}Options = {} as const;\n\n\
+         export const {name}Meta = {{\n\
+           id: {},\n\
+           keyKind: {},\n\
+           options: {name}Options,\n\
+         }} as const;\n",
+        render_array(&value_literals),
+        render_array(&option_literals),
+        json_string(&meta.id),
+        json_string(enum_key_kind_literal(meta.key_kind)),
+    )
+}
 
 /// Export all registered TypeScript types to a directory.
 pub fn export_all(dir: &Path) -> Result<()> {
@@ -55,41 +127,26 @@ pub fn export_all(dir: &Path) -> Result<()> {
         names.push(ts_type.name);
     }
 
-    // Rewrite AppEnum files entirely — ts-rs may generate wrong casing,
-    // so we regenerate from ForgeAppEnum::options() which is always correct.
-    for enum_vals in inventory::iter::<TsEnumValues> {
-        let file_path = dir.join(format!("{}.ts", enum_vals.name));
-        let values = (enum_vals.values_fn)();
-        let type_union = values
-            .iter()
-            .map(|v| format!("\"{}\"", v))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let array_items = values
-            .iter()
-            .map(|v| format!("\"{}\"", v))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let content = format!(
-            "// Auto-generated from AppEnum. Do not edit.\n\n\
-             export type {} = {};\n\n\
-             export const {}Values: {}[] = [{}];\n",
-            enum_vals.name, type_union, enum_vals.name, enum_vals.name, array_items
-        );
+    // Rewrite AppEnum files entirely — if ts-rs also emitted an enum file,
+    // the metadata-based AppEnum export owns the final file content.
+    for app_enum in inventory::iter::<TsAppEnum> {
+        let file_path = dir.join(format!("{}.ts", app_enum.name));
+        let content = render_app_enum(app_enum.name, &(app_enum.meta_fn)());
         std::fs::write(&file_path, content).map_err(Error::other)?;
+        names.push(app_enum.name);
     }
 
     names.sort();
     names.dedup();
 
-    // Generate barrel index.ts — export types + enum value constants
-    let enum_names: Vec<&str> = inventory::iter::<TsEnumValues>().map(|e| e.name).collect();
+    // Generate barrel index.ts — export types + AppEnum runtime metadata.
+    let enum_names: HashSet<&str> = inventory::iter::<TsAppEnum>().map(|e| e.name).collect();
 
     let mut barrel = String::from("// Auto-generated barrel. Do not edit.\n");
     for name in &names {
         if enum_names.contains(name) {
             barrel.push_str(&format!(
-                "export {{ type {name}, {name}Values }} from \"./{name}\";\n"
+                "export {{ type {name}, {name}Values, {name}Options, {name}Meta }} from \"./{name}\";\n"
             ));
         } else {
             barrel.push_str(&format!("export type {{ {name} }} from \"./{name}\";\n"));
@@ -137,6 +194,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::export_all;
+
+    #[derive(Clone, Debug, PartialEq, Eq, crate::AppEnum)]
+    enum MinimalExportStatus {
+        Pending,
+        Completed,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, crate::AppEnum)]
+    enum MinimalExportPriority {
+        Low = 1,
+        High = 2,
+    }
 
     #[test]
     fn exports_framework_typescript_helpers() {
@@ -263,10 +332,53 @@ mod tests {
             "did not expect bigint in DatatablePaginationMeta.ts:\n{datatable_pagination_meta}"
         );
 
+        let minimal_status = fs::read_to_string(dir.path().join("MinimalExportStatus.ts")).unwrap();
+        assert!(
+            minimal_status
+                .contains("export type MinimalExportStatus = \"pending\" | \"completed\";"),
+            "expected MinimalExportStatus.ts to export a string union:\n{minimal_status}"
+        );
+        assert!(
+            minimal_status.contains("export const MinimalExportStatusValues = ["),
+            "expected MinimalExportStatus.ts to export Values:\n{minimal_status}"
+        );
+        assert!(
+            minimal_status.contains(
+                "{ value: \"pending\", labelKey: \"enum.minimal_export_status.pending\" }"
+            ),
+            "expected MinimalExportStatus.ts to export option metadata:\n{minimal_status}"
+        );
+        assert!(
+            minimal_status.contains("keyKind: \"string\""),
+            "expected MinimalExportStatus.ts to expose string keyKind:\n{minimal_status}"
+        );
+
+        let minimal_priority =
+            fs::read_to_string(dir.path().join("MinimalExportPriority.ts")).unwrap();
+        assert!(
+            minimal_priority.contains("export type MinimalExportPriority = 1 | 2;"),
+            "expected MinimalExportPriority.ts to export a numeric union:\n{minimal_priority}"
+        );
+        assert!(
+            minimal_priority
+                .contains("{ value: 1, labelKey: \"enum.minimal_export_priority.low\" }"),
+            "expected MinimalExportPriority.ts to keep numeric option values:\n{minimal_priority}"
+        );
+        assert!(
+            minimal_priority.contains("keyKind: \"int\""),
+            "expected MinimalExportPriority.ts to expose int keyKind:\n{minimal_priority}"
+        );
+
         let index = fs::read_to_string(dir.path().join("index.ts")).unwrap();
         assert!(
             index.contains("export type { WsTokenResponse } from \"./WsTokenResponse\";"),
             "expected index.ts to re-export WsTokenResponse:\n{index}"
+        );
+        assert!(
+            index.contains(
+                "export { type MinimalExportStatus, MinimalExportStatusValues, MinimalExportStatusOptions, MinimalExportStatusMeta } from \"./MinimalExportStatus\";"
+            ),
+            "expected index.ts to re-export AppEnum metadata:\n{index}"
         );
     }
 }

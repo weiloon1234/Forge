@@ -104,6 +104,7 @@ struct DatatableFilterField
   fn datetime(name: impl Into<String>, label: impl Into<String>) -> Self
   fn placeholder(self, placeholder: impl Into<String>) -> Self
   fn options<I>(self, options: I) -> Self
+  fn enum_options<E: ForgeAppEnum>(self) -> Self
   fn help(self, help: impl Into<String>) -> Self
   fn nullable(self) -> Self
   fn server_field<Row, F>(self, field: F) -> Self

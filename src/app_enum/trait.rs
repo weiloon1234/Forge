@@ -7,8 +7,9 @@ pub trait ForgeAppEnum: Sized + Clone + Send + Sync + 'static {
     /// Text for string-backed, Int32 for int-backed.
     const DB_TYPE: DbType;
 
-    /// The enum identifier (for metadata/export grouping).
-    /// Defaults to the type name in snake_case, can be overridden with #[forge(id = "...")].
+    /// The enum identifier used for metadata/export grouping.
+    /// Defaults to the type name in normalized snake_case and can be overridden
+    /// with `#[forge(id = "...")]`.
     fn id() -> &'static str;
 
     /// Get the stored key for this variant.
@@ -23,15 +24,17 @@ pub trait ForgeAppEnum: Sized + Clone + Send + Sync + 'static {
     /// Also matches any declared aliases.
     fn parse_key(key: &str) -> Option<Self>;
 
-    /// Get the label key for this variant.
-    /// Default is human-readable title text from variant name.
-    /// Can be overridden with #[forge(label_key = "...")].
+    /// Get the translation key metadata for this variant.
+    ///
+    /// Default format is `enum.{enum_id}.{variant_snake_case}`.
+    /// `#[forge(label_prefix = "...")]` changes the prefix for the whole enum.
+    /// `#[forge(label_key = "...")]` overrides a single variant verbatim.
     fn label_key(self) -> &'static str;
 
-    /// All options as value + label_key pairs.
+    /// All options as stored value + label key pairs.
     fn options() -> Collection<EnumOption>;
 
-    /// Full metadata for this enum (export-ready).
+    /// Full metadata for this enum. This is the canonical runtime/export source.
     fn meta() -> EnumMeta;
 
     /// The key kind (String or Int).

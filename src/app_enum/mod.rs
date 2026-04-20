@@ -17,16 +17,14 @@ mod tests {
     // Test enums
     // -----------------------------------------------------------------------
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
-    #[ts(export)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
     enum OrderStatus {
         Pending,
         Reviewing,
         Completed,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
-    #[ts(export)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
     enum OrderStatusWithOverrides {
         Pending,
         #[forge(key = "in_review")]
@@ -35,28 +33,46 @@ mod tests {
         Completed,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
-    #[ts(export)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
     enum UserStatus {
         Pending = 0,
         Verified = 1,
         Suspended = 2,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
-    #[ts(export)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
     #[forge(id = "custom_status")]
     enum CustomIdEnum {
         Alpha,
         Beta,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum, ts_rs::TS, forge_macros::TS)]
-    #[ts(export)]
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
     enum AliasedEnum {
         #[forge(aliases = ["awaiting", "queued"])]
         Pending,
         Active,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    #[forge(label_prefix = "admin.credits.transaction_types")]
+    enum CreditTransactionType {
+        AdminAdd,
+        AdminDeduct,
+        TransferReceived,
+        TransferSent,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    enum MixedIdentifierStatus {
+        Credit1,
+        HTTP2Enabled,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, forge::AppEnum)]
+    enum HTTP2Setting {
+        Enabled,
+        Disabled,
     }
 
     fn test_app() -> crate::foundation::AppContext {
@@ -117,9 +133,18 @@ mod tests {
 
     #[test]
     fn string_backed_label_key_default() {
-        assert_eq!(OrderStatus::Pending.label_key(), "Pending");
-        assert_eq!(OrderStatus::Reviewing.label_key(), "Reviewing");
-        assert_eq!(OrderStatus::Completed.label_key(), "Completed");
+        assert_eq!(
+            OrderStatus::Pending.label_key(),
+            "enum.order_status.pending"
+        );
+        assert_eq!(
+            OrderStatus::Reviewing.label_key(),
+            "enum.order_status.reviewing"
+        );
+        assert_eq!(
+            OrderStatus::Completed.label_key(),
+            "enum.order_status.completed"
+        );
     }
 
     #[test]
@@ -129,11 +154,11 @@ mod tests {
 
         let opts: Vec<_> = options.into_iter().collect();
         assert_eq!(opts[0].value, EnumKey::String("pending".into()));
-        assert_eq!(opts[0].label_key, "Pending");
+        assert_eq!(opts[0].label_key, "enum.order_status.pending");
         assert_eq!(opts[1].value, EnumKey::String("reviewing".into()));
-        assert_eq!(opts[1].label_key, "Reviewing");
+        assert_eq!(opts[1].label_key, "enum.order_status.reviewing");
         assert_eq!(opts[2].value, EnumKey::String("completed".into()));
-        assert_eq!(opts[2].label_key, "Completed");
+        assert_eq!(opts[2].label_key, "enum.order_status.completed");
     }
 
     #[test]
@@ -141,6 +166,18 @@ mod tests {
         let meta = OrderStatus::meta();
         assert_eq!(meta.id, "order_status");
         assert_eq!(meta.key_kind, EnumKeyKind::String);
+    }
+
+    #[test]
+    fn enum_level_label_prefix_changes_default_label_namespace() {
+        assert_eq!(
+            CreditTransactionType::AdminAdd.label_key(),
+            "admin.credits.transaction_types.admin_add"
+        );
+        assert_eq!(
+            CreditTransactionType::TransferSent.label_key(),
+            "admin.credits.transaction_types.transfer_sent"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -168,6 +205,15 @@ mod tests {
         assert_eq!(
             OrderStatusWithOverrides::Completed.label_key(),
             "Order completed"
+        );
+    }
+
+    #[test]
+    fn int_backed_label_key_uses_variant_name_not_numeric_value() {
+        assert_eq!(UserStatus::Pending.label_key(), "enum.user_status.pending");
+        assert_eq!(
+            UserStatus::Verified.label_key(),
+            "enum.user_status.verified"
         );
     }
 
@@ -214,6 +260,35 @@ mod tests {
     #[test]
     fn id_explicit_override() {
         assert_eq!(CustomIdEnum::id(), "custom_status");
+    }
+
+    #[test]
+    fn normalization_handles_digits_and_acronyms_for_keys() {
+        assert_eq!(
+            MixedIdentifierStatus::Credit1.key(),
+            EnumKey::String("credit_1".into())
+        );
+        assert_eq!(
+            MixedIdentifierStatus::HTTP2Enabled.key(),
+            EnumKey::String("http_2_enabled".into())
+        );
+    }
+
+    #[test]
+    fn normalization_handles_digits_and_acronyms_for_label_keys() {
+        assert_eq!(
+            MixedIdentifierStatus::Credit1.label_key(),
+            "enum.mixed_identifier_status.credit_1"
+        );
+        assert_eq!(
+            MixedIdentifierStatus::HTTP2Enabled.label_key(),
+            "enum.mixed_identifier_status.http_2_enabled"
+        );
+    }
+
+    #[test]
+    fn normalization_handles_digits_and_acronyms_for_enum_ids() {
+        assert_eq!(HTTP2Setting::id(), "http_2_setting");
     }
 
     // -----------------------------------------------------------------------

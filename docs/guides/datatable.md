@@ -270,9 +270,14 @@ DatatableFilterField::decimal_max("maximum_amount", "Maximum Amount").bind(
     DatatableFilterOp::Lte,
     DatatableFilterValueKind::Decimal,
 );
+DatatableFilterField::select("status", "Status").options(OrderStatus::options());
+DatatableFilterField::select("status", "Status").enum_options::<OrderStatus>();
+DatatableFilterField::enum_select::<OrderStatus>("status", "Status");
 ```
 
 `DatatableFilterField::text(...)` still represents an exact match. Use `text_search(...)` for one-field search and `text_search_fields(...)` for multi-field search.
+
+For AppEnum-backed filters, the datatable option payload keeps the enum label metadata unchanged. With the default AppEnum conventions that means `DatatableFilterOption.label` carries the translation key such as `enum.order_status.pending`.
 
 Forge still accepts structured `DatatableRequest` filters and legacy `f-...` query params through `DatatableRequest::from_query_params()`, but explicit binding metadata is now the preferred frontend contract.
 

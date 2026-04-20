@@ -17,26 +17,16 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
-/// Additional registration for AppEnum types — includes runtime values.
-pub fn expand_enum_values(input: &DeriveInput) -> TokenStream {
+/// Additional registration for AppEnum types — includes runtime metadata.
+pub fn expand_app_enum(input: &DeriveInput) -> TokenStream {
     let ident = &input.ident;
     let name = ident.to_string();
 
     quote! {
         ::forge::inventory::submit! {
-            ::forge::typescript::TsEnumValues {
+            ::forge::typescript::TsAppEnum {
                 name: #name,
-                values_fn: || {
-                    <#ident as ::forge::ForgeAppEnum>::options()
-                        .iter()
-                        .map(|opt| {
-                            match &opt.value {
-                                ::forge::EnumKey::String(s) => s.clone(),
-                                ::forge::EnumKey::Int(i) => i.to_string(),
-                            }
-                        })
-                        .collect()
-                },
+                meta_fn: || <#ident as ::forge::ForgeAppEnum>::meta(),
             }
         }
     }

@@ -5,33 +5,63 @@ use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Expr, ExprLit, Fields, Lit, Variant};
 
 // ---------------------------------------------------------------------------
-// Compile-time snake_case (proc-macro version, independent from runtime)
+// Compile-time identifier normalization (proc-macro version, independent from runtime)
 // ---------------------------------------------------------------------------
 
-fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    for (i, ch) in name.chars().enumerate() {
-        if ch.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch);
-        }
+fn push_token(tokens: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        tokens.push(std::mem::take(current));
     }
-    result
 }
 
-fn to_title_text(name: &str) -> String {
-    let mut result = String::new();
-    for (i, ch) in name.chars().enumerate() {
-        if ch.is_uppercase() && i > 0 {
-            result.push(' ');
-        }
-        result.push(ch);
+fn is_separator(ch: char) -> bool {
+    matches!(ch, '_' | '-' | ' ')
+}
+
+fn should_split(prev: char, current: char, next: Option<char>) -> bool {
+    if is_separator(prev) || is_separator(current) {
+        return false;
     }
-    result
+
+    (prev.is_lowercase() && current.is_uppercase())
+        || (prev.is_alphabetic() && current.is_ascii_digit())
+        || (prev.is_ascii_digit() && current.is_alphabetic())
+        || (prev.is_uppercase()
+            && current.is_uppercase()
+            && next.is_some_and(|ch| ch.is_lowercase()))
+}
+
+fn split_identifier_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if is_separator(ch) {
+            push_token(&mut tokens, &mut current);
+            continue;
+        }
+
+        if let Some(prev) = current.chars().last() {
+            let next = chars.get(index + 1).copied();
+            if should_split(prev, ch, next) {
+                push_token(&mut tokens, &mut current);
+            }
+        }
+
+        current.push(ch);
+    }
+
+    push_token(&mut tokens, &mut current);
+    tokens
+}
+
+fn to_snake_case(name: &str) -> String {
+    split_identifier_words(name)
+        .into_iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +78,7 @@ struct VariantInfo {
 
 struct EnumArgs {
     id: Option<String>,
+    label_prefix: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +87,7 @@ struct EnumArgs {
 
 fn parse_enum_args(attrs: &[syn::Attribute]) -> syn::Result<EnumArgs> {
     let mut id = None;
+    let mut label_prefix = None;
 
     for attr in attrs.iter().filter(|a| a.path().is_ident("forge")) {
         attr.parse_nested_meta(|meta| {
@@ -65,14 +97,25 @@ fn parse_enum_args(attrs: &[syn::Attribute]) -> syn::Result<EnumArgs> {
                     return Err(syn::Error::new(value.span(), "duplicate `id` attribute"));
                 }
                 id = Some(value.value());
+            } else if meta.path.is_ident("label_prefix") {
+                let value: syn::LitStr = meta.value()?.parse()?;
+                if label_prefix.is_some() {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "duplicate `label_prefix` attribute",
+                    ));
+                }
+                label_prefix = Some(value.value());
             } else {
-                return Err(meta.error("unsupported forge enum attribute; expected id = \"...\""));
+                return Err(meta.error(
+                    "unsupported forge enum attribute; expected id = \"...\" or label_prefix = \"...\"",
+                ));
             }
             Ok(())
         })?;
     }
 
-    Ok(EnumArgs { id })
+    Ok(EnumArgs { id, label_prefix })
 }
 
 fn parse_variant_attrs(
@@ -191,6 +234,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let enum_id = enum_args
         .id
         .unwrap_or_else(|| to_snake_case(&ident.to_string()));
+    let label_prefix = enum_args
+        .label_prefix
+        .unwrap_or_else(|| format!("enum.{enum_id}"));
 
     // Classify storage mode and validate
     let has_any_discriminant = data.variants.iter().any(|v| v.discriminant.is_some());
@@ -237,10 +283,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 None
             };
 
+        let variant_snake = to_snake_case(&variant.ident.to_string());
+
         let key_str = if is_int_backed {
             discriminant.unwrap().to_string()
         } else {
-            key_override.unwrap_or_else(|| to_snake_case(&variant.ident.to_string()))
+            key_override.unwrap_or(variant_snake.clone())
         };
 
         // Duplicate key check
@@ -252,7 +300,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
 
         let label_key_str =
-            label_key_override.unwrap_or_else(|| to_title_text(&variant.ident.to_string()));
+            label_key_override.unwrap_or_else(|| format!("{label_prefix}.{variant_snake}"));
 
         variant_infos.push(VariantInfo {
             ident: variant.ident.clone(),

@@ -32,8 +32,7 @@ pub struct CreateOrderRequest {
 Enums that derive `AppEnum` — also auto-included:
 
 ```rust
-#[derive(Clone, Debug, PartialEq, forge::AppEnum, ts_rs::TS)]
-#[ts(export)]
+#[derive(Clone, Debug, PartialEq, forge::AppEnum)]
 pub enum OrderStatus {
     Pending,
     Confirmed,
@@ -97,12 +96,44 @@ pub struct MyRequest { ... }
 
 ### `forge::AppEnum` (enums)
 
-Auto-registers for TypeScript export. Must also derive `ts_rs::TS`:
+Auto-registers for TypeScript export on its own:
 
 ```rust
-#[derive(Clone, Debug, PartialEq, forge::AppEnum, ts_rs::TS)]
-#[ts(export)]
+#[derive(Clone, Debug, PartialEq, forge::AppEnum)]
 pub enum MyEnum { ... }
+```
+
+Default metadata follows Forge conventions:
+
+```rust
+#[derive(Clone, Debug, PartialEq, forge::AppEnum)]
+#[forge(label_prefix = "admin.orders.statuses")] // optional
+pub enum OrderStatus {
+    Pending,
+    Confirmed,
+}
+```
+
+Generated TypeScript includes the union type plus runtime metadata:
+
+```typescript
+export type OrderStatus = "pending" | "confirmed";
+
+export const OrderStatusValues = [
+  "pending",
+  "confirmed",
+] as const;
+
+export const OrderStatusOptions = [
+  { value: "pending", labelKey: "admin.orders.statuses.pending" },
+  { value: "confirmed", labelKey: "admin.orders.statuses.confirmed" },
+] as const;
+
+export const OrderStatusMeta = {
+  id: "order_status",
+  keyKind: "string",
+  options: OrderStatusOptions,
+} as const;
 ```
 
 ### `forge::TS` (escape hatch)
@@ -142,7 +173,7 @@ pub struct Example {
 ```
 
 Common attributes:
-- `#[ts(export)]` — mark for export (required)
+- `#[ts(export)]` — mark DTO / `forge::TS` types for export
 - `#[ts(type = "...")]` — override generated TypeScript type
 - `#[ts(optional)]` — make field optional (`T | undefined`)
 - `#[ts(rename = "...")]` — rename in TypeScript output
@@ -193,11 +224,11 @@ The barrel `index.ts` re-exports all types:
 ```typescript
 // Auto-generated barrel. Do not edit.
 export type { CreateOrderRequest } from "./CreateOrderRequest";
-export type { CountryStatus } from "./CountryStatus";
+export { type CountryStatus, CountryStatusValues, CountryStatusOptions, CountryStatusMeta } from "./CountryStatus";
 export type { DatatableJsonResponse } from "./DatatableJsonResponse";
 export type { DatatableRequest } from "./DatatableRequest";
 export type { MessageResponse } from "./MessageResponse";
-export type { OrderStatus } from "./OrderStatus";
+export { type OrderStatus, OrderStatusValues, OrderStatusOptions, OrderStatusMeta } from "./OrderStatus";
 export type { RefreshTokenRequest } from "./RefreshTokenRequest";
 export type { TokenPair } from "./TokenPair";
 export type { TokenResponse } from "./TokenResponse";

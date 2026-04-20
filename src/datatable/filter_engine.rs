@@ -1,4 +1,4 @@
-use crate::database::{ComparisonOp, Condition, DbType, DbValue, Expr, OrderBy};
+use crate::database::{ComparisonOp, Condition, DbType, DbValue, Expr, Numeric, OrderBy};
 use crate::foundation::{Error, Result};
 use crate::support::{Date, DateTime, LocalDateTime};
 
@@ -51,8 +51,12 @@ where
             ))
         })?;
 
-        let condition =
-            build_filter_condition(&filter.op, target.expr.clone(), &filter.value, col.db_type())?;
+        let condition = build_filter_condition(
+            &filter.op,
+            target.expr.clone(),
+            &filter.value,
+            col.db_type(),
+        )?;
         query = apply_filter(query, target.scope, condition);
     }
 
@@ -318,10 +322,7 @@ where
 }
 
 /// Apply default sort declarations (used when request has no sort).
-pub fn apply_default_sorts<Row: 'static, Q>(
-    mut query: Q,
-    sorts: &[DatatableSort<Row>],
-) -> Result<Q>
+pub fn apply_default_sorts<Row: 'static, Q>(mut query: Q, sorts: &[DatatableSort<Row>]) -> Result<Q>
 where
     Q: DatatableQuery<Row>,
 {
@@ -406,6 +407,9 @@ fn text_to_db_value(text: &str, db_type: DbType) -> Result<DbValue> {
             .parse::<f64>()
             .map(DbValue::Float64)
             .map_err(|e| Error::message(format!("invalid float '{}': {e}", text))),
+        DbType::Numeric => Numeric::new(text.to_string())
+            .map(DbValue::Numeric)
+            .map_err(|e| Error::message(format!("invalid numeric '{}': {e}", text))),
         DbType::Date => text
             .parse::<Date>()
             .map(DbValue::Date)
@@ -432,6 +436,7 @@ fn number_to_db_value(n: i64, db_type: DbType) -> Result<DbValue> {
         DbType::Int64 => Ok(DbValue::Int64(n)),
         DbType::Float32 => Ok(DbValue::Float32(n as f32)),
         DbType::Float64 => Ok(DbValue::Float64(n as f64)),
+        DbType::Numeric => Ok(DbValue::Numeric(Numeric::from(n))),
         _ => Ok(DbValue::Int64(n)),
     }
 }
@@ -439,8 +444,11 @@ fn number_to_db_value(n: i64, db_type: DbType) -> Result<DbValue> {
 #[cfg(test)]
 mod tests {
     use super::apply_auto_filters;
-    use crate::database::{Expr, ProjectionQuery};
-    use crate::datatable::{DatatableColumn, DatatableFilterInput, DatatableFilterOp, DatatableFilterValue};
+    use super::{number_to_db_value, text_to_db_value};
+    use crate::database::{DbType, DbValue, Expr, Numeric, ProjectionQuery};
+    use crate::datatable::{
+        DatatableColumn, DatatableFilterInput, DatatableFilterOp, DatatableFilterValue,
+    };
 
     #[derive(Clone, serde::Serialize, forge_macros::Projection)]
     struct ReportRow {
@@ -453,8 +461,10 @@ mod tests {
         let columns = vec![
             DatatableColumn::field(ReportRow::MERCHANT_ID)
                 .filter_by(ReportRow::MERCHANT_ID.column_ref()),
-            DatatableColumn::field(ReportRow::TOTAL)
-                .filter_having(Expr::function("SUM", [Expr::column(ReportRow::TOTAL.column_ref())])),
+            DatatableColumn::field(ReportRow::TOTAL).filter_having(Expr::function(
+                "SUM",
+                [Expr::column(ReportRow::TOTAL.column_ref())],
+            )),
         ];
         let filters = vec![DatatableFilterInput {
             field: "merchant_id|total".to_string(),
@@ -462,15 +472,38 @@ mod tests {
             value: DatatableFilterValue::Text("10".to_string()),
         }];
 
-        let result =
-            apply_auto_filters(ProjectionQuery::<ReportRow>::table("orders"), &filters, &columns);
+        let result = apply_auto_filters(
+            ProjectionQuery::<ReportRow>::table("orders"),
+            &filters,
+            &columns,
+        );
         let error = match result {
             Ok(_) => panic!("mixed scopes should fail"),
             Err(error) => error,
         };
 
         assert!(
-            error.to_string().contains("LikeAny cannot mix WHERE and HAVING"),
+            error
+                .to_string()
+                .contains("LikeAny cannot mix WHERE and HAVING"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn coerces_numeric_text_filters_into_numeric_db_values() {
+        let value = text_to_db_value("12.50", DbType::Numeric).unwrap();
+        assert_eq!(value, DbValue::Numeric(Numeric::new("12.50").unwrap()));
+
+        let value = number_to_db_value(12, DbType::Numeric).unwrap();
+        assert_eq!(value, DbValue::Numeric(Numeric::new("12").unwrap()));
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_text_filters() {
+        let error = text_to_db_value("12.5.0", DbType::Numeric).unwrap_err();
+        assert!(
+            error.to_string().contains("invalid numeric '12.5.0'"),
             "unexpected error: {error}"
         );
     }

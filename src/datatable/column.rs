@@ -189,15 +189,15 @@ mod tests {
         assert!(!column.filterable);
         assert_eq!(
             column.sort_expr().cloned(),
-            Some(crate::database::Expr::column(ColumnRef::bare("total").typed(DbType::Int64)))
+            Some(crate::database::Expr::column(
+                ColumnRef::bare("total").typed(DbType::Int64)
+            ))
         );
     }
 
     #[test]
     fn model_fields_keep_where_filter_targets() {
-        let column = DatatableColumn::field(ModelRow::ID)
-            .sortable()
-            .filterable();
+        let column = DatatableColumn::field(ModelRow::ID).sortable().filterable();
 
         let target = column.filter_target().expect("filter target should exist");
         assert!(column.sortable);

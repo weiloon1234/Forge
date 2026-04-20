@@ -225,14 +225,39 @@ Use `available_filters()` when the frontend needs declarative filter controls:
 async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
     Ok(vec![
         DatatableFilterRow::pair(
-            DatatableFilterField::text("merchant_id", "Merchant ID"),
-            DatatableFilterField::text("total", "Minimum Total"),
+            DatatableFilterField::number("merchant", "Merchant ID").bind(
+                "merchant_id",
+                DatatableFilterOp::Eq,
+                DatatableFilterValueKind::Integer,
+            ),
+            DatatableFilterField::number("minimum_total", "Minimum Total").bind(
+                "total",
+                DatatableFilterOp::Gte,
+                DatatableFilterValueKind::Integer,
+            ),
         ),
     ])
 }
 ```
 
-Forge still accepts structured `DatatableRequest` filters and legacy `f-...` query params through `DatatableRequest::from_query_params()`.
+Each filter field now declares:
+
+- `name`: frontend control id
+- `binding.field`: server-side filter field
+- `binding.op`: backend-declared operator
+- `binding.value_kind`: how the frontend should serialize the value
+
+For exact decimal fields, use `DatatableFilterKind::Number` with `DatatableFilterValueKind::Decimal` so the UI can send precise string values:
+
+```rust
+DatatableFilterField::number("minimum_amount", "Minimum Amount").bind(
+    "amount",
+    DatatableFilterOp::Gte,
+    DatatableFilterValueKind::Decimal,
+)
+```
+
+Forge still accepts structured `DatatableRequest` filters and legacy `f-...` query params through `DatatableRequest::from_query_params()`, but explicit binding metadata is now the preferred frontend contract.
 
 ## Output Modes
 

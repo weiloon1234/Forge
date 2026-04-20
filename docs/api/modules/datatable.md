@@ -84,9 +84,13 @@ fn apply_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSortInput], columns
 ## forge::datatable::filter_meta
 
 ```rust
-enum DatatableFilterKind { Text, Select, Checkbox, Date, DateTime }
+enum DatatableFilterKind { Text, Number, Select, Checkbox, Date, DateTime }
+enum DatatableFilterValueKind { Text, Boolean, Integer, Decimal, Date, DateTime, Values }
+struct DatatableFilterBinding
+  fn new( field: impl Into<String>, op: DatatableFilterOp, value_kind: DatatableFilterValueKind, ) -> Self
 struct DatatableFilterField
   fn text(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn number(name: impl Into<String>, label: impl Into<String>) -> Self
   fn select(name: impl Into<String>, label: impl Into<String>) -> Self
   fn checkbox(name: impl Into<String>, label: impl Into<String>) -> Self
   fn date(name: impl Into<String>, label: impl Into<String>) -> Self
@@ -95,6 +99,7 @@ struct DatatableFilterField
   fn options<I>(self, options: I) -> Self
   fn help(self, help: impl Into<String>) -> Self
   fn nullable(self) -> Self
+  fn bind( self, field: impl Into<String>, op: DatatableFilterOp, value_kind: DatatableFilterValueKind, ) -> Self
   fn enum_select<E: ForgeAppEnum>( name: impl Into<String>, label: impl Into<String>, ) -> Self
 struct DatatableFilterOption
   fn new(value: impl Into<String>, label: impl Into<String>) -> Self

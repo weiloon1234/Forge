@@ -29,10 +29,7 @@ impl<Row> DatatableSort<Row> {
 
     fn from_field(field: DatatableFieldRef<Row>, direction: OrderDirection) -> Self {
         let expr = field.sort_expr.unwrap_or_else(|| {
-            panic!(
-                "datatable sort for `{}` requires a sort target",
-                field.name
-            )
+            panic!("datatable sort for `{}` requires a sort target", field.name)
         });
         Self {
             field_name: field.name,

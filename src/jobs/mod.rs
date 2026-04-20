@@ -1033,33 +1033,38 @@ impl Worker {
         if !self.runtime.config.track_history {
             return;
         }
-        if let Ok(db) = self.app.database() {
-            if let Err(error) = db
-                .raw_execute(
-                    "INSERT INTO job_history (job_id, queue, status, attempt, error, started_at, completed_at, duration_ms) VALUES ($1, $2, $3, $4, $5, to_timestamp($6::double precision / 1000), NOW(), $7)",
-                    &[
-                        DbValue::Text(job_id.to_string()),
-                        DbValue::Text(queue.to_string()),
-                        DbValue::Text(status.to_string()),
-                        DbValue::Int32(attempt as i32),
-                        if let Some(e) = error {
-                            DbValue::Text(e.to_string())
-                        } else {
-                            DbValue::Null(DbType::Text)
-                        },
-                        DbValue::Int64(started_at),
-                        DbValue::Int64(duration_ms),
-                    ],
-                )
-                .await
-            {
-                tracing::warn!(
-                    target: "forge.worker",
-                    job = %job_id,
-                    error = %error,
-                    "failed to record job history"
-                );
-            }
+        let Ok(db) = self.app.database() else {
+            return;
+        };
+        if !db.is_configured() {
+            return;
+        }
+
+        if let Err(error) = db
+            .raw_execute(
+                "INSERT INTO job_history (job_id, queue, status, attempt, error, started_at, completed_at, duration_ms) VALUES ($1, $2, $3, $4, $5, to_timestamp($6::double precision / 1000), NOW(), $7)",
+                &[
+                    DbValue::Text(job_id.to_string()),
+                    DbValue::Text(queue.to_string()),
+                    DbValue::Text(status.to_string()),
+                    DbValue::Int32(attempt as i32),
+                    if let Some(e) = error {
+                        DbValue::Text(e.to_string())
+                    } else {
+                        DbValue::Null(DbType::Text)
+                    },
+                    DbValue::Int64(started_at),
+                    DbValue::Int64(duration_ms),
+                ],
+            )
+            .await
+        {
+            tracing::warn!(
+                target: "forge.worker",
+                job = %job_id,
+                error = %error,
+                "failed to record job history"
+            );
         }
     }
 }
@@ -1417,6 +1422,7 @@ mod tests {
 
     #[tokio::test]
     async fn moves_failed_jobs_to_dead_letter() {
+        let _guard = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
         let backend = RuntimeBackend::memory("jobs-unit-tests");
         let mut registry = JobRegistryBuilder::default();
         registry.register::<FailingJob>().unwrap();

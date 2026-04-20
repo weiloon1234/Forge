@@ -20,7 +20,8 @@ pub use context::DatatableContext;
 pub use datatable_trait::{Datatable, DatatableQuery};
 pub use export::{DatatableExportDelivery, GeneratedDatatableExport, NoopExportDelivery};
 pub use filter_meta::{
-    DatatableFilterField, DatatableFilterKind, DatatableFilterOption, DatatableFilterRow,
+    DatatableFilterBinding, DatatableFilterField, DatatableFilterKind, DatatableFilterOption,
+    DatatableFilterRow, DatatableFilterValueKind,
 };
 pub use mapping::DatatableMapping;
 pub use registry::DatatableRegistry;

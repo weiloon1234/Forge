@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use tokio::sync::Mutex as AsyncMutex;
 
 const ORDERS_TABLE: &str = "forge_datatable_orders";
+const PAYMENTS_TABLE: &str = "forge_datatable_payments";
 
 fn database_lock() -> &'static AsyncMutex<()> {
     static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
@@ -63,6 +64,7 @@ impl ServiceProvider for DatatableProvider {
     async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
         registrar.register_datatable::<OrdersDatatable>()?;
         registrar.register_datatable::<MerchantSalesDatatable>()?;
+        registrar.register_datatable::<PaymentsDatatable>()?;
         registrar.singleton(Box::new(CaptureDelivery {
             deliveries: self.deliveries.clone(),
         }) as Box<dyn DatatableExportDelivery>)?;
@@ -112,9 +114,11 @@ async fn reset_schema(database: &DatabaseManager) {
         database,
         &[
             &format!("DROP TABLE IF EXISTS {ORDERS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {PAYMENTS_TABLE}"),
             &format!(
                 "CREATE TABLE {ORDERS_TABLE} (id BIGINT PRIMARY KEY, merchant_id BIGINT NOT NULL, total BIGINT NOT NULL)"
             ),
+            &format!("CREATE TABLE {PAYMENTS_TABLE} (id BIGINT PRIMARY KEY, amount NUMERIC NOT NULL)"),
         ],
     )
     .await;
@@ -128,6 +132,18 @@ async fn seed_orders(database: &DatabaseManager) {
             &format!("INSERT INTO {ORDERS_TABLE} (id, merchant_id, total) VALUES (2, 1, 150)"),
             &format!("INSERT INTO {ORDERS_TABLE} (id, merchant_id, total) VALUES (3, 2, 120)"),
             &format!("INSERT INTO {ORDERS_TABLE} (id, merchant_id, total) VALUES (4, 3, 300)"),
+        ],
+    )
+    .await;
+}
+
+async fn seed_payments(database: &DatabaseManager) {
+    execute_batch(
+        database,
+        &[
+            &format!("INSERT INTO {PAYMENTS_TABLE} (id, amount) VALUES (1, 10.25)"),
+            &format!("INSERT INTO {PAYMENTS_TABLE} (id, amount) VALUES (2, 12.50)"),
+            &format!("INSERT INTO {PAYMENTS_TABLE} (id, amount) VALUES (3, 19.99)"),
         ],
     )
     .await;
@@ -156,7 +172,10 @@ impl Datatable for OrdersDatatable {
 
     fn columns() -> Vec<DatatableColumn<Self::Row>> {
         vec![
-            DatatableColumn::field(Order::ID).label("Order").sortable().exportable(),
+            DatatableColumn::field(Order::ID)
+                .label("Order")
+                .sortable()
+                .exportable(),
             DatatableColumn::field(Order::MERCHANT_ID)
                 .label("Merchant")
                 .filterable()
@@ -171,6 +190,60 @@ impl Datatable for OrdersDatatable {
 
     fn default_sort() -> Vec<DatatableSort<Self::Row>> {
         vec![DatatableSort::asc(Order::ID)]
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, forge::Model)]
+#[forge(model = PAYMENTS_TABLE, primary_key_strategy = "manual")]
+struct Payment {
+    id: i64,
+    amount: Numeric,
+}
+
+struct PaymentsDatatable;
+
+#[async_trait]
+impl Datatable for PaymentsDatatable {
+    type Row = Payment;
+    type Query = ModelQuery<Payment>;
+
+    const ID: &'static str = "payments";
+
+    fn query(_ctx: &DatatableContext) -> Self::Query {
+        Payment::query()
+    }
+
+    fn columns() -> Vec<DatatableColumn<Self::Row>> {
+        vec![
+            DatatableColumn::field(Payment::ID)
+                .label("Payment")
+                .sortable()
+                .exportable(),
+            DatatableColumn::field(Payment::AMOUNT)
+                .label("Amount")
+                .sortable()
+                .filterable()
+                .exportable(),
+        ]
+    }
+
+    fn default_sort() -> Vec<DatatableSort<Self::Row>> {
+        vec![DatatableSort::asc(Payment::ID)]
+    }
+
+    async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
+        Ok(vec![DatatableFilterRow::pair(
+            DatatableFilterField::number("minimum_amount", "Minimum Amount").bind(
+                "amount",
+                DatatableFilterOp::Gte,
+                DatatableFilterValueKind::Decimal,
+            ),
+            DatatableFilterField::number("maximum_amount", "Maximum Amount").bind(
+                "amount",
+                DatatableFilterOp::Lte,
+                DatatableFilterValueKind::Decimal,
+            ),
+        )])
     }
 }
 
@@ -230,7 +303,10 @@ impl Datatable for MerchantSalesDatatable {
     }
 }
 
-fn request_with(filters: Vec<DatatableFilterInput>, sorts: Vec<DatatableSortInput>) -> DatatableRequest {
+fn request_with(
+    filters: Vec<DatatableFilterInput>,
+    sorts: Vec<DatatableSortInput>,
+) -> DatatableRequest {
     DatatableRequest {
         page: 1,
         per_page: 20,
@@ -254,7 +330,9 @@ async fn registry_serves_model_and_projection_datatables() {
 
     let registry = app.datatables().unwrap();
 
-    let orders = registry.get("orders").expect("orders datatable should exist");
+    let orders = registry
+        .get("orders")
+        .expect("orders datatable should exist");
     let orders_response = orders
         .json(
             app,
@@ -392,4 +470,67 @@ async fn projection_datatable_downloads_and_queues_exports_through_the_registry(
     assert_eq!(deliveries[0].recipient, "reports@example.com");
     assert_eq!(deliveries[0].filename, "merchant-sales.xlsx");
     assert!(deliveries[0].data.starts_with(b"PK"));
+}
+
+#[tokio::test]
+async fn decimal_filters_and_binding_metadata_work_through_registry_json() {
+    let Some(runtime) = datatable_runtime().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    let app = runtime.kernel.app();
+    let database = app.database().unwrap();
+
+    reset_schema(database.as_ref()).await;
+    seed_payments(database.as_ref()).await;
+
+    let registry = app.datatables().unwrap();
+    let payments = registry
+        .get("payments")
+        .expect("payments datatable should exist");
+
+    let response = payments
+        .json(
+            app,
+            Option::<&Actor>::None,
+            request_with(
+                vec![DatatableFilterInput {
+                    field: "amount".to_string(),
+                    op: DatatableFilterOp::Gte,
+                    value: DatatableFilterValue::Text("12.50".to_string()),
+                }],
+                Vec::new(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.rows.len(), 2);
+    assert_eq!(
+        response.rows[0]
+            .get("amount")
+            .and_then(|value| value.as_str()),
+        Some("12.50")
+    );
+    assert_eq!(
+        response.rows[1]
+            .get("amount")
+            .and_then(|value| value.as_str()),
+        Some("19.99")
+    );
+
+    let minimum_amount = &response.filters[0].fields[0];
+    assert_eq!(minimum_amount.name, "minimum_amount");
+    assert_eq!(minimum_amount.kind, DatatableFilterKind::Number);
+    assert_eq!(minimum_amount.binding.field, "amount");
+    assert_eq!(minimum_amount.binding.op, DatatableFilterOp::Gte);
+    assert_eq!(
+        minimum_amount.binding.value_kind,
+        DatatableFilterValueKind::Decimal
+    );
+
+    let maximum_amount = &response.filters[0].fields[1];
+    assert_eq!(maximum_amount.name, "maximum_amount");
+    assert_eq!(maximum_amount.binding.field, "amount");
+    assert_eq!(maximum_amount.binding.op, DatatableFilterOp::Lte);
 }

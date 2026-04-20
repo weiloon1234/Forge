@@ -4,19 +4,57 @@ use serde::{Serialize, Serializer};
 use crate::app_enum::{EnumKey, ForgeAppEnum};
 use crate::support::Collection;
 
+use super::request::DatatableFilterOp;
+
 // ---------------------------------------------------------------------------
 // Filter kind
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum DatatableFilterKind {
     Text,
+    Number,
     Select,
     Checkbox,
     Date,
     DateTime,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DatatableFilterValueKind {
+    Text,
+    Boolean,
+    Integer,
+    Decimal,
+    Date,
+    DateTime,
+    Values,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
+#[ts(export)]
+pub struct DatatableFilterBinding {
+    pub field: String,
+    pub op: DatatableFilterOp,
+    pub value_kind: DatatableFilterValueKind,
+}
+
+impl DatatableFilterBinding {
+    pub fn new(
+        field: impl Into<String>,
+        op: DatatableFilterOp,
+        value_kind: DatatableFilterValueKind,
+    ) -> Self {
+        Self {
+            field: field.into(),
+            op,
+            value_kind,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -49,12 +87,13 @@ impl DatatableFilterOption {
 // Filter field
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, ts_rs::TS, forge_macros::TS)]
+#[derive(Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[ts(export)]
 pub struct DatatableFilterField {
     pub name: String,
     pub kind: DatatableFilterKind,
     pub label: String,
+    pub binding: DatatableFilterBinding,
     #[ts(optional)]
     pub placeholder: Option<String>,
     #[ts(optional)]
@@ -71,12 +110,13 @@ impl Serialize for DatatableFilterField {
     {
         let mut state = serializer.serialize_struct(
             "DatatableFilterField",
-            5 + usize::from(self.placeholder.is_some()) + usize::from(self.help.is_some()),
+            6 + usize::from(self.placeholder.is_some()) + usize::from(self.help.is_some()),
         )?;
 
         state.serialize_field("name", &self.name)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("label", &self.label)?;
+        state.serialize_field("binding", &self.binding)?;
         if let Some(placeholder) = &self.placeholder {
             state.serialize_field("placeholder", placeholder)?;
         }
@@ -91,8 +131,10 @@ impl Serialize for DatatableFilterField {
 
 impl DatatableFilterField {
     fn new(name: impl Into<String>, label: impl Into<String>, kind: DatatableFilterKind) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            binding: Self::default_binding(name.as_str(), kind),
+            name,
             kind,
             label: label.into(),
             placeholder: None,
@@ -102,8 +144,47 @@ impl DatatableFilterField {
         }
     }
 
+    fn default_binding(name: &str, kind: DatatableFilterKind) -> DatatableFilterBinding {
+        match kind {
+            DatatableFilterKind::Text => DatatableFilterBinding::new(
+                name,
+                DatatableFilterOp::Eq,
+                DatatableFilterValueKind::Text,
+            ),
+            DatatableFilterKind::Number => DatatableFilterBinding::new(
+                name,
+                DatatableFilterOp::Eq,
+                DatatableFilterValueKind::Integer,
+            ),
+            DatatableFilterKind::Select => DatatableFilterBinding::new(
+                name,
+                DatatableFilterOp::Eq,
+                DatatableFilterValueKind::Text,
+            ),
+            DatatableFilterKind::Checkbox => DatatableFilterBinding::new(
+                name,
+                DatatableFilterOp::Eq,
+                DatatableFilterValueKind::Boolean,
+            ),
+            DatatableFilterKind::Date => DatatableFilterBinding::new(
+                name,
+                DatatableFilterOp::Date,
+                DatatableFilterValueKind::Date,
+            ),
+            DatatableFilterKind::DateTime => DatatableFilterBinding::new(
+                name,
+                DatatableFilterOp::Datetime,
+                DatatableFilterValueKind::DateTime,
+            ),
+        }
+    }
+
     pub fn text(name: impl Into<String>, label: impl Into<String>) -> Self {
         Self::new(name, label, DatatableFilterKind::Text)
+    }
+
+    pub fn number(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(name, label, DatatableFilterKind::Number)
     }
 
     pub fn select(name: impl Into<String>, label: impl Into<String>) -> Self {
@@ -144,6 +225,16 @@ impl DatatableFilterField {
 
     pub fn nullable(mut self) -> Self {
         self.nullable = true;
+        self
+    }
+
+    pub fn bind(
+        mut self,
+        field: impl Into<String>,
+        op: DatatableFilterOp,
+        value_kind: DatatableFilterValueKind,
+    ) -> Self {
+        self.binding = DatatableFilterBinding::new(field, op, value_kind);
         self
     }
 
@@ -199,6 +290,8 @@ impl DatatableFilterRow {
 mod tests {
     use serde_json::json;
 
+    use crate::datatable::{DatatableFilterOp, DatatableFilterValueKind};
+
     use super::DatatableFilterField;
 
     #[test]
@@ -210,6 +303,11 @@ mod tests {
                 "name": "status",
                 "kind": "text",
                 "label": "Status",
+                "binding": {
+                    "field": "status",
+                    "op": "eq",
+                    "value_kind": "text"
+                },
                 "nullable": false,
                 "options": {
                     "items": []
@@ -226,8 +324,40 @@ mod tests {
                 "name": "status",
                 "kind": "text",
                 "label": "Status",
+                "binding": {
+                    "field": "status",
+                    "op": "eq",
+                    "value_kind": "text"
+                },
                 "placeholder": "Search status",
                 "help": "Filters by status",
+                "nullable": false,
+                "options": {
+                    "items": []
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn bind_overrides_server_field_operator_and_value_kind() {
+        let filter = DatatableFilterField::number("minimum_amount", "Minimum Amount").bind(
+            "amount",
+            DatatableFilterOp::Gte,
+            DatatableFilterValueKind::Decimal,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&filter).unwrap(),
+            json!({
+                "name": "minimum_amount",
+                "kind": "number",
+                "label": "Minimum Amount",
+                "binding": {
+                    "field": "amount",
+                    "op": "gte",
+                    "value_kind": "decimal"
+                },
                 "nullable": false,
                 "options": {
                     "items": []

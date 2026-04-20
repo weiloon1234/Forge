@@ -2147,7 +2147,8 @@ Server-side filtering, sorting, pagination, export.
 |------|----------|
 | `DatatableFilterOp` | `Eq`, `NotEq`, `Like`, `Gt`, `Gte`, `Lt`, `Lte`, `In`, `Date`, `DateFrom`, `DateTo`, `Datetime`, `DatetimeFrom`, `DatetimeTo`, `Has`, `HasLike`, `LikeAny` |
 | `DatatableFilterValue` | `Text(String)`, `Bool(bool)`, `Number(i64)`, `Values(Vec<String>)` |
-| `DatatableFilterKind` | `Text`, `Select`, `Checkbox`, `Date`, `DateTime` |
+| `DatatableFilterKind` | `Text`, `Number`, `Select`, `Checkbox`, `Date`, `DateTime` |
+| `DatatableFilterValueKind` | `Text`, `Boolean`, `Integer`, `Decimal`, `Date`, `DateTime`, `Values` |
 | `DatatableValue` | `Null`, `String(String)`, `Number(serde_json::Number)`, `Bool(bool)`, `Date(Date)`, `DateTime(DateTime)` |
 
 ### Traits
@@ -2195,7 +2196,8 @@ trait DatatableExportDelivery: Send + Sync + 'static {
 | `DatatableJsonResponse` | JSON response: rows, columns, filters, pagination |
 | `DatatableColumnMeta` | Column metadata for response |
 | `DatatablePaginationMeta` | page, per_page, total, total_pages |
-| `DatatableFilterField` | Filter metadata: name, kind, label, options |
+| `DatatableFilterField` | Filter metadata: name, kind, label, binding, options |
+| `DatatableFilterBinding` | Backend filter contract: field, op, value_kind |
 | `DatatableFilterOption` | Select option: value, label |
 | `DatatableFilterRow` | Filter layout (single or pair) |
 | `DatatableExportAccepted` | Export queued response |

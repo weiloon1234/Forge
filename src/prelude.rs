@@ -113,11 +113,11 @@ pub use clap::{Arg, ArgMatches, Command};
 pub use serde::{Deserialize, Serialize};
 
 pub use crate::datatable::{
-    DatatableColumn, DatatableContext, DatatableExportDelivery, DatatableFilterField,
-    DatatableFilterInput, DatatableFilterKind, DatatableFilterOp, DatatableFilterOption,
-    DatatableFilterRow, DatatableFilterValue, DatatableJsonResponse, DatatableMapping,
-    DatatableRegistry, DatatableRequest, DatatableSort, DatatableSortInput, DatatableValue,
-    GeneratedDatatableExport, Datatable,
+    Datatable, DatatableColumn, DatatableContext, DatatableExportDelivery, DatatableFilterBinding,
+    DatatableFilterField, DatatableFilterInput, DatatableFilterKind, DatatableFilterOp,
+    DatatableFilterOption, DatatableFilterRow, DatatableFilterValue, DatatableFilterValueKind,
+    DatatableJsonResponse, DatatableMapping, DatatableRegistry, DatatableRequest, DatatableSort,
+    DatatableSortInput, DatatableValue, GeneratedDatatableExport,
 };
 
 pub use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption, ForgeAppEnum};

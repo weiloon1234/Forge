@@ -91,6 +91,21 @@ impl Datatable for FixtureReportDatatable {
     fn default_sort() -> Vec<DatatableSort<Self::Row>> {
         vec![DatatableSort::desc(FixtureReportRow::TOTAL)]
     }
+
+    async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
+        Ok(vec![DatatableFilterRow::pair(
+            DatatableFilterField::text("category_query", "Category").bind(
+                "category",
+                DatatableFilterOp::Eq,
+                DatatableFilterValueKind::Text,
+            ),
+            DatatableFilterField::number("minimum_total", "Minimum Total").bind(
+                "total",
+                DatatableFilterOp::Gte,
+                DatatableFilterValueKind::Integer,
+            ),
+        )])
+    }
 }
 
 pub fn register(registrar: &ServiceRegistrar) -> Result<()> {

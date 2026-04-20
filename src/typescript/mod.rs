@@ -144,7 +144,9 @@ mod tests {
         export_all(dir.path()).unwrap();
 
         for file in [
+            "DatatableFilterBinding.ts",
             "DatatableFilterField.ts",
+            "DatatableFilterValueKind.ts",
             "DatatableJsonResponse.ts",
             "DatatableRequest.ts",
             "MessageResponse.ts",
@@ -162,8 +164,16 @@ mod tests {
         let datatable_filter_field =
             fs::read_to_string(dir.path().join("DatatableFilterField.ts")).unwrap();
         assert!(
+            datatable_filter_field.contains("import type { DatatableFilterBinding } from \"./DatatableFilterBinding\";"),
+            "expected DatatableFilterField.ts to import DatatableFilterBinding:\n{datatable_filter_field}"
+        );
+        assert!(
             datatable_filter_field.contains("import type { DatatableFilterOptions } from \"./DatatableFilterOptions\";"),
             "expected DatatableFilterField.ts to import DatatableFilterOptions:\n{datatable_filter_field}"
+        );
+        assert!(
+            datatable_filter_field.contains("binding: DatatableFilterBinding"),
+            "expected DatatableFilterField.ts to expose binding metadata:\n{datatable_filter_field}"
         );
 
         let datatable_filter_options =
@@ -172,6 +182,38 @@ mod tests {
             datatable_filter_options
                 .contains("import type { DatatableFilterOption } from \"./DatatableFilterOption\";"),
             "expected DatatableFilterOptions.ts to import DatatableFilterOption:\n{datatable_filter_options}"
+        );
+
+        let datatable_filter_binding =
+            fs::read_to_string(dir.path().join("DatatableFilterBinding.ts")).unwrap();
+        assert!(
+            datatable_filter_binding
+                .contains("import type { DatatableFilterOp } from \"./DatatableFilterOp\";"),
+            "expected DatatableFilterBinding.ts to import DatatableFilterOp:\n{datatable_filter_binding}"
+        );
+        assert!(
+            datatable_filter_binding.contains(
+                "import type { DatatableFilterValueKind } from \"./DatatableFilterValueKind\";"
+            ),
+            "expected DatatableFilterBinding.ts to import DatatableFilterValueKind:\n{datatable_filter_binding}"
+        );
+        assert!(
+            datatable_filter_binding.contains("value_kind: DatatableFilterValueKind"),
+            "expected DatatableFilterBinding.ts to expose value_kind:\n{datatable_filter_binding}"
+        );
+
+        let datatable_filter_kind =
+            fs::read_to_string(dir.path().join("DatatableFilterKind.ts")).unwrap();
+        assert!(
+            datatable_filter_kind.contains("\"number\""),
+            "expected DatatableFilterKind.ts to include number:\n{datatable_filter_kind}"
+        );
+
+        let datatable_filter_value_kind =
+            fs::read_to_string(dir.path().join("DatatableFilterValueKind.ts")).unwrap();
+        assert!(
+            datatable_filter_value_kind.contains("\"decimal\""),
+            "expected DatatableFilterValueKind.ts to include decimal:\n{datatable_filter_value_kind}"
         );
 
         let datatable_request = fs::read_to_string(dir.path().join("DatatableRequest.ts")).unwrap();

@@ -71,11 +71,7 @@ where
     }
 }
 
-impl<P> private::Sealed for ProjectionQuery<P>
-where
-    P: Clone + Serialize + Send + Sync + 'static,
-{
-}
+impl<P> private::Sealed for ProjectionQuery<P> where P: Clone + Serialize + Send + Sync + 'static {}
 
 #[async_trait]
 impl<P> DatatableQuery<P> for ProjectionQuery<P>
@@ -130,10 +126,7 @@ pub trait Datatable: Send + Sync + 'static {
 
     /// Custom filter hook. Receives the query after auto-filters are applied
     /// so the implementor can add further refinements.
-    async fn filters(
-        _ctx: &DatatableContext,
-        query: Self::Query,
-    ) -> Result<Self::Query> {
+    async fn filters(_ctx: &DatatableContext, query: Self::Query) -> Result<Self::Query> {
         Ok(query)
     }
 

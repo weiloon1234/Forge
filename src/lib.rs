@@ -194,12 +194,12 @@ pub use translations::{
 pub use websocket::{ERROR_EVENT, SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT};
 
 pub use datatable::{
-    DatatableColumn, DatatableColumnMeta, DatatableContext, DatatableExportAccepted,
-    DatatableExportDelivery, DatatableFilterField, DatatableFilterInput, DatatableFilterKind,
-    DatatableFilterOp, DatatableFilterOption, DatatableFilterRow, DatatableFilterValue,
-    DatatableJsonResponse, DatatableMapping, DatatablePaginationMeta, DatatableRegistry,
-    DatatableRequest, DatatableSort, DatatableSortInput, DatatableValue, GeneratedDatatableExport,
-    Datatable, DatatableQuery,
+    Datatable, DatatableColumn, DatatableColumnMeta, DatatableContext, DatatableExportAccepted,
+    DatatableExportDelivery, DatatableFilterBinding, DatatableFilterField, DatatableFilterInput,
+    DatatableFilterKind, DatatableFilterOp, DatatableFilterOption, DatatableFilterRow,
+    DatatableFilterValue, DatatableFilterValueKind, DatatableJsonResponse, DatatableMapping,
+    DatatablePaginationMeta, DatatableQuery, DatatableRegistry, DatatableRequest, DatatableSort,
+    DatatableSortInput, DatatableValue, GeneratedDatatableExport,
 };
 
 pub use app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption, ForgeAppEnum};

@@ -129,10 +129,22 @@ mod app {
             pub password: String,
         }
 
+        #[derive(Debug, Deserialize, Validate)]
+        pub struct CreateTypedMultipartProfile {
+            #[validate(required, min(2))]
+            pub name: String,
+            pub settings: serde_json::Value,
+            pub metadata: Option<serde_json::Value>,
+            pub age: Option<i32>,
+            pub tags: Vec<String>,
+            pub scores: Vec<i32>,
+        }
+
         pub fn router(registrar: &mut HttpRegistrar) -> Result<()> {
             registrar.route("/health", get(health));
             registrar.route("/users", post(create_user));
             registrar.route("/json-users", post(create_json_user));
+            registrar.route("/typed-multipart", post(create_typed_multipart_profile));
             Ok(())
         }
 
@@ -162,6 +174,22 @@ mod app {
                 StatusCode::CREATED,
                 Json(serde_json::json!({
                     "email": payload.email,
+                })),
+            )
+        }
+
+        async fn create_typed_multipart_profile(
+            Validated(payload): Validated<CreateTypedMultipartProfile>,
+        ) -> impl IntoResponse {
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "name": payload.name,
+                    "settings": payload.settings,
+                    "metadata": payload.metadata,
+                    "age": payload.age,
+                    "tags": payload.tags,
+                    "scores": payload.scores,
                 })),
             )
         }
@@ -446,6 +474,119 @@ async fn run_http_async_translates_json_only_request_rejections() {
         "Multipart form-data tidak disokong untuk endpoint ini."
     );
     assert_eq!(multipart_payload["error_code"], "multipart_not_supported");
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn run_http_async_parses_typed_multipart_fields() {
+    let config_dir = tempdir().unwrap();
+    let port = free_port();
+    write_config(config_dir.path(), port);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let task = tokio::spawn({
+        let builder = build_app(config_dir.path(), events);
+        async move { builder.run_http_async().await.unwrap() }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}");
+
+    for _ in 0..30 {
+        if client.get(format!("{url}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let response = client
+        .post(format!("{url}/typed-multipart"))
+        .multipart(
+            reqwest::multipart::Form::new()
+                .text("name", "Alice")
+                .text("settings", r#"{"theme":"dark","layout":"stacked"}"#)
+                .text("metadata", r#"{"source":"starter"}"#)
+                .text("age", "42")
+                .text("tags", "rust")
+                .text("tags", "forge")
+                .text("scores", "10")
+                .text("scores", "20"),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let payload: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(payload["name"], "Alice");
+    assert_eq!(payload["settings"]["theme"], "dark");
+    assert_eq!(payload["settings"]["layout"], "stacked");
+    assert_eq!(payload["metadata"]["source"], "starter");
+    assert_eq!(payload["age"], 42);
+    assert_eq!(payload["tags"], serde_json::json!(["rust", "forge"]));
+    assert_eq!(payload["scores"], serde_json::json!([10, 20]));
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn run_http_async_rejects_invalid_typed_multipart_values() {
+    let config_dir = tempdir().unwrap();
+    let port = free_port();
+    write_config(config_dir.path(), port);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let task = tokio::spawn({
+        let builder = build_app(config_dir.path(), events);
+        async move { builder.run_http_async().await.unwrap() }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}");
+
+    for _ in 0..30 {
+        if client.get(format!("{url}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let invalid_json = client
+        .post(format!("{url}/typed-multipart"))
+        .multipart(
+            reqwest::multipart::Form::new()
+                .text("name", "Alice")
+                .text("settings", "{")
+                .text("age", "42"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_json.status(), reqwest::StatusCode::BAD_REQUEST);
+    let invalid_json_payload: serde_json::Value = invalid_json.json().await.unwrap();
+    assert_eq!(
+        invalid_json_payload["message"],
+        "field 'settings' has invalid JSON"
+    );
+
+    let invalid_number = client
+        .post(format!("{url}/typed-multipart"))
+        .multipart(
+            reqwest::multipart::Form::new()
+                .text("name", "Alice")
+                .text("settings", r#"{"theme":"dark"}"#)
+                .text("age", "not-a-number"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_number.status(), reqwest::StatusCode::BAD_REQUEST);
+    let invalid_number_payload: serde_json::Value = invalid_number.json().await.unwrap();
+    assert_eq!(
+        invalid_number_payload["message"],
+        "field 'age' has invalid value"
+    );
 
     task.abort();
 }

@@ -120,9 +120,9 @@ where
                         )
                     })?;
 
-                T::from_multipart(&mut multipart)
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?
+                T::from_multipart(&mut multipart).await.map_err(|e| {
+                    Error::http(StatusCode::BAD_REQUEST.as_u16(), e.to_string()).into_response()
+                })?
             } else {
                 let Json(v) = Json::<T>::from_request(req, state).await.map_err(|error| {
                     json_rejection_response::<T>(&app, locale.as_deref(), error)

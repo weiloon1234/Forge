@@ -371,7 +371,7 @@ Unauthorized and forbidden auth failures now return stable machine-friendly code
 {
   "message": "Authentication credentials are required.",
   "status": 401,
-  "code": "missing_auth_credentials",
+  "error_code": "missing_auth_credentials",
   "message_key": "auth.missing_auth_credentials"
 }
 ```

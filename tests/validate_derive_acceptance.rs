@@ -633,6 +633,17 @@ mod file_validation {
         pub email: Option<String>,
     }
 
+    #[derive(Debug, Deserialize, Validate)]
+    pub struct TypedMultipartForm {
+        #[validate(required, min(2))]
+        pub username: String,
+        pub settings: serde_json::Value,
+        pub metadata: Option<serde_json::Value>,
+        pub age: Option<i32>,
+        pub tags: Vec<String>,
+        pub scores: Vec<i32>,
+    }
+
     #[tokio::test]
     async fn text_only_struct_has_from_multipart_impl() {
         // This test just verifies the derive generates FromMultipart
@@ -646,5 +657,29 @@ mod file_validation {
         let mut validator = Validator::new(app);
         input.validate(&mut validator).await.unwrap();
         assert!(validator.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn typed_optional_json_and_vec_fields_compile_with_validate_derive() {
+        // Multipart extraction is covered end-to-end in acceptance tests.
+        // This regression test ensures the derive still expands cleanly for
+        // typed optional, JSON, and repeated-field vector shapes.
+        let app = test_app();
+        let input = TypedMultipartForm {
+            username: "alice".to_string(),
+            settings: serde_json::json!({ "theme": "dark" }),
+            metadata: Some(serde_json::json!({ "source": "starter" })),
+            age: Some(42),
+            tags: vec!["rust".to_string(), "forge".to_string()],
+            scores: vec![10, 20],
+        };
+        let mut validator = Validator::new(app);
+        input.validate(&mut validator).await.unwrap();
+        assert!(validator.finish().is_ok());
+        assert_eq!(input.settings["theme"], "dark");
+        assert_eq!(input.metadata.as_ref().unwrap()["source"], "starter");
+        assert_eq!(input.age, Some(42));
+        assert_eq!(input.tags, vec!["rust".to_string(), "forge".to_string()]);
+        assert_eq!(input.scores, vec![10, 20]);
     }
 }

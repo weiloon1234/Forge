@@ -315,6 +315,20 @@ async fn guarded_http_routes_enforce_auth_and_echo_request_id() {
 
     let unauthorized = client.get(format!("{base_url}/me")).send().await.unwrap();
     assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let unauthorized_payload: serde_json::Value = unauthorized.json().await.unwrap();
+    assert_eq!(
+        unauthorized_payload["message"],
+        "The Authorization header is missing."
+    );
+    assert_eq!(
+        unauthorized_payload["error_code"],
+        "missing_authorization_header"
+    );
+    assert_eq!(
+        unauthorized_payload["message_key"],
+        "auth.missing_authorization_header"
+    );
+    assert!(unauthorized_payload.get("code").is_none());
 
     let forbidden = client
         .get(format!("{base_url}/me"))
@@ -323,6 +337,20 @@ async fn guarded_http_routes_enforce_auth_and_echo_request_id() {
         .await
         .unwrap();
     assert_eq!(forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+    let forbidden_payload: serde_json::Value = forbidden.json().await.unwrap();
+    assert_eq!(
+        forbidden_payload["message"],
+        "You do not have permission to perform this action."
+    );
+    assert_eq!(
+        forbidden_payload["error_code"],
+        "missing_required_permission"
+    );
+    assert_eq!(
+        forbidden_payload["message_key"],
+        "auth.missing_required_permission"
+    );
+    assert!(forbidden_payload.get("code").is_none());
 
     let viewer = client
         .get(format!("{base_url}/me"))
@@ -402,11 +430,15 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
         anonymous_error.payload["message"],
         "Authentication credentials are required."
     );
-    assert_eq!(anonymous_error.payload["code"], "missing_auth_credentials");
+    assert_eq!(
+        anonymous_error.payload["error_code"],
+        "missing_auth_credentials"
+    );
     assert_eq!(
         anonymous_error.payload["message_key"],
         "auth.missing_auth_credentials"
     );
+    assert!(anonymous_error.payload.get("code").is_none());
 
     let mut guest = connect_websocket_with_token(&url, Some("guest-token")).await;
     guest
@@ -431,11 +463,15 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
         guest_error.payload["message"],
         "You do not have permission to perform this action."
     );
-    assert_eq!(guest_error.payload["code"], "missing_required_permission");
+    assert_eq!(
+        guest_error.payload["error_code"],
+        "missing_required_permission"
+    );
     assert_eq!(
         guest_error.payload["message_key"],
         "auth.missing_required_permission"
     );
+    assert!(guest_error.payload.get("code").is_none());
 
     let mut viewer = connect_websocket_with_token(&url, Some("viewer-token")).await;
     viewer

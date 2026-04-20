@@ -4,7 +4,10 @@ use syn::parse::ParseStream;
 use syn::spanned::Spanned;
 use syn::{DeriveInput, ExprLit, FieldsNamed, Ident, Lit, Type};
 
-use crate::common::{ensure_named_struct, require_ident, type_argument_if_last_segment_ident};
+use crate::common::{
+    ensure_named_struct, require_ident, type_argument_if_last_segment_ident,
+    type_path_last_segment_matches,
+};
 
 // ---------------------------------------------------------------------------
 // Struct-level args: #[validate(messages(...), attributes(...))]
@@ -146,6 +149,30 @@ fn is_or_wraps_uploaded_file(ty: &Type) -> bool {
         }
     }
     false
+}
+
+fn is_json_value_type(ty: &Type) -> bool {
+    type_path_last_segment_matches(ty, "Value")
+}
+
+fn generate_parse_text_value(
+    raw_expr: TokenStream,
+    target_ty: &Type,
+    field_name: &str,
+) -> TokenStream {
+    if is_json_value_type(target_ty) {
+        quote! {
+            ::serde_json::from_str::<#target_ty>(&#raw_expr).map_err(|_| {
+                ::forge::foundation::Error::message(format!("field '{}' has invalid JSON", #field_name))
+            })?
+        }
+    } else {
+        quote! {
+            <#target_ty as ::std::str::FromStr>::from_str(&#raw_expr).map_err(|_| {
+                ::forge::foundation::Error::message(format!("field '{}' has invalid value", #field_name))
+            })?
+        }
+    }
 }
 
 fn parse_field_validations(
@@ -1027,12 +1054,37 @@ fn generate_from_multipart_impl(
                 });
             }
         } else if fi.is_vec {
-            // Vec<String> etc. — not handled in multipart for now, default
+            // Vec<T>: collect repeated text fields in request order
+            let inner_ty = type_argument_if_last_segment_ident(&fi.ty, "Vec")
+                .expect("Vec fields should expose an inner type");
+
+            var_decls.push(quote! {
+                let mut #var_name: Vec<String> = Vec::new();
+            });
+
+            match_arms.push(quote! {
+                #name => {
+                    let __text = __field.text().await
+                        .map_err(|e| ::forge::foundation::Error::message(format!("field error: {e}")))?;
+                    #var_name.push(__text);
+                }
+            });
+
+            let parse_expr = generate_parse_text_value(quote!(__item), inner_ty, name);
             field_assignments.push(quote! {
-                #ident: ::std::default::Default::default()
+                #ident: {
+                    let mut __items = Vec::with_capacity(#var_name.len());
+                    for __item in #var_name {
+                        __items.push(#parse_expr);
+                    }
+                    __items
+                }
             });
         } else if fi.is_option {
-            // Option<String> etc.: try to parse text field
+            // Option<T>: keep the last text field, parse it when present
+            let inner_ty = type_argument_if_last_segment_ident(&fi.ty, "Option")
+                .expect("Option fields should expose an inner type");
+
             var_decls.push(quote! {
                 let mut #var_name: Option<String> = None;
             });
@@ -1045,30 +1097,32 @@ fn generate_from_multipart_impl(
                 }
             });
 
-            field_assignments.push(quote! {
-                #ident: #var_name
-            });
-        } else {
-            // Text fields (String, i32, bool, etc.): use unwrap_or_default
-            var_decls.push(quote! {
-                let mut #var_name: Option<String> = None;
-            });
-
-            match_arms.push(quote! {
-                #name => {
-                    let __text = __field.text().await
-                        .map_err(|e| ::forge::foundation::Error::message(format!("field error: {e}")))?;
-                    #var_name = Some(__text);
-                }
-            });
-
-            // For String fields, use unwrap_or_default; for others, parse
-            let ty = &fi.ty;
+            let parse_expr = generate_parse_text_value(quote!(__val), inner_ty, name);
             field_assignments.push(quote! {
                 #ident: match #var_name {
-                    Some(__val) => {
-                        <#ty as ::std::str::FromStr>::from_str(&__val).unwrap_or_default()
-                    }
+                    Some(__val) => Some(#parse_expr),
+                    None => None,
+                }
+            });
+        } else {
+            // Text fields (String, i32, bool, JSON, etc.): keep the last text field
+            var_decls.push(quote! {
+                let mut #var_name: Option<String> = None;
+            });
+
+            match_arms.push(quote! {
+                #name => {
+                    let __text = __field.text().await
+                        .map_err(|e| ::forge::foundation::Error::message(format!("field error: {e}")))?;
+                    #var_name = Some(__text);
+                }
+            });
+
+            let ty = &fi.ty;
+            let parse_expr = generate_parse_text_value(quote!(__val), ty, name);
+            field_assignments.push(quote! {
+                #ident: match #var_name {
+                    Some(__val) => #parse_expr,
                     None => ::std::default::Default::default(),
                 }
             });

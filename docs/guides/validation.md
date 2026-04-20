@@ -433,6 +433,15 @@ async fn login(
 
 This is the common path for JSON DTOs. `Validated<T>` remains the mixed extractor for DTOs that intentionally support both JSON and multipart.
 
+When `Validated<T>` receives `multipart/form-data`, the derive-generated extractor now keeps typed parsing intact:
+
+- scalar fields keep the last text part and parse via `FromStr`
+- `Vec<T>` fields collect repeated text parts in request order
+- `serde_json::Value` fields parse from JSON text
+- invalid present multipart values fail the request with `400 Bad Request` instead of silently defaulting
+
+That means derive-based multipart DTOs no longer need local workarounds for optional numbers, repeated text fields, or arbitrary JSON payload fragments.
+
 `JsonValidated<T>` now resolves extractor-level request errors through the validation/i18n pipeline too:
 
 - `validation.invalid_request_body`

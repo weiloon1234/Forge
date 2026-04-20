@@ -364,7 +364,7 @@ impl AuthError {
         });
 
         if let Some(code) = self.code() {
-            payload["code"] = serde_json::Value::String(code.as_str().to_string());
+            payload["error_code"] = serde_json::Value::String(code.as_str().to_string());
             payload["message_key"] = serde_json::Value::String(code.translation_key().to_string());
         }
 

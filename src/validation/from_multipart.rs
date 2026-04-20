@@ -5,11 +5,12 @@ use crate::foundation::Result;
 /// Trait for extracting a typed struct from a multipart form-data request.
 ///
 /// This trait is automatically implemented by the `#[derive(Validate)]` macro
-/// when the struct contains `UploadedFile` or `Option<UploadedFile>` fields.
+/// for derive-based request DTOs, including text-only structs.
 ///
 /// Text fields are extracted as strings and parsed into the target type via
-/// `FromStr`. File fields are streamed to a temporary file and wrapped in
-/// `UploadedFile`.
+/// `FromStr`. `serde_json::Value` fields are parsed from JSON strings, repeated
+/// text parts populate `Vec<T>` fields in request order, and file fields are
+/// streamed to a temporary file and wrapped in `UploadedFile`.
 #[async_trait]
 pub trait FromMultipart: Send + Sized {
     /// Extract fields from a multipart stream.

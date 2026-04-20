@@ -92,6 +92,7 @@ struct DatatableFilterField
   fn text(name: impl Into<String>, label: impl Into<String>) -> Self
   fn text_like(name: impl Into<String>, label: impl Into<String>) -> Self
   fn text_search(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn text_search_fields<Row, I, F>( name: impl Into<String>, label: impl Into<String>, fields: I, ) -> Self
   fn number(name: impl Into<String>, label: impl Into<String>) -> Self
   fn decimal_min(name: impl Into<String>, label: impl Into<String>) -> Self
   fn decimal_max(name: impl Into<String>, label: impl Into<String>) -> Self
@@ -105,7 +106,8 @@ struct DatatableFilterField
   fn options<I>(self, options: I) -> Self
   fn help(self, help: impl Into<String>) -> Self
   fn nullable(self) -> Self
-  fn server_field(self, field: impl Into<String>) -> Self
+  fn server_field<Row, F>(self, field: F) -> Self
+  fn server_fields<Row, I, F>(self, fields: I) -> Self
   fn bind( self, field: impl Into<String>, op: DatatableFilterOp, value_kind: DatatableFilterValueKind, ) -> Self
   fn enum_select<E: ForgeAppEnum>( name: impl Into<String>, label: impl Into<String>, ) -> Self
 struct DatatableFilterOption

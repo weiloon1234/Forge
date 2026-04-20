@@ -4,6 +4,7 @@ use serde::{Serialize, Serializer};
 use crate::app_enum::{EnumKey, ForgeAppEnum};
 use crate::support::Collection;
 
+use super::column::DatatableFieldRef;
 use super::request::DatatableFilterOp;
 
 // ---------------------------------------------------------------------------
@@ -223,6 +224,19 @@ impl DatatableFilterField {
         )
     }
 
+    pub fn text_search_fields<Row, I, F>(
+        name: impl Into<String>,
+        label: impl Into<String>,
+        fields: I,
+    ) -> Self
+    where
+        Row: 'static,
+        I: IntoIterator<Item = F>,
+        F: Into<DatatableFieldRef<Row>>,
+    {
+        Self::text_search(name, label).server_fields(fields)
+    }
+
     pub fn number(name: impl Into<String>, label: impl Into<String>) -> Self {
         Self::new(name, label, DatatableFilterKind::Number)
     }
@@ -308,8 +322,26 @@ impl DatatableFilterField {
         self
     }
 
-    pub fn server_field(mut self, field: impl Into<String>) -> Self {
-        self.binding.field = field.into();
+    pub fn server_field<Row, F>(self, field: F) -> Self
+    where
+        Row: 'static,
+        F: Into<DatatableFieldRef<Row>>,
+    {
+        self.server_fields(std::iter::once(field))
+    }
+
+    pub fn server_fields<Row, I, F>(mut self, fields: I) -> Self
+    where
+        Row: 'static,
+        I: IntoIterator<Item = F>,
+        F: Into<DatatableFieldRef<Row>>,
+    {
+        assert!(
+            self.binding.op == DatatableFilterOp::LikeAny,
+            "server_fields(...) is only supported for LikeAny search filters; use bind(...) for non-search filter targets"
+        );
+
+        self.binding.field = join_server_fields(fields);
         self
     }
 
@@ -347,6 +379,30 @@ impl DatatableFilterField {
     }
 }
 
+fn join_server_fields<Row, I, F>(fields: I) -> String
+where
+    Row: 'static,
+    I: IntoIterator<Item = F>,
+    F: Into<DatatableFieldRef<Row>>,
+{
+    let field_names: Vec<String> = fields.into_iter().map(|field| field.into().name).collect();
+
+    assert!(
+        !field_names.is_empty(),
+        "datatable search filters require at least one server field"
+    );
+
+    for field_name in &field_names {
+        assert!(
+            !field_name.contains('|'),
+            "datatable search field `{}` cannot contain `|`",
+            field_name
+        );
+    }
+
+    field_names.join("|")
+}
+
 // ---------------------------------------------------------------------------
 // Filter row (layout)
 // ---------------------------------------------------------------------------
@@ -373,11 +429,36 @@ impl DatatableFilterRow {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     use serde_json::json;
 
+    use crate::database::{DbType, ProjectionField};
     use crate::datatable::{DatatableFilterOp, DatatableFilterValueKind};
 
     use super::DatatableFilterField;
+
+    #[derive(Debug, serde::Serialize, crate::Model)]
+    #[forge(model = "datatable_filter_models", primary_key_strategy = "manual")]
+    struct SearchModel {
+        id: i64,
+        name: String,
+        email: String,
+        amount: i64,
+    }
+
+    #[derive(Clone, serde::Serialize)]
+    struct SearchProjection {
+        title: String,
+        slug: String,
+    }
+
+    impl SearchProjection {
+        const TITLE: ProjectionField<Self, String> = ProjectionField::new("title", DbType::Text);
+        const SLUG: ProjectionField<Self, String> = ProjectionField::new("slug", DbType::Text);
+        const INVALID: ProjectionField<Self, String> =
+            ProjectionField::new("slug|title", DbType::Text);
+    }
 
     #[test]
     fn serializes_optional_metadata_only_when_present() {
@@ -482,12 +563,69 @@ mod tests {
 
     #[test]
     fn server_field_overrides_only_the_binding_field() {
-        let filter = DatatableFilterField::decimal_max("maximum_total", "Maximum Total")
-            .server_field("total");
+        let filter =
+            DatatableFilterField::text_search("search", "Search").server_field(SearchModel::EMAIL);
 
-        assert_eq!(filter.name, "maximum_total");
-        assert_eq!(filter.binding.field, "total");
-        assert_eq!(filter.binding.op, DatatableFilterOp::Lte);
-        assert_eq!(filter.binding.value_kind, DatatableFilterValueKind::Decimal);
+        assert_eq!(filter.name, "search");
+        assert_eq!(filter.binding.field, "email");
+        assert_eq!(filter.binding.op, DatatableFilterOp::LikeAny);
+        assert_eq!(filter.binding.value_kind, DatatableFilterValueKind::Text);
+    }
+
+    #[test]
+    fn text_search_fields_joins_model_columns_into_like_any_binding() {
+        let filter = DatatableFilterField::text_search_fields(
+            "search",
+            "Search",
+            [SearchModel::NAME, SearchModel::EMAIL],
+        );
+
+        assert_eq!(filter.binding.field, "name|email");
+        assert_eq!(filter.binding.op, DatatableFilterOp::LikeAny);
+        assert_eq!(filter.binding.value_kind, DatatableFilterValueKind::Text);
+    }
+
+    #[test]
+    fn text_search_fields_joins_projection_fields_into_like_any_binding() {
+        let filter = DatatableFilterField::text_search_fields(
+            "search",
+            "Search",
+            [SearchProjection::TITLE, SearchProjection::SLUG],
+        );
+
+        assert_eq!(filter.binding.field, "title|slug");
+        assert_eq!(filter.binding.op, DatatableFilterOp::LikeAny);
+        assert_eq!(filter.binding.value_kind, DatatableFilterValueKind::Text);
+    }
+
+    #[test]
+    fn server_fields_rejects_empty_field_lists() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            DatatableFilterField::text_search("search", "Search")
+                .server_fields::<SearchModel, _, crate::database::Column<SearchModel, String>>(
+                    std::iter::empty(),
+                )
+        }));
+
+        assert!(result.is_err(), "empty search fields should panic");
+    }
+
+    #[test]
+    fn server_fields_rejects_field_names_containing_pipe() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            DatatableFilterField::text_search("search", "Search")
+                .server_fields([SearchProjection::INVALID])
+        }));
+
+        assert!(result.is_err(), "pipe-delimited field names should panic");
+    }
+
+    #[test]
+    fn server_fields_rejects_non_search_filters() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            DatatableFilterField::text("status", "Status").server_field(SearchModel::NAME)
+        }));
+
+        assert!(result.is_err(), "non-LikeAny filters should panic");
     }
 }

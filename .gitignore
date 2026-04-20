@@ -28,6 +28,9 @@ Thumbs.db
 # Logs
 logs/
 
+# Generated raw TypeScript output
+bindings/
+
 # Claude Code session data (keep skills/)
 .claude/*
 !.claude/skills/

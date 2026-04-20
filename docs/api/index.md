@@ -16,7 +16,7 @@ Load only the file you need — don't read them all at once.
 | [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 63L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
 | [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 680L |
-| [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 193L |
+| [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 195L |
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 159L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 22L |
 | [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 131L |
@@ -41,4 +41,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 33 modules, 2978 lines across all files.**
+**Total: 33 modules, 2980 lines across all files.**

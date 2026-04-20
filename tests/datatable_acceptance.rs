@@ -234,9 +234,9 @@ impl Datatable for PaymentsDatatable {
     async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
         Ok(vec![DatatableFilterRow::pair(
             DatatableFilterField::decimal_min("minimum_amount", "Minimum Amount")
-                .server_field("amount"),
+                .server_field(Payment::AMOUNT),
             DatatableFilterField::decimal_max("maximum_amount", "Maximum Amount")
-                .server_field("amount"),
+                .server_field(Payment::AMOUNT),
         )])
     }
 }

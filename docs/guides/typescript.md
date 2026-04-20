@@ -55,6 +55,8 @@ make types
 import type { CreateOrderRequest, OrderStatus } from "@shared/types/generated";
 ```
 
+The configured `typescript.output_dir` is the supported frontend import path. If you see raw ts-rs files in a root `bindings/` directory, treat them as manual or stale output rather than a second source of truth.
+
 ---
 
 ## Config
@@ -64,6 +66,8 @@ import type { CreateOrderRequest, OrderStatus } from "@shared/types/generated";
 [typescript]
 output_dir = "frontend/shared/types/generated"
 ```
+
+Forge’s `types:export` command writes to this configured directory and builds the framework-facing barrel there. Apps should import from this path, not from any separate raw `bindings/` output.
 
 Override via CLI flag:
 

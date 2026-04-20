@@ -225,10 +225,13 @@ Use `available_filters()` when the frontend needs declarative filter controls:
 async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
     Ok(vec![
         DatatableFilterRow::pair(
-            DatatableFilterField::text_search("merchant_query", "Merchant")
-                .server_field("merchant_id"),
+            DatatableFilterField::text_search_fields(
+                "merchant_query",
+                "Merchant",
+                [Order::MERCHANT_ID],
+            ),
             DatatableFilterField::decimal_min("minimum_total", "Minimum Total")
-                .server_field("total"),
+                .bind("total", DatatableFilterOp::Gte, DatatableFilterValueKind::Integer),
         ),
     ])
 }
@@ -245,14 +248,31 @@ Forge also ships semantic helpers for common cases:
 
 ```rust
 DatatableFilterField::text_like("email", "Email");
-DatatableFilterField::text_search("query", "Search").server_field("email|name");
-DatatableFilterField::date_from("created_after", "Created After").server_field("created_at");
-DatatableFilterField::date_to("created_before", "Created Before").server_field("created_at");
-DatatableFilterField::decimal_min("minimum_amount", "Minimum Amount").server_field("amount");
-DatatableFilterField::decimal_max("maximum_amount", "Maximum Amount").server_field("amount");
+DatatableFilterField::text_search_fields("query", "Search", [User::EMAIL, User::NAME]);
+DatatableFilterField::text_search("query", "Search").server_field(User::EMAIL);
+DatatableFilterField::date_from("created_after", "Created After").bind(
+    "created_at",
+    DatatableFilterOp::DateFrom,
+    DatatableFilterValueKind::Date,
+);
+DatatableFilterField::date_to("created_before", "Created Before").bind(
+    "created_at",
+    DatatableFilterOp::DateTo,
+    DatatableFilterValueKind::Date,
+);
+DatatableFilterField::decimal_min("minimum_amount", "Minimum Amount").bind(
+    "amount",
+    DatatableFilterOp::Gte,
+    DatatableFilterValueKind::Decimal,
+);
+DatatableFilterField::decimal_max("maximum_amount", "Maximum Amount").bind(
+    "amount",
+    DatatableFilterOp::Lte,
+    DatatableFilterValueKind::Decimal,
+);
 ```
 
-`DatatableFilterField::text(...)` still represents an exact match. Use the semantic helpers above when the UI intends partial-match search or range filters.
+`DatatableFilterField::text(...)` still represents an exact match. Use `text_search(...)` for one-field search and `text_search_fields(...)` for multi-field search.
 
 Forge still accepts structured `DatatableRequest` filters and legacy `f-...` query params through `DatatableRequest::from_query_params()`, but explicit binding metadata is now the preferred frontend contract.
 

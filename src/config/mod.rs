@@ -757,7 +757,7 @@ mod tests {
 
     use super::{
         AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig, LoggingConfig,
-        ObservabilityConfig, RedisConfig, SchedulerConfig, WebSocketConfig,
+        ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -954,6 +954,12 @@ mod tests {
 
         assert_eq!(auth.default_guard, GuardId::new("admin"));
         assert_eq!(auth.bearer_prefix, "Token");
+    }
+
+    #[test]
+    fn typescript_config_defaults_to_generated_output_dir() {
+        let config = TypeScriptConfig::default();
+        assert_eq!(config.output_dir, "frontend/shared/types/generated");
     }
 
     #[test]

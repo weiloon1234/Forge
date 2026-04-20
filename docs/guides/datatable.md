@@ -225,16 +225,10 @@ Use `available_filters()` when the frontend needs declarative filter controls:
 async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
     Ok(vec![
         DatatableFilterRow::pair(
-            DatatableFilterField::number("merchant", "Merchant ID").bind(
-                "merchant_id",
-                DatatableFilterOp::Eq,
-                DatatableFilterValueKind::Integer,
-            ),
-            DatatableFilterField::number("minimum_total", "Minimum Total").bind(
-                "total",
-                DatatableFilterOp::Gte,
-                DatatableFilterValueKind::Integer,
-            ),
+            DatatableFilterField::text_search("merchant_query", "Merchant")
+                .server_field("merchant_id"),
+            DatatableFilterField::decimal_min("minimum_total", "Minimum Total")
+                .server_field("total"),
         ),
     ])
 }
@@ -247,15 +241,18 @@ Each filter field now declares:
 - `binding.op`: backend-declared operator
 - `binding.value_kind`: how the frontend should serialize the value
 
-For exact decimal fields, use `DatatableFilterKind::Number` with `DatatableFilterValueKind::Decimal` so the UI can send precise string values:
+Forge also ships semantic helpers for common cases:
 
 ```rust
-DatatableFilterField::number("minimum_amount", "Minimum Amount").bind(
-    "amount",
-    DatatableFilterOp::Gte,
-    DatatableFilterValueKind::Decimal,
-)
+DatatableFilterField::text_like("email", "Email");
+DatatableFilterField::text_search("query", "Search").server_field("email|name");
+DatatableFilterField::date_from("created_after", "Created After").server_field("created_at");
+DatatableFilterField::date_to("created_before", "Created Before").server_field("created_at");
+DatatableFilterField::decimal_min("minimum_amount", "Minimum Amount").server_field("amount");
+DatatableFilterField::decimal_max("maximum_amount", "Maximum Amount").server_field("amount");
 ```
+
+`DatatableFilterField::text(...)` still represents an exact match. Use the semantic helpers above when the UI intends partial-match search or range filters.
 
 Forge still accepts structured `DatatableRequest` filters and legacy `f-...` query params through `DatatableRequest::from_query_params()`, but explicit binding metadata is now the preferred frontend contract.
 

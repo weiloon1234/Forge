@@ -144,6 +144,26 @@ impl DatatableFilterField {
         }
     }
 
+    fn new_with_binding(
+        name: impl Into<String>,
+        label: impl Into<String>,
+        kind: DatatableFilterKind,
+        op: DatatableFilterOp,
+        value_kind: DatatableFilterValueKind,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            binding: DatatableFilterBinding::new(name.clone(), op, value_kind),
+            name,
+            kind,
+            label: label.into(),
+            placeholder: None,
+            help: None,
+            nullable: false,
+            options: Collection::new(),
+        }
+    }
+
     fn default_binding(name: &str, kind: DatatableFilterKind) -> DatatableFilterBinding {
         match kind {
             DatatableFilterKind::Text => DatatableFilterBinding::new(
@@ -183,8 +203,48 @@ impl DatatableFilterField {
         Self::new(name, label, DatatableFilterKind::Text)
     }
 
+    pub fn text_like(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new_with_binding(
+            name,
+            label,
+            DatatableFilterKind::Text,
+            DatatableFilterOp::Like,
+            DatatableFilterValueKind::Text,
+        )
+    }
+
+    pub fn text_search(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new_with_binding(
+            name,
+            label,
+            DatatableFilterKind::Text,
+            DatatableFilterOp::LikeAny,
+            DatatableFilterValueKind::Text,
+        )
+    }
+
     pub fn number(name: impl Into<String>, label: impl Into<String>) -> Self {
         Self::new(name, label, DatatableFilterKind::Number)
+    }
+
+    pub fn decimal_min(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new_with_binding(
+            name,
+            label,
+            DatatableFilterKind::Number,
+            DatatableFilterOp::Gte,
+            DatatableFilterValueKind::Decimal,
+        )
+    }
+
+    pub fn decimal_max(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new_with_binding(
+            name,
+            label,
+            DatatableFilterKind::Number,
+            DatatableFilterOp::Lte,
+            DatatableFilterValueKind::Decimal,
+        )
     }
 
     pub fn select(name: impl Into<String>, label: impl Into<String>) -> Self {
@@ -197,6 +257,26 @@ impl DatatableFilterField {
 
     pub fn date(name: impl Into<String>, label: impl Into<String>) -> Self {
         Self::new(name, label, DatatableFilterKind::Date)
+    }
+
+    pub fn date_from(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new_with_binding(
+            name,
+            label,
+            DatatableFilterKind::Date,
+            DatatableFilterOp::DateFrom,
+            DatatableFilterValueKind::Date,
+        )
+    }
+
+    pub fn date_to(name: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new_with_binding(
+            name,
+            label,
+            DatatableFilterKind::Date,
+            DatatableFilterOp::DateTo,
+            DatatableFilterValueKind::Date,
+        )
     }
 
     pub fn datetime(name: impl Into<String>, label: impl Into<String>) -> Self {
@@ -225,6 +305,11 @@ impl DatatableFilterField {
 
     pub fn nullable(mut self) -> Self {
         self.nullable = true;
+        self
+    }
+
+    pub fn server_field(mut self, field: impl Into<String>) -> Self {
+        self.binding.field = field.into();
         self
     }
 
@@ -364,5 +449,45 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn semantic_helpers_provide_expected_default_bindings() {
+        let text_like = DatatableFilterField::text_like("status", "Status");
+        assert_eq!(text_like.binding.field, "status");
+        assert_eq!(text_like.binding.op, DatatableFilterOp::Like);
+        assert_eq!(text_like.binding.value_kind, DatatableFilterValueKind::Text);
+
+        let text_search = DatatableFilterField::text_search("query", "Search");
+        assert_eq!(text_search.binding.field, "query");
+        assert_eq!(text_search.binding.op, DatatableFilterOp::LikeAny);
+        assert_eq!(
+            text_search.binding.value_kind,
+            DatatableFilterValueKind::Text
+        );
+
+        let date_from = DatatableFilterField::date_from("starts_on", "Starts On");
+        assert_eq!(date_from.binding.field, "starts_on");
+        assert_eq!(date_from.binding.op, DatatableFilterOp::DateFrom);
+        assert_eq!(date_from.binding.value_kind, DatatableFilterValueKind::Date);
+
+        let decimal_min = DatatableFilterField::decimal_min("minimum_total", "Minimum Total");
+        assert_eq!(decimal_min.binding.field, "minimum_total");
+        assert_eq!(decimal_min.binding.op, DatatableFilterOp::Gte);
+        assert_eq!(
+            decimal_min.binding.value_kind,
+            DatatableFilterValueKind::Decimal
+        );
+    }
+
+    #[test]
+    fn server_field_overrides_only_the_binding_field() {
+        let filter = DatatableFilterField::decimal_max("maximum_total", "Maximum Total")
+            .server_field("total");
+
+        assert_eq!(filter.name, "maximum_total");
+        assert_eq!(filter.binding.field, "total");
+        assert_eq!(filter.binding.op, DatatableFilterOp::Lte);
+        assert_eq!(filter.binding.value_kind, DatatableFilterValueKind::Decimal);
     }
 }

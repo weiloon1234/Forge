@@ -94,11 +94,7 @@ impl Datatable for FixtureReportDatatable {
 
     async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
         Ok(vec![DatatableFilterRow::pair(
-            DatatableFilterField::text("category_query", "Category").bind(
-                "category",
-                DatatableFilterOp::Eq,
-                DatatableFilterValueKind::Text,
-            ),
+            DatatableFilterField::text_search("category_query", "Category").server_field("category"),
             DatatableFilterField::number("minimum_total", "Minimum Total").bind(
                 "total",
                 DatatableFilterOp::Gte,

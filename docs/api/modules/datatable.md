@@ -90,15 +90,22 @@ struct DatatableFilterBinding
   fn new( field: impl Into<String>, op: DatatableFilterOp, value_kind: DatatableFilterValueKind, ) -> Self
 struct DatatableFilterField
   fn text(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn text_like(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn text_search(name: impl Into<String>, label: impl Into<String>) -> Self
   fn number(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn decimal_min(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn decimal_max(name: impl Into<String>, label: impl Into<String>) -> Self
   fn select(name: impl Into<String>, label: impl Into<String>) -> Self
   fn checkbox(name: impl Into<String>, label: impl Into<String>) -> Self
   fn date(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn date_from(name: impl Into<String>, label: impl Into<String>) -> Self
+  fn date_to(name: impl Into<String>, label: impl Into<String>) -> Self
   fn datetime(name: impl Into<String>, label: impl Into<String>) -> Self
   fn placeholder(self, placeholder: impl Into<String>) -> Self
   fn options<I>(self, options: I) -> Self
   fn help(self, help: impl Into<String>) -> Self
   fn nullable(self) -> Self
+  fn server_field(self, field: impl Into<String>) -> Self
   fn bind( self, field: impl Into<String>, op: DatatableFilterOp, value_kind: DatatableFilterValueKind, ) -> Self
   fn enum_select<E: ForgeAppEnum>( name: impl Into<String>, label: impl Into<String>, ) -> Self
 struct DatatableFilterOption

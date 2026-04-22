@@ -11,7 +11,7 @@ use crate::database::{MigrationFile, MigrationRegistryHandle, SeederFile, Seeder
 use crate::datatable::registry::{DatatableRegistryBuilder, DatatableRegistryHandle};
 use crate::email::{EmailDriverFactory, EmailDriverRegistryHandle};
 use crate::events::{Event, EventListener, EventRegistryHandle};
-use crate::foundation::{Container, Result};
+use crate::foundation::{AppContext, Container, Result};
 use crate::jobs::{Job, JobMiddleware, JobMiddlewareRegistryHandle, JobRegistryHandle};
 use crate::logging::{ReadinessCheck, ReadinessRegistryHandle};
 use crate::notifications::{
@@ -19,11 +19,13 @@ use crate::notifications::{
 };
 use crate::storage::{StorageDriverFactory, StorageDriverRegistryHandle};
 use crate::support::{GuardId, MigrationId, PolicyId, ProbeId, SeederId};
+use crate::validation::RuleRegistry;
 
 #[derive(Clone)]
 pub struct ServiceRegistrar {
     container: Container,
     config: ConfigRepository,
+    rules: RuleRegistry,
     event_registry: EventRegistryHandle,
     job_registry: JobRegistryHandle,
     job_middleware_registry: JobMiddlewareRegistryHandle,
@@ -44,6 +46,7 @@ impl ServiceRegistrar {
     pub(crate) fn new(
         container: Container,
         config: ConfigRepository,
+        rules: RuleRegistry,
         event_registry: EventRegistryHandle,
         job_registry: JobRegistryHandle,
         job_middleware_registry: JobMiddlewareRegistryHandle,
@@ -59,6 +62,7 @@ impl ServiceRegistrar {
         Self {
             container,
             config,
+            rules,
             event_registry,
             job_registry,
             job_middleware_registry,
@@ -100,9 +104,15 @@ impl ServiceRegistrar {
     pub fn factory<T, F>(&self, factory: F) -> Result<()>
     where
         T: Send + Sync + 'static,
-        F: Fn(&Container) -> Result<T> + Send + Sync + 'static,
+        F: Fn(&Container, &AppContext) -> Result<T> + Send + Sync + 'static,
     {
-        self.container.factory(factory)
+        let config = self.config.clone();
+        let rules = self.rules.clone();
+
+        self.container.factory(move |container| {
+            let app = AppContext::new(container.clone(), config.clone(), rules.clone())?;
+            factory(container, &app)
+        })
     }
 
     pub fn resolve<T>(&self) -> Result<Arc<T>>

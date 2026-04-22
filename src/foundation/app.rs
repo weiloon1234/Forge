@@ -775,6 +775,7 @@ impl AppBuilder {
         let mut registrar = ServiceRegistrar::new(
             container.clone(),
             config.clone(),
+            rules.clone(),
             event_registry.clone(),
             job_registry.clone(),
             job_middleware_registry.clone(),
@@ -1191,12 +1192,59 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use serde::Serialize;
 
     use super::App;
+    use crate::events::{Event, EventContext, EventListener};
     use crate::foundation::{AppContext, Result, ServiceProvider, ServiceRegistrar};
+    use crate::support::EventId;
 
     struct TestProvider {
         order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[derive(Clone)]
+    struct AppAwareFactoryService {
+        app: AppContext,
+        marker: String,
+    }
+
+    impl AppAwareFactoryService {
+        fn redis_namespace(&self) -> Result<String> {
+            Ok(self.app.redis()?.namespace().to_string())
+        }
+    }
+
+    #[derive(Clone, Serialize)]
+    struct AppAwareFactoryEvent;
+
+    impl Event for AppAwareFactoryEvent {
+        const ID: EventId = EventId::new("tests.foundation.app_aware_factory");
+    }
+
+    struct AppAwareFactoryListener {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl EventListener<AppAwareFactoryEvent> for AppAwareFactoryListener {
+        async fn handle(
+            &self,
+            context: &EventContext,
+            _event: &AppAwareFactoryEvent,
+        ) -> Result<()> {
+            let service = context.app().resolve::<AppAwareFactoryService>()?;
+            self.log.lock().unwrap().push(format!(
+                "{}:{}",
+                service.marker,
+                service.redis_namespace()?
+            ));
+            Ok(())
+        }
+    }
+
+    struct AppAwareFactoryProvider {
+        log: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
@@ -1211,6 +1259,24 @@ mod tests {
             let value = app.resolve::<String>()?;
             assert_eq!(value.as_str(), "ready");
             self.order.lock().unwrap().push("boot");
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ServiceProvider for AppAwareFactoryProvider {
+        async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+            registrar.singleton::<String>("factory-ready".to_string())?;
+            registrar.factory::<AppAwareFactoryService, _>(|container, app| {
+                let marker = container.resolve::<String>()?;
+                Ok(AppAwareFactoryService {
+                    app: app.clone(),
+                    marker: marker.as_ref().clone(),
+                })
+            })?;
+            registrar.listen_event::<AppAwareFactoryEvent, _>(AppAwareFactoryListener {
+                log: self.log.clone(),
+            })?;
             Ok(())
         }
     }
@@ -1276,5 +1342,28 @@ mod tests {
         let descriptors = registry.descriptors();
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].id, ChannelId::new("alerts"));
+    }
+
+    #[tokio::test]
+    async fn provider_factories_receive_app_context_for_listener_resolution() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let kernel = App::builder()
+            .register_provider(AppAwareFactoryProvider { log: log.clone() })
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        kernel
+            .app()
+            .events()
+            .unwrap()
+            .dispatch(AppAwareFactoryEvent)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            ["factory-ready:forge:development"]
+        );
     }
 }

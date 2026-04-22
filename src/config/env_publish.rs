@@ -288,6 +288,45 @@ REDIS__URL=redis://127.0.0.1/
 # I18N__DEFAULT_LOCALE=en
 # I18N__FALLBACK_LOCALE=en
 # I18N__RESOURCE_PATH=locales
+
+# -----------------------------------------------------------------------------
+# TypeScript
+# -----------------------------------------------------------------------------
+# TYPESCRIPT__OUTPUT_DIR=frontend/shared/types/generated
 "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample_env;
+
+    #[test]
+    fn sample_env_includes_all_root_prefixes() {
+        let env = sample_env();
+        for prefix in [
+            "APP__",
+            "SERVER__",
+            "DATABASE__",
+            "REDIS__",
+            "AUTH__",
+            "CACHE__",
+            "JOBS__",
+            "SCHEDULER__",
+            "WEBSOCKET__",
+            "EMAIL__",
+            "STORAGE__",
+            "CRYPT__",
+            "HASHING__",
+            "LOGGING__",
+            "OBSERVABILITY__",
+            "I18N__",
+            "TYPESCRIPT__",
+        ] {
+            assert!(
+                env.contains(prefix),
+                "sample_env is missing the {prefix} root prefix"
+            );
+        }
+    }
 }

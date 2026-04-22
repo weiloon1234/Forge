@@ -211,6 +211,12 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # resource_path = "locales"
 
 # -----------------------------------------------------------------------------
+# TypeScript
+# -----------------------------------------------------------------------------
+[typescript]
+# output_dir = "frontend/shared/types/generated"
+
+# -----------------------------------------------------------------------------
 # Email
 # -----------------------------------------------------------------------------
 [email]
@@ -583,3 +589,37 @@ const FRAMEWORK_SEEDERS: &[(&str, &str)] = &[(
     "000000000001_countries_seeder.rs",
     include_str!("../../database/seeders/000000000001_countries_seeder.rs"),
 )];
+
+#[cfg(test)]
+mod tests {
+    use super::sample_config;
+
+    #[test]
+    fn sample_config_includes_all_root_sections() {
+        let config = sample_config();
+        for section in [
+            "[app]",
+            "[server]",
+            "[redis]",
+            "[database]",
+            "[auth]",
+            "[jobs]",
+            "[scheduler]",
+            "[websocket]",
+            "[logging]",
+            "[observability]",
+            "[cache]",
+            "[hashing]",
+            "[crypt]",
+            "[i18n]",
+            "[typescript]",
+            "[email]",
+            "[storage]",
+        ] {
+            assert!(
+                config.contains(section),
+                "sample_config is missing the {section} root section"
+            );
+        }
+    }
+}

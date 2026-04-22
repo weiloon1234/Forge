@@ -309,10 +309,6 @@ const FRAMEWORK_MIGRATIONS: &[(&str, &str)] = &[
         "000000000011_create_auth_mfa_totp_factors.rs",
         include_str!("../../database/migrations/000000000011_create_auth_mfa_totp_factors.rs"),
     ),
-    (
-        "000000000012_add_area_to_audit_logs.rs",
-        include_str!("../../database/migrations/000000000012_add_area_to_audit_logs.rs"),
-    ),
 ];
 
 /// Framework-provided seeder files (Rust format, discoverable by forge-build).

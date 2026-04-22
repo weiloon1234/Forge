@@ -465,6 +465,36 @@ async fn make_seeder_generates_a_rust_file_and_refuses_overwrite_without_force()
 }
 
 #[tokio::test]
+async fn migrate_publish_generates_framework_migrations_without_stale_audit_follow_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations_dir = dir.path().join("migrations");
+    let seeders_dir = dir.path().join("seeders");
+    let audit_migration_path = migrations_dir.join("000000000010_create_audit_logs.rs");
+    let stale_follow_up_path = migrations_dir.join("000000000012_add_area_to_audit_logs.rs");
+
+    write_generator_config(dir.path(), &migrations_dir, &seeders_dir);
+
+    run_cli(
+        App::builder().load_config_dir(dir.path()),
+        vec![
+            "forge".into(),
+            "migrate:publish".into(),
+            "--path".into(),
+            migrations_dir.display().to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert!(audit_migration_path.exists());
+    assert!(!stale_follow_up_path.exists());
+
+    let published = fs::read_to_string(&audit_migration_path).unwrap();
+    assert!(published.contains("area TEXT"));
+    assert!(published.contains("idx_audit_logs_area_created_at"));
+}
+
+#[tokio::test]
 async fn seed_publish_generates_framework_seeders_and_honors_force() {
     let dir = tempfile::tempdir().unwrap();
     let seeders_dir = dir.path().join("seeders");

@@ -267,6 +267,7 @@ fn filter_root_items(items: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, 
 fn module_description(stem: &str) -> &'static str {
     match stem {
         "app_enum" => "Enum metadata and serialization (ForgeAppEnum)",
+        "audit" => "Built-in audit logging with automatic model mutation tracking",
         "attachments" => "File attachments with lifecycle (HasAttachments)",
         "auth" => "Auth: guards, policies, tokens, sessions, password reset, email verification",
         "cache" => "In-memory and Redis-backed caching (CacheManager)",

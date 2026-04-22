@@ -123,6 +123,7 @@ pub struct ModelArgs {
     pub primary_key: Option<LitStr>,
     pub primary_key_strategy: Option<LitStr>,
     pub lifecycle: Option<Path>,
+    pub audit: Option<LitBool>,
     pub timestamps: Option<LitBool>,
     pub soft_deletes: Option<LitBool>,
 }
@@ -135,6 +136,7 @@ pub struct FieldArgs {
     pub db_type: Option<DbTypeSpec>,
     pub write_mutator: Option<LitStr>,
     pub read_accessor: Option<LitStr>,
+    pub audit_exclude: bool,
 }
 
 pub fn ensure_named_struct(input: &DeriveInput) -> syn::Result<&FieldsNamed> {
@@ -177,6 +179,8 @@ pub fn parse_model_args(attrs: &[Attribute]) -> syn::Result<ModelArgs> {
                 )?;
             } else if meta.path.is_ident("lifecycle") {
                 set_once_parse(&mut args.lifecycle, "lifecycle", meta.value()?)?;
+            } else if meta.path.is_ident("audit") {
+                set_once_parse(&mut args.audit, "audit", meta.value()?)?;
             } else if meta.path.is_ident("timestamps") {
                 set_once_parse(&mut args.timestamps, "timestamps", meta.value()?)?;
             } else if meta.path.is_ident("soft_deletes") {
@@ -214,6 +218,11 @@ pub fn parse_field_args(field: &Field) -> syn::Result<FieldArgs> {
                 set_once_parse(&mut args.write_mutator, "write_mutator", meta.value()?)?;
             } else if meta.path.is_ident("read_accessor") {
                 set_once_parse(&mut args.read_accessor, "read_accessor", meta.value()?)?;
+            } else if meta.path.is_ident("audit_exclude") {
+                if args.audit_exclude {
+                    return Err(meta.error("duplicate audit_exclude attribute"));
+                }
+                args.audit_exclude = true;
             } else {
                 return Err(meta.error("unsupported forge field attribute"));
             }

@@ -402,8 +402,23 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
     assert!(snapshot.http.requests_total >= 5);
     assert!(snapshot.http.success_total >= 3);
     assert!(snapshot.http.client_error_total >= 1);
+    assert!(snapshot.http.duration_ms.count >= 5);
+    assert!(!snapshot.http.duration_ms.buckets.is_empty());
     assert!(snapshot.auth.success_total >= 1);
     assert!(snapshot.auth.unauthorized_total >= 1);
+
+    let metrics = client
+        .get(format!("{base_url}/_forge/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), reqwest::StatusCode::OK);
+    let metrics_body = metrics.text().await.unwrap();
+    assert!(metrics_body.contains("# TYPE forge_http_request_duration_ms histogram"));
+    assert!(metrics_body.contains("forge_http_request_duration_ms_bucket{le=\"5\"}"));
+    assert!(metrics_body.contains("forge_http_request_duration_ms_bucket{le=\"+Inf\"}"));
+    assert!(metrics_body.contains("forge_http_request_duration_ms_sum "));
+    assert!(metrics_body.contains("forge_http_request_duration_ms_count "));
 
     server.abort();
 }

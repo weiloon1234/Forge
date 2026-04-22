@@ -1974,6 +1974,8 @@ Structured logging, observability, health probes.
 | `RuntimeDiagnostics` | Metrics + health manager |
 | `RuntimeSnapshot` | Full runtime metrics snapshot |
 | `HttpRuntimeSnapshot` | HTTP metrics |
+| `HttpDurationHistogramSnapshot` | HTTP latency histogram |
+| `HttpDurationBucketSnapshot` | HTTP latency bucket |
 | `AuthRuntimeSnapshot` | Auth metrics |
 | `WebSocketRuntimeSnapshot` | WS metrics |
 | `SchedulerRuntimeSnapshot` | Scheduler metrics |
@@ -2009,6 +2011,7 @@ async fn run_readiness_checks(&self, app: &AppContext) -> Result<ReadinessReport
 
 // Recording
 fn record_http_response(&self, status: StatusCode)
+fn record_http_response_with_duration(&self, status: StatusCode, duration_ms: u64)
 fn record_auth_outcome(&self, outcome: AuthOutcome)
 fn record_websocket_connection(&self, state: WebSocketConnectionState)
 fn record_websocket_subscription_opened(&self)

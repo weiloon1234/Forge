@@ -1061,6 +1061,11 @@ impl HttpRegistrar {
             }
         }
 
+        router = router.layer(axum_middleware::from_fn_with_state(
+            app.clone(),
+            crate::logging::request_origin_middleware,
+        ));
+
         // Apply user-registered middleware (CORS, security headers, rate limit, etc.)
         router = middleware::apply_ordered_middlewares(router, middlewares, &app);
 
@@ -1160,10 +1165,13 @@ async fn http_auth_middleware(
         }
     }
 
-    record_auth_outcome(&state.app, AuthOutcome::Success);
-    request.extensions_mut().insert(state.app.clone());
-    request.extensions_mut().insert(actor);
-    next.run(request).await
+    crate::logging::scope_current_actor(actor.clone(), async move {
+        record_auth_outcome(&state.app, AuthOutcome::Success);
+        request.extensions_mut().insert(state.app.clone());
+        request.extensions_mut().insert(actor);
+        next.run(request).await
+    })
+    .await
 }
 
 fn internal_error_response(error: Error) -> Response {

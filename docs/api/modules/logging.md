@@ -46,6 +46,7 @@ struct RuntimeDiagnostics
   fn snapshot(&self) -> RuntimeSnapshot
   async fn run_readiness_checks( &self, app: &AppContext, ) -> Result<ReadinessReport>
   fn record_http_response(&self, status: StatusCode)
+  fn record_http_response_with_duration( &self, status: StatusCode, duration_ms: u64, )
   fn record_auth_outcome(&self, outcome: AuthOutcome)
   fn record_websocket_connection(&self, state: WebSocketConnectionState)
   fn record_websocket_subscription_opened(&self)

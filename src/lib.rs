@@ -56,6 +56,7 @@ macro_rules! register_generated_database {
 
 pub mod app_enum;
 pub mod attachments;
+pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod cli;
@@ -93,6 +94,7 @@ pub use inventory;
 pub use ts_rs;
 
 pub use attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
+pub use audit::AuditLog;
 pub use auth::{
     email_verification::EmailVerificationManager,
     password_reset::PasswordResetManager,

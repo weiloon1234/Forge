@@ -284,6 +284,18 @@ impl Default for AuthConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+pub struct AuditConfig {
+    pub enabled: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct TokenConfig {
     pub access_token_ttl_minutes: u64,
     pub refresh_token_ttl_days: u64,
@@ -616,6 +628,10 @@ impl ConfigRepository {
         self.section("auth")
     }
 
+    pub fn audit(&self) -> Result<AuditConfig> {
+        self.section("audit")
+    }
+
     pub fn scheduler(&self) -> Result<SchedulerConfig> {
         self.section("scheduler")
     }
@@ -756,8 +772,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig, LoggingConfig,
-        ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
+        AppConfig, AuditConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig,
+        LoggingConfig, ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig,
+        WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -954,6 +971,32 @@ mod tests {
 
         assert_eq!(auth.default_guard, GuardId::new("admin"));
         assert_eq!(auth.bearer_prefix, "Token");
+    }
+
+    #[test]
+    fn audit_config_defaults_to_enabled() {
+        let config = ConfigRepository::default();
+        let audit: AuditConfig = config.audit().unwrap();
+
+        assert!(audit.enabled);
+    }
+
+    #[test]
+    fn parses_audit_config_section() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-audit.toml"),
+            r#"
+                [audit]
+                enabled = false
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let audit: AuditConfig = config.audit().unwrap();
+
+        assert!(!audit.enabled);
     }
 
     #[test]

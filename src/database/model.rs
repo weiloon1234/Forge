@@ -914,7 +914,7 @@ pub struct ModelHookContext<'a> {
     app: &'a AppContext,
     database: Arc<DatabaseManager>,
     transaction: &'a DatabaseTransaction,
-    actor: Option<&'a crate::auth::Actor>,
+    actor: Option<crate::auth::Actor>,
 }
 
 impl<'a> ModelHookContext<'a> {
@@ -922,7 +922,7 @@ impl<'a> ModelHookContext<'a> {
         app: &'a AppContext,
         database: Arc<DatabaseManager>,
         transaction: &'a DatabaseTransaction,
-        actor: Option<&'a crate::auth::Actor>,
+        actor: Option<crate::auth::Actor>,
     ) -> Self {
         Self {
             app,
@@ -945,7 +945,7 @@ impl<'a> ModelHookContext<'a> {
     }
 
     pub fn actor(&self) -> Option<&crate::auth::Actor> {
-        self.actor
+        self.actor.as_ref()
     }
 
     pub fn executor(&self) -> &dyn QueryExecutor {
@@ -1149,6 +1149,14 @@ pub trait Model: Clone + Send + Sync + Sized + 'static {
     type Lifecycle: ModelLifecycle<Self>;
 
     fn table_meta() -> &'static TableMeta<Self>;
+
+    fn audit_enabled() -> bool {
+        true
+    }
+
+    fn audit_excluded_fields() -> &'static [&'static str] {
+        &[]
+    }
 
     #[doc(hidden)]
     fn model_query() -> ModelQuery<Self> {

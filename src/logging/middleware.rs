@@ -6,8 +6,11 @@ use axum::response::Response;
 use tracing::Instrument;
 
 use crate::foundation::AppContext;
+use crate::http::middleware::RealIp;
 
+use super::context::CurrentRequest;
 use super::request_id::{generate_request_id, RequestId, REQUEST_ID_HEADER};
+use super::scope_current_request;
 
 pub(crate) async fn request_context_middleware(
     State(app): State<AppContext>,
@@ -49,7 +52,7 @@ pub(crate) async fn request_context_middleware(
     }
     let status = response.status();
     if let Ok(diagnostics) = app.diagnostics() {
-        diagnostics.record_http_response(status);
+        diagnostics.record_http_response_with_duration(status, duration_ms);
     }
 
     tracing::info!(
@@ -62,6 +65,32 @@ pub(crate) async fn request_context_middleware(
     );
 
     response
+}
+
+pub(crate) async fn request_origin_middleware(
+    State(_app): State<AppContext>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(generate_request_id);
+    let current = CurrentRequest {
+        request_id,
+        ip: request
+            .extensions()
+            .get::<RealIp>()
+            .map(|value| value.0.to_string()),
+        user_agent: request
+            .headers()
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned),
+    };
+
+    scope_current_request(current, next.run(request)).await
 }
 
 fn resolve_request_locale(request: &Request, app: &AppContext) -> String {

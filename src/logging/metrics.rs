@@ -56,6 +56,34 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "5xx",
         snapshot.http.server_error_total,
     );
+    write_help_type(
+        &mut out,
+        "forge_http_request_duration_ms",
+        "HTTP request duration histogram in milliseconds",
+        "histogram",
+    );
+    for bucket in &snapshot.http.duration_ms.buckets {
+        let _ = writeln!(
+            out,
+            "forge_http_request_duration_ms_bucket{{le=\"{}\"}} {}",
+            bucket.le_ms, bucket.cumulative_count
+        );
+    }
+    let _ = writeln!(
+        out,
+        "forge_http_request_duration_ms_bucket{{le=\"+Inf\"}} {}",
+        snapshot.http.duration_ms.count
+    );
+    let _ = writeln!(
+        out,
+        "forge_http_request_duration_ms_sum {}",
+        snapshot.http.duration_ms.sum_ms
+    );
+    let _ = writeln!(
+        out,
+        "forge_http_request_duration_ms_count {}",
+        snapshot.http.duration_ms.count
+    );
 
     // Auth counters
     write_help_type(
@@ -274,8 +302,9 @@ fn write_counter_label(out: &mut String, name: &str, label: &str, label_value: &
 mod tests {
     use super::*;
     use crate::logging::diagnostics::{
-        AuthRuntimeSnapshot, HttpRuntimeSnapshot, JobRuntimeSnapshot, RuntimeSnapshot,
-        SchedulerRuntimeSnapshot, WebSocketRuntimeSnapshot,
+        AuthRuntimeSnapshot, HttpDurationBucketSnapshot, HttpDurationHistogramSnapshot,
+        HttpRuntimeSnapshot, JobRuntimeSnapshot, RuntimeSnapshot, SchedulerRuntimeSnapshot,
+        WebSocketRuntimeSnapshot,
     };
     use crate::logging::types::RuntimeBackendKind;
 
@@ -291,6 +320,24 @@ mod tests {
                 redirection_total: 5,
                 client_error_total: 10,
                 server_error_total: 5,
+                duration_ms: HttpDurationHistogramSnapshot {
+                    count: 100,
+                    sum_ms: 12_345,
+                    buckets: vec![
+                        HttpDurationBucketSnapshot {
+                            le_ms: 5,
+                            cumulative_count: 3,
+                        },
+                        HttpDurationBucketSnapshot {
+                            le_ms: 10,
+                            cumulative_count: 9,
+                        },
+                        HttpDurationBucketSnapshot {
+                            le_ms: 25,
+                            cumulative_count: 25,
+                        },
+                    ],
+                },
             },
             auth: AuthRuntimeSnapshot {
                 success_total: 50,
@@ -332,6 +379,11 @@ mod tests {
         assert!(output.contains("forge_bootstrap_complete 1"));
         assert!(output.contains("forge_http_requests_total{class=\"2xx\"} 80"));
         assert!(output.contains("forge_http_requests_total{class=\"5xx\"} 5"));
+        assert!(output.contains("# TYPE forge_http_request_duration_ms histogram"));
+        assert!(output.contains("forge_http_request_duration_ms_bucket{le=\"25\"} 25"));
+        assert!(output.contains("forge_http_request_duration_ms_bucket{le=\"+Inf\"} 100"));
+        assert!(output.contains("forge_http_request_duration_ms_sum 12345"));
+        assert!(output.contains("forge_http_request_duration_ms_count 100"));
         assert!(output.contains("forge_auth_total{outcome=\"success\"} 50"));
         assert!(output.contains("forge_websocket_active_connections 5"));
         assert!(output.contains("forge_jobs_total{outcome=\"succeeded\"} 25"));
@@ -355,6 +407,11 @@ mod tests {
                 redirection_total: 0,
                 client_error_total: 0,
                 server_error_total: 0,
+                duration_ms: HttpDurationHistogramSnapshot {
+                    count: 0,
+                    sum_ms: 0,
+                    buckets: Vec::new(),
+                },
             },
             auth: AuthRuntimeSnapshot {
                 success_total: 0,

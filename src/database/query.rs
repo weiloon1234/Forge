@@ -2,7 +2,9 @@ use std::{collections::VecDeque, future::Future, marker::PhantomData, pin::Pin};
 
 use serde::Serialize;
 
+use crate::audit::{record_with_assignments, write_model_audit, AuditEventType};
 use crate::foundation::{AppContext, Error, Result};
+use crate::logging::current_actor;
 use crate::support::{Collection, ModelId};
 use futures_util::stream::{self, BoxStream, StreamExt};
 
@@ -2673,7 +2675,13 @@ where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
-            self.fast_execute(executor).await
+            if executor.app_context().audit()?.active_for::<M>() {
+                Ok(create_many_model_records_without_lifecycle(self, executor)
+                    .await?
+                    .len() as u64)
+            } else {
+                self.fast_execute(executor).await
+            }
         } else {
             Ok(create_many_model_records(self, executor).await?.len() as u64)
         }
@@ -2684,7 +2692,13 @@ where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
-            self.fast_get(executor).await
+            if executor.app_context().audit()?.active_for::<M>() {
+                create_many_model_records_without_lifecycle(self, executor)
+                    .await
+                    .map(Collection::from)
+            } else {
+                self.fast_get(executor).await
+            }
         } else {
             create_many_model_records(self, executor)
                 .await
@@ -2920,7 +2934,13 @@ where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
-            self.fast_execute(executor).await
+            if executor.app_context().audit()?.active_for::<M>() {
+                Ok(update_model_records_without_lifecycle(self, executor)
+                    .await?
+                    .len() as u64)
+            } else {
+                self.fast_execute(executor).await
+            }
         } else {
             Ok(update_model_records(self, executor).await?.len() as u64)
         }
@@ -2949,7 +2969,13 @@ where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
-            self.fast_get(executor).await
+            if executor.app_context().audit()?.active_for::<M>() {
+                update_model_records_without_lifecycle(self, executor)
+                    .await
+                    .map(Collection::from)
+            } else {
+                self.fast_get(executor).await
+            }
         } else {
             update_model_records(self, executor)
                 .await
@@ -3109,7 +3135,11 @@ where
         E: ModelWriteExecutor,
     {
         if self.without_lifecycle {
-            self.fast_execute(executor).await
+            if executor.app_context().audit()?.active_for::<M>() {
+                delete_model_rows_without_lifecycle(self, executor).await
+            } else {
+                self.fast_execute(executor).await
+            }
         } else {
             delete_model_rows(self, executor).await
         }
@@ -3153,18 +3183,20 @@ async fn with_model_write_transaction<E, T>(
     operation: impl for<'a> FnOnce(
         &'a AppContext,
         &'a super::runtime::DatabaseTransaction,
-        Option<&'a crate::auth::Actor>,
+        Option<crate::auth::Actor>,
     ) -> ModelWriteFuture<'a, T>,
 ) -> Result<T>
 where
     E: ModelWriteExecutor,
 {
+    let actor = executor.actor().cloned().or_else(current_actor);
+
     if let Some(transaction) = executor.active_transaction() {
-        return operation(executor.app_context(), transaction, executor.actor()).await;
+        return operation(executor.app_context(), transaction, actor).await;
     }
 
     let transaction = executor.app_context().begin_transaction().await?;
-    let result = operation(transaction.app(), transaction.transaction(), None).await;
+    let result = operation(transaction.app(), transaction.transaction(), actor).await;
     match result {
         Ok(value) => {
             transaction.commit().await?;
@@ -3264,55 +3296,51 @@ where
     let create = create.clone();
     with_model_write_transaction(executor, |app, transaction, actor| {
         Box::pin(async move {
-            let database = app.database()?;
-            let mut values = create.rows[0].clone();
-            apply_create_model_conventions(create.table, app, &mut values)?;
-            let mut draft = CreateDraft::<M>::new(values);
-            let context = ModelHookContext::new(app, database, transaction, actor);
-            M::Lifecycle::creating(&context, &mut draft).await?;
-            let mut on_conflict = create.on_conflict.clone();
-            let mut values = draft.into_values();
-            apply_create_write_mutators(&create, &context, &mut values, &mut on_conflict).await?;
-            context
-                .dispatch(ModelCreatingEvent {
-                    snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                        None,
-                        None,
-                        Some(CreateDraft::<M>::new(values.clone()).pending_record()),
-                    ),
-                })
-                .await?;
+            create_model_records_in_transaction_inner(
+                &create,
+                app,
+                transaction,
+                actor,
+                LifecycleMode::Enabled,
+            )
+            .await
+        })
+    })
+    .await
+}
 
-            let records = transaction
-                .query_records_with(
-                    &CreateModel {
-                        table: create.table,
-                        rows: vec![values],
-                        on_conflict,
-                        options: create.options.clone(),
-                    }
-                    .compiled_sql(true)?,
-                    create.options.clone(),
-                )
-                .await?;
-
-            let mut models = Vec::with_capacity(records.len());
-            for record in &records {
-                let model = create.table.hydrate_record(record)?;
-                M::Lifecycle::created(&context, &model, record).await?;
-                context
-                    .dispatch(ModelCreatedEvent {
-                        snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                            None,
-                            Some(record.clone()),
-                            None,
-                        ),
-                    })
-                    .await?;
-                models.push(model);
+async fn create_many_model_records_without_lifecycle<E, M>(
+    create_many: &CreateManyModel<M>,
+    executor: &E,
+) -> Result<Vec<M>>
+where
+    E: ModelWriteExecutor,
+    M: Model,
+{
+    create_many.validate_rows()?;
+    let create_many = create_many.clone();
+    with_model_write_transaction(executor, |app, transaction, actor| {
+        Box::pin(async move {
+            let mut created = Vec::new();
+            for row in &create_many.rows {
+                let create = CreateModel {
+                    table: create_many.table,
+                    rows: vec![row.clone()],
+                    on_conflict: create_many.on_conflict.clone(),
+                    options: create_many.options.clone(),
+                };
+                created.extend(
+                    create_model_records_in_transaction_inner(
+                        &create,
+                        app,
+                        transaction,
+                        actor.clone(),
+                        LifecycleMode::Disabled,
+                    )
+                    .await?,
+                );
             }
-
-            Ok(models)
+            Ok(created)
         })
     })
     .await
@@ -3339,7 +3367,14 @@ where
                     options: create_many.options.clone(),
                 };
                 created.extend(
-                    create_model_records_in_transaction(&create, app, transaction, actor).await?,
+                    create_model_records_in_transaction_inner(
+                        &create,
+                        app,
+                        transaction,
+                        actor.clone(),
+                        LifecycleMode::Enabled,
+                    )
+                    .await?,
                 );
             }
             Ok(created)
@@ -3348,11 +3383,24 @@ where
     .await
 }
 
-async fn create_model_records_in_transaction<M>(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LifecycleMode {
+    Enabled,
+    Disabled,
+}
+
+impl LifecycleMode {
+    fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+async fn create_model_records_in_transaction_inner<M>(
     create: &CreateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<&crate::auth::Actor>,
+    actor: Option<crate::auth::Actor>,
+    lifecycle_mode: LifecycleMode,
 ) -> Result<Vec<M>>
 where
     M: Model,
@@ -3362,19 +3410,23 @@ where
     apply_create_model_conventions(create.table, app, &mut values)?;
     let mut draft = CreateDraft::<M>::new(values);
     let context = ModelHookContext::new(app, database, transaction, actor);
-    M::Lifecycle::creating(&context, &mut draft).await?;
+    if lifecycle_mode.enabled() {
+        M::Lifecycle::creating(&context, &mut draft).await?;
+    }
     let mut on_conflict = create.on_conflict.clone();
     let mut values = draft.into_values();
     apply_create_write_mutators(create, &context, &mut values, &mut on_conflict).await?;
-    context
-        .dispatch(ModelCreatingEvent {
-            snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                None,
-                None,
-                Some(CreateDraft::<M>::new(values.clone()).pending_record()),
-            ),
-        })
-        .await?;
+    if lifecycle_mode.enabled() {
+        context
+            .dispatch(ModelCreatingEvent {
+                snapshot: ModelLifecycleSnapshot::for_model::<M>(
+                    None,
+                    None,
+                    Some(CreateDraft::<M>::new(values.clone()).pending_record()),
+                ),
+            })
+            .await?;
+    }
 
     let records = transaction
         .query_records_with(
@@ -3392,12 +3444,21 @@ where
     let mut models = Vec::with_capacity(records.len());
     for record in &records {
         let model = create.table.hydrate_record(record)?;
-        M::Lifecycle::created(&context, &model, record).await?;
-        context
-            .dispatch(ModelCreatedEvent {
-                snapshot: ModelLifecycleSnapshot::for_model::<M>(None, Some(record.clone()), None),
-            })
-            .await?;
+        if lifecycle_mode.enabled() {
+            M::Lifecycle::created(&context, &model, record).await?;
+        }
+        write_model_audit::<M>(&context, AuditEventType::Created, None, Some(record)).await?;
+        if lifecycle_mode.enabled() {
+            context
+                .dispatch(ModelCreatedEvent {
+                    snapshot: ModelLifecycleSnapshot::for_model::<M>(
+                        None,
+                        Some(record.clone()),
+                        None,
+                    ),
+                })
+                .await?;
+        }
         models.push(model);
     }
 
@@ -3419,11 +3480,56 @@ where
     .await
 }
 
+async fn update_model_records_without_lifecycle<E, M>(
+    update: &UpdateModel<M>,
+    executor: &E,
+) -> Result<Vec<M>>
+where
+    E: ModelWriteExecutor,
+    M: Model,
+{
+    update.validate()?;
+    let update = update.clone();
+    with_model_write_transaction(executor, |app, transaction, actor| {
+        Box::pin(async move {
+            update_model_records_in_transaction_inner(
+                &update,
+                app,
+                transaction,
+                actor,
+                LifecycleMode::Disabled,
+            )
+            .await
+        })
+    })
+    .await
+}
+
 async fn update_model_records_in_transaction<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<&crate::auth::Actor>,
+    actor: Option<crate::auth::Actor>,
+) -> Result<Vec<M>>
+where
+    M: Model,
+{
+    update_model_records_in_transaction_inner(
+        update,
+        app,
+        transaction,
+        actor,
+        LifecycleMode::Enabled,
+    )
+    .await
+}
+
+async fn update_model_records_in_transaction_inner<M>(
+    update: &UpdateModel<M>,
+    app: &AppContext,
+    transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<crate::auth::Actor>,
+    lifecycle_mode: LifecycleMode,
 ) -> Result<Vec<M>>
 where
     M: Model,
@@ -3432,24 +3538,29 @@ where
     let database = app.database()?;
     let context = ModelHookContext::new(app, database, transaction, actor);
     let mut updated_models = Vec::with_capacity(current_records.len());
+    let audit_event_type = audit_event_type_for_update(update.system_action);
 
     for current_record in current_records {
         let current_model = update.table.hydrate_record(&current_record)?;
         let mut values = update.values.clone();
         apply_update_model_conventions(update.table, app, &mut values, update.system_action)?;
         let mut draft = UpdateDraft::<M>::new(values);
-        M::Lifecycle::updating(&context, &current_model, &mut draft).await?;
+        if lifecycle_mode.enabled() {
+            M::Lifecycle::updating(&context, &current_model, &mut draft).await?;
+        }
         let mut values = draft.into_values();
         apply_update_write_mutators(update.table, &context, &mut values).await?;
-        context
-            .dispatch(ModelUpdatingEvent {
-                snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                    Some(current_record.clone()),
-                    None,
-                    Some(UpdateDraft::<M>::new(values.clone()).pending_record()),
-                ),
-            })
-            .await?;
+        if lifecycle_mode.enabled() {
+            context
+                .dispatch(ModelUpdatingEvent {
+                    snapshot: ModelLifecycleSnapshot::for_model::<M>(
+                        Some(current_record.clone()),
+                        None,
+                        Some(UpdateDraft::<M>::new(values.clone()).pending_record()),
+                    ),
+                })
+                .await?;
+        }
 
         let pk_condition = record_primary_key_condition(update.table, &current_record)?;
         let records = transaction
@@ -3474,23 +3585,34 @@ where
 
         let after_record = expect_single_record("update()", records)?;
         let after_model = update.table.hydrate_record(&after_record)?;
-        M::Lifecycle::updated(
+        if lifecycle_mode.enabled() {
+            M::Lifecycle::updated(
+                &context,
+                &current_model,
+                &after_model,
+                &current_record,
+                &after_record,
+            )
+            .await?;
+        }
+        write_model_audit::<M>(
             &context,
-            &current_model,
-            &after_model,
-            &current_record,
-            &after_record,
+            audit_event_type,
+            Some(&current_record),
+            Some(&after_record),
         )
         .await?;
-        context
-            .dispatch(ModelUpdatedEvent {
-                snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                    Some(current_record),
-                    Some(after_record.clone()),
-                    None,
-                ),
-            })
-            .await?;
+        if lifecycle_mode.enabled() {
+            context
+                .dispatch(ModelUpdatedEvent {
+                    snapshot: ModelLifecycleSnapshot::for_model::<M>(
+                        Some(current_record),
+                        Some(after_record.clone()),
+                        None,
+                    ),
+                })
+                .await?;
+        }
         updated_models.push(after_model);
     }
 
@@ -3512,11 +3634,50 @@ where
     .await
 }
 
+async fn delete_model_rows_without_lifecycle<E, M>(
+    delete: &DeleteModel<M>,
+    executor: &E,
+) -> Result<u64>
+where
+    E: ModelWriteExecutor,
+    M: Model,
+{
+    delete.validate()?;
+    let delete = delete.clone();
+    with_model_write_transaction(executor, |app, transaction, actor| {
+        Box::pin(async move {
+            delete_model_rows_in_transaction_inner(
+                &delete,
+                app,
+                transaction,
+                actor,
+                LifecycleMode::Disabled,
+            )
+            .await
+        })
+    })
+    .await
+}
+
 async fn delete_model_rows_in_transaction<M>(
     delete: &DeleteModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<&crate::auth::Actor>,
+    actor: Option<crate::auth::Actor>,
+) -> Result<u64>
+where
+    M: Model,
+{
+    delete_model_rows_in_transaction_inner(delete, app, transaction, actor, LifecycleMode::Enabled)
+        .await
+}
+
+async fn delete_model_rows_in_transaction_inner<M>(
+    delete: &DeleteModel<M>,
+    app: &AppContext,
+    transaction: &super::runtime::DatabaseTransaction,
+    actor: Option<crate::auth::Actor>,
+    lifecycle_mode: LifecycleMode,
 ) -> Result<u64>
 where
     M: Model,
@@ -3527,16 +3688,18 @@ where
 
     for current_record in &current_records {
         let current_model = delete.table.hydrate_record(current_record)?;
-        M::Lifecycle::deleting(&context, &current_model, current_record).await?;
-        context
-            .dispatch(ModelDeletingEvent {
-                snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                    Some(current_record.clone()),
-                    None,
-                    None,
-                ),
-            })
-            .await?;
+        if lifecycle_mode.enabled() {
+            M::Lifecycle::deleting(&context, &current_model, current_record).await?;
+            context
+                .dispatch(ModelDeletingEvent {
+                    snapshot: ModelLifecycleSnapshot::for_model::<M>(
+                        Some(current_record.clone()),
+                        None,
+                        None,
+                    ),
+                })
+                .await?;
+        }
 
         let pk_condition = record_primary_key_condition(delete.table, current_record)?;
         if delete.table.soft_deletes_enabled() && !delete.force_delete {
@@ -3558,6 +3721,14 @@ where
             transaction
                 .execute_compiled_with(&update.compiled_sql(false)?, delete.options.clone())
                 .await?;
+            let after_record = record_with_assignments(current_record, &update.values);
+            write_model_audit::<M>(
+                &context,
+                AuditEventType::SoftDeleted,
+                Some(current_record),
+                Some(&after_record),
+            )
+            .await?;
         } else {
             transaction
                 .execute_compiled_with(
@@ -3577,18 +3748,27 @@ where
                     delete.options.clone(),
                 )
                 .await?;
+            write_model_audit::<M>(
+                &context,
+                AuditEventType::Deleted,
+                Some(current_record),
+                None,
+            )
+            .await?;
         }
 
-        M::Lifecycle::deleted(&context, &current_model, current_record).await?;
-        context
-            .dispatch(ModelDeletedEvent {
-                snapshot: ModelLifecycleSnapshot::for_model::<M>(
-                    Some(current_record.clone()),
-                    None,
-                    None,
-                ),
-            })
-            .await?;
+        if lifecycle_mode.enabled() {
+            M::Lifecycle::deleted(&context, &current_model, current_record).await?;
+            context
+                .dispatch(ModelDeletedEvent {
+                    snapshot: ModelLifecycleSnapshot::for_model::<M>(
+                        Some(current_record.clone()),
+                        None,
+                        None,
+                    ),
+                })
+                .await?;
+        }
     }
 
     Ok(current_records.len() as u64)
@@ -3679,7 +3859,7 @@ async fn prepare_create_many_for_execution<M>(
     create_many: &CreateManyModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<&crate::auth::Actor>,
+    actor: Option<crate::auth::Actor>,
 ) -> Result<CreateManyModel<M>>
 where
     M: Model,
@@ -3706,7 +3886,7 @@ async fn prepare_update_for_execution<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<&crate::auth::Actor>,
+    actor: Option<crate::auth::Actor>,
 ) -> Result<UpdateModel<M>>
 where
     M: Model,
@@ -3829,6 +4009,13 @@ fn apply_restore_assignments<M>(
 
 fn has_assignment(values: &[(super::ast::ColumnRef, Expr)], column_name: &str) -> bool {
     values.iter().any(|(column, _)| column.name == column_name)
+}
+
+fn audit_event_type_for_update(action: SystemUpdateAction) -> AuditEventType {
+    match action {
+        SystemUpdateAction::None => AuditEventType::Updated,
+        SystemUpdateAction::Restore => AuditEventType::Restored,
+    }
 }
 
 fn upsert_model_value<M>(

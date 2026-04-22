@@ -470,6 +470,8 @@ trait MigrationFile
   fn run_in_transaction() -> bool
 trait Model
   fn table_meta() -> &'static TableMeta<Self>
+  fn audit_enabled() -> bool
+  fn audit_excluded_fields() -> &'static [&'static str]
 trait ModelCollectionExt: Model>
   fn model_keys(&self, key_fn: impl Fn(&T) -> DbValue) -> Collection<DbValue>
   fn load<'life0, 'async_trait, E>(

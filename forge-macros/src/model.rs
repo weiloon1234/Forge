@@ -39,6 +39,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let lifecycle = args
         .lifecycle
         .unwrap_or_else(|| syn::parse_quote!(::forge::NoModelLifecycle));
+    let audit_enabled = match args.audit.as_ref().map(|value| value.value()) {
+        Some(true) | None => quote!(true),
+        Some(false) => quote!(false),
+    };
     let timestamps_setting = match args.timestamps.as_ref().map(|value| value.value()) {
         Some(true) => quote!(::forge::ModelFeatureSetting::Enabled),
         Some(false) => quote!(::forge::ModelFeatureSetting::Disabled),
@@ -58,6 +62,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut hydrate_fields = Vec::new();
     let mut accessor_methods = Vec::new();
     let mut write_mutator_helpers = Vec::new();
+    let mut audit_excluded_fields = Vec::new();
     let mut primary_key_field_ident = None;
     let mut primary_key_const_ident = None;
     let mut primary_key_is_model_id_for_self = false;
@@ -78,6 +83,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 || field_args.db_type.is_some()
                 || field_args.write_mutator.is_some()
                 || field_args.read_accessor.is_some()
+                || field_args.audit_exclude
             {
                 return Err(syn::Error::new_spanned(
                     field,
@@ -103,6 +109,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             ));
         }
         persisted_column_names.push(column_name.value());
+        if field_args.audit_exclude {
+            audit_excluded_fields.push(column_name.clone());
+        }
 
         let (db_type, db_type_tokens) =
             match infer_or_explicit_db_type(field_ty, field_args.db_type) {
@@ -371,6 +380,14 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                         #hydrate_fn,
                     )
                 })
+            }
+
+            fn audit_enabled() -> bool {
+                #audit_enabled
+            }
+
+            fn audit_excluded_fields() -> &'static [&'static str] {
+                &[#(#audit_excluded_fields),*]
             }
         }
 

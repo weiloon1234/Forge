@@ -1,4 +1,5 @@
 pub use crate::attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
+pub use crate::audit::AuditLog;
 pub use crate::auth::{
     email_verification::EmailVerificationManager,
     password_reset::PasswordResetManager,

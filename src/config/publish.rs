@@ -103,6 +103,12 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # driver = "session"
 
 # -----------------------------------------------------------------------------
+# Audit Logging
+# -----------------------------------------------------------------------------
+[audit]
+# enabled = true
+
+# -----------------------------------------------------------------------------
 # Jobs (Background Queue)
 # -----------------------------------------------------------------------------
 [jobs]
@@ -547,6 +553,10 @@ const FRAMEWORK_MIGRATIONS: &[(&str, &str)] = &[
     (
         "000000000009_create_settings.rs",
         include_str!("../../database/migrations/000000000009_create_settings.rs"),
+    ),
+    (
+        "000000000010_create_audit_logs.rs",
+        include_str!("../../database/migrations/000000000010_create_audit_logs.rs"),
     ),
 ];
 

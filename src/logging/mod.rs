@@ -18,6 +18,7 @@ pub enum LogFormat {
     Text,
 }
 
+mod context;
 mod diagnostics;
 mod file_writer;
 mod metrics;
@@ -40,7 +41,10 @@ pub use types::{
     SchedulerLeadershipState, WebSocketConnectionState,
 };
 
-pub(crate) use middleware::request_context_middleware;
+pub(crate) use context::{
+    current_actor, current_request, scope_current_actor, scope_current_request,
+};
+pub(crate) use middleware::{request_context_middleware, request_origin_middleware};
 pub(crate) use observability::register_observability_routes;
 pub(crate) use observability::{register_openapi_route, set_openapi_spec};
 

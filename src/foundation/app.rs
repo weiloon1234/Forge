@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::AuditManager;
 use crate::auth::{
     Actor, AuthManager, AuthenticatableRegistry, AuthenticatableRegistryBuilder, Authorizer,
     GuardRegistryBuilder, PolicyRegistryBuilder,
@@ -113,6 +114,10 @@ impl AppContext {
 
     pub fn jobs(&self) -> Result<Arc<JobDispatcher>> {
         self.resolve::<JobDispatcher>()
+    }
+
+    pub(crate) fn audit(&self) -> Result<Arc<AuditManager>> {
+        self.resolve::<AuditManager>()
     }
 
     pub fn websocket(&self) -> Result<Arc<WebSocketPublisher>> {
@@ -917,6 +922,7 @@ impl AppBuilder {
             )),
         };
         let cache_manager = Arc::new(crate::cache::CacheManager::new(cache_store));
+        let audit_manager = Arc::new(AuditManager::new(app.config().audit()?));
 
         let password_reset_manager =
             Arc::new(crate::auth::password_reset::PasswordResetManager::new(
@@ -943,6 +949,7 @@ impl AppBuilder {
         app.container().singleton_arc(password_reset_manager)?;
         app.container().singleton_arc(email_verification_manager)?;
         app.container().singleton_arc(cache_manager)?;
+        app.container().singleton_arc(audit_manager)?;
 
         app.container().singleton_arc(diagnostics.clone())?;
         app.container().singleton_arc(websocket_publisher)?;

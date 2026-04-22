@@ -37,9 +37,11 @@ struct LegacyUser {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "api_tokens", primary_key_strategy = "manual")]
+#[forge(model = "api_tokens", primary_key_strategy = "manual", audit = false)]
 struct ApiToken {
     id: String,
+    #[forge(audit_exclude)]
+    secret: String,
 }
 
 struct UserLifecycle;
@@ -75,4 +77,6 @@ fn main() {
     let _ = ExternalAccount::PUBLIC_ID;
     let _ = LegacyUser::ID;
     let _ = ApiToken::ID;
+    let _ = ApiToken::audit_enabled();
+    let _ = ApiToken::audit_excluded_fields();
 }

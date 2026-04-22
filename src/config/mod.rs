@@ -1,6 +1,7 @@
 pub(crate) mod api_docs;
 pub(crate) mod env_publish;
 pub(crate) mod publish;
+pub(crate) mod published;
 
 use std::collections::BTreeMap;
 use std::fs;

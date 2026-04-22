@@ -83,6 +83,67 @@ struct EmailVerificationManager
   async fn prune_expired(&self) -> Result<u64>
 ```
 
+## forge::auth::lockout
+
+```rust
+enum LockoutError { LockedOut }
+  fn retry_after_seconds(&self) -> u64
+struct LoginLockedOutEvent
+struct LoginThrottle
+  fn new(app: &AppContext) -> Result<Self>
+  fn with_store( app: &AppContext, store: Arc<dyn LockoutStore>, ) -> Result<Self>
+  async fn before_attempt(&self, identifier: &str) -> Result<(), LockoutError>
+  async fn record_failure(&self, identifier: &str) -> Result<()>
+  async fn record_success(&self, identifier: &str) -> Result<()>
+struct RuntimeLockoutStore
+  fn from_app(app: &AppContext) -> Result<Self>
+trait LockoutStore
+  fn get<'life0, 'life1, 'async_trait>(
+  fn increment_failures<'life0, 'life1, 'async_trait>(
+  fn set_locked_until<'life0, 'life1, 'async_trait>(
+  fn clear<'life0, 'life1, 'async_trait>(
+```
+
+## forge::auth::mfa
+
+```rust
+struct CodeRequest
+struct EnrollChallenge
+struct MfaDisabledEvent
+struct MfaEnrolledEvent
+struct MfaFailedEvent
+struct MfaManager
+  fn new(app: &AppContext) -> Result<Self>
+  fn totp(&self) -> TotpFactor
+  fn enabled(&self) -> bool
+  fn requires_mfa(&self, actor: &Actor) -> bool
+  fn requires_mfa_for_roles<'a, I>(&self, guard: &GuardId, roles: I) -> bool
+  async fn issue_pending_token( &self, actor: &Actor, name: &str, ) -> Result<TokenPair>
+  async fn issue_full_token( &self, actor: &Actor, name: &str, ) -> Result<TokenPair>
+struct MfaVerifiedEvent
+struct RecoveryCodesRequest
+struct RecoveryCodesResponse
+struct TotpFactor
+  fn new(app: AppContext, config: MfaConfig) -> Self
+  async fn disable(&self, actor: &Actor, response: &str) -> Result<()>
+  async fn regenerate_recovery_codes( &self, actor: &Actor, current_code: &str, ) -> Result<Vec<String>>
+trait MfaFactor
+  fn enroll<'life0, 'life1, 'async_trait>(
+  fn confirm<'life0, 'life1, 'life2, 'async_trait>(
+  fn verify<'life0, 'life1, 'life2, 'async_trait>(
+  fn id(&self) -> &str
+```
+
+## forge::auth::mfa::routes
+
+```rust
+fn async fn confirm( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<StatusCode>
+fn async fn disable( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<StatusCode>
+fn async fn enroll( __arg0: State<AppContext>, __arg1: CurrentActor, ) -> Result<Json<EnrollChallenge>>
+fn async fn recovery( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<RecoveryCodesRequest>, ) -> Result<Json<RecoveryCodesResponse>>
+fn async fn verify( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<Json<TokenResponse>>
+```
+
 ## forge::auth::password_reset
 
 ```rust
@@ -109,6 +170,7 @@ struct SessionManager
 ## forge::auth::token
 
 ```rust
+pub const MFA_PENDING_ABILITY: &str;
 struct RefreshTokenRequest
 struct TokenAuthenticator
   fn new(manager: Arc<TokenManager>) -> Self
@@ -116,6 +178,10 @@ struct TokenManager
   async fn issue<M: Authenticatable>( &self, actor_id: &str, ) -> Result<TokenPair>
   async fn issue_named<M: Authenticatable>( &self, actor_id: &str, name: &str, ) -> Result<TokenPair>
   async fn issue_with_abilities<M: Authenticatable>( &self, actor_id: &str, name: &str, abilities: Vec<String>, ) -> Result<TokenPair>
+  async fn issue_actor(&self, actor: &Actor) -> Result<TokenPair>
+  async fn issue_actor_named( &self, actor: &Actor, name: &str, ) -> Result<TokenPair>
+  async fn issue_actor_with_abilities( &self, actor: &Actor, name: &str, abilities: Vec<String>, ) -> Result<TokenPair>
+  async fn issue_mfa_pending( &self, actor: &Actor, name: &str, ttl_minutes: u64, ) -> Result<TokenPair>
   async fn validate(&self, access_token: &str) -> Result<Option<Actor>>
   async fn touch(&self, access_token: &str) -> Result<()>
   async fn refresh(&self, refresh_token: &str) -> Result<TokenPair>
@@ -135,5 +201,6 @@ trait HasToken: Authenticatable
   fn create_token_named<'life0, 'life1, 'life2, 'async_trait>(
   fn create_token_with_abilities<'life0, 'life1, 'life2, 'async_trait>(
   fn revoke_all_tokens<'life0, 'life1, 'async_trait>(
+fn actor_has_mfa_pending(actor: &Actor) -> bool
 ```
 

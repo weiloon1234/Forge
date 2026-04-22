@@ -46,6 +46,8 @@ struct HttpRouteBuilder
   fn authorize<F, Fut>(&mut self, f: F) -> &mut Self
   fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
   fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
+  fn audit_area(&mut self, area: &str) -> &mut Self
+  fn audit_disabled(&mut self) -> &mut Self
   fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
   fn tag(&mut self, tag: &str) -> &mut Self
   fn summary(&mut self, summary: &str) -> &mut Self
@@ -60,6 +62,9 @@ struct HttpRouteOptions
   fn permissions<I, P>(self, permissions: I) -> Self
   fn authorize<F, Fut>(self, f: F) -> Self
   fn middleware(self, config: MiddlewareConfig) -> Self
+  fn allow_mfa_pending_token(self) -> Self
+  fn audit_area(self, area: &str) -> Self
+  fn audit_disabled(self) -> Self
   fn middleware_group(self, name: impl Into<String>) -> Self
   fn rate_limit(self, rate_limit: RateLimit) -> Self
   fn document(self, doc: RouteDoc) -> Self
@@ -79,6 +84,8 @@ struct HttpScope
   fn authorize<F, Fut>(&mut self, f: F) -> &mut Self
   fn middleware(&mut self, config: MiddlewareConfig) -> &mut Self
   fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self
+  fn audit_area(&mut self, area: &str) -> &mut Self
+  fn audit_disabled(&mut self) -> &mut Self
   fn rate_limit(&mut self, rate_limit: RateLimit) -> &mut Self
   fn tag(&mut self, tag: &str) -> &mut Self
   fn summary(&mut self, summary: &str) -> &mut Self

@@ -2,6 +2,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use std::error::Error as _;
 
 /// Unified error type for the Forge framework.
 ///
@@ -108,6 +109,16 @@ impl Error {
         }
     }
 
+    pub fn source_chain(&self) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut current = self.source();
+        while let Some(error) = current {
+            chain.push(error.to_string());
+            current = error.source();
+        }
+        chain
+    }
+
     pub fn payload(&self) -> serde_json::Value {
         let status = self.status_code();
         let (error_code, message_key) = match self {
@@ -169,7 +180,16 @@ impl IntoResponse for Error {
             },
             errors: None,
         };
-        (status, Json(body)).into_response()
+        let error_text = self.to_string();
+        let chain = self.source_chain();
+        let mut response = (status, Json(body)).into_response();
+        crate::logging::mark_handler_error_response(
+            &mut response,
+            status.as_u16(),
+            error_text,
+            chain,
+        );
+        response
     }
 }
 

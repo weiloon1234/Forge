@@ -18,6 +18,6 @@ Consumer-facing guides for building applications with Forge. Each guide covers o
 | [WebSocket](websocket.md) | Channels, rooms, presence, broadcasting, client protocol |
 | [Model Extensions](model-extensions.md) | AppEnum, Attachments, Metadata, Translations, Countries |
 | [i18n](i18n.md) | Translation catalogs, locale resolution, `t!()` macro, validation messages |
-| [Plugins](plugins.md) | 5 real-world plugin examples: Slack, audit log, storage driver, admin dashboard, webhooks |
+| [Plugins](plugins.md) | 5 real-world plugin examples: Slack, audit review, storage driver, admin dashboard, webhooks |
 
 All major modules are now documented.

@@ -1,11 +1,13 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::Serialize;
 
+use crate::auth::Actor;
 use crate::foundation::{AppContext, Error, Result};
 use crate::jobs::Job;
 use crate::support::EventId;
@@ -15,18 +17,80 @@ pub trait Event: Clone + Serialize + Send + Sync + 'static {
     const ID: EventId;
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EventOrigin {
+    pub actor: Option<Actor>,
+    pub ip: Option<IpAddr>,
+    pub user_agent: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl EventOrigin {
+    pub fn new(
+        actor: Option<Actor>,
+        ip: Option<IpAddr>,
+        user_agent: Option<String>,
+        request_id: Option<String>,
+    ) -> Self {
+        Self {
+            actor,
+            ip,
+            user_agent,
+            request_id,
+        }
+    }
+
+    pub fn from_request(
+        actor: Option<Actor>,
+        request: Option<&crate::logging::CurrentRequest>,
+    ) -> Option<Self> {
+        match (actor, request) {
+            (None, None) => None,
+            (actor, request) => Some(Self::new(
+                actor,
+                request.and_then(|value| value.ip),
+                request.and_then(|value| value.user_agent.clone()),
+                request.and_then(|value| value.request_id.clone()),
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EventContext {
     app: AppContext,
+    origin: Option<EventOrigin>,
 }
 
 impl EventContext {
-    pub(crate) fn new(app: AppContext) -> Self {
-        Self { app }
+    pub(crate) fn new(app: AppContext, origin: Option<EventOrigin>) -> Self {
+        Self { app, origin }
     }
 
     pub fn app(&self) -> &AppContext {
         &self.app
+    }
+
+    pub fn origin(&self) -> Option<&EventOrigin> {
+        self.origin.as_ref()
+    }
+
+    pub fn actor(&self) -> Option<&Actor> {
+        self.origin().and_then(|origin| origin.actor.as_ref())
+    }
+
+    pub fn ip(&self) -> Option<IpAddr> {
+        self.origin().and_then(|origin| origin.ip)
+    }
+
+    pub fn user_agent(&self) -> Option<&str> {
+        self.origin()
+            .and_then(|origin| origin.user_agent.as_deref())
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.origin()
+            .and_then(|origin| origin.request_id.as_deref())
     }
 }
 
@@ -123,7 +187,14 @@ impl EventBus {
     where
         E: Event,
     {
-        let context = EventContext::new(self.app.clone());
+        self.dispatch_with_origin(event, None).await
+    }
+
+    pub async fn dispatch_with_origin<E>(&self, event: E, origin: Option<EventOrigin>) -> Result<()>
+    where
+        E: Event,
+    {
+        let context = EventContext::new(self.app.clone(), origin);
         if let Some(listeners) = self.registry.listeners.get(&TypeId::of::<E>()) {
             for listener in listeners {
                 listener.handle_boxed(&context, &event).await?;
@@ -195,14 +266,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
 
-    use super::{Event, EventBus, EventContext, EventListener, EventRegistryBuilder};
+    use super::{Event, EventBus, EventContext, EventListener, EventOrigin, EventRegistryBuilder};
+    use crate::auth::Actor;
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
     use crate::support::EventId;
+    use crate::support::GuardId;
     use crate::validation::RuleRegistry;
 
     #[derive(Clone, serde::Serialize)]
@@ -254,5 +328,63 @@ mod tests {
         bus.dispatch(TestEvent).await.unwrap();
 
         assert_eq!(target.lock().unwrap().as_slice(), ["first", "second"]);
+    }
+
+    struct OriginListener {
+        target: Arc<Mutex<Option<(String, Option<String>, Option<IpAddr>)>>>,
+    }
+
+    #[async_trait]
+    impl EventListener<TestEvent> for OriginListener {
+        async fn handle(&self, context: &EventContext, _event: &TestEvent) -> crate::Result<()> {
+            let actor = context
+                .actor()
+                .map(|actor| actor.id.clone())
+                .unwrap_or_default();
+            let request_id = context.request_id().map(ToOwned::to_owned);
+            let ip = context.ip();
+            *self.target.lock().unwrap() = Some((actor, request_id, ip));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_with_origin_exposes_actor_and_request_metadata() {
+        let target = Arc::new(Mutex::new(None));
+        let registry = EventRegistryBuilder::shared();
+        registry
+            .lock()
+            .unwrap()
+            .listen::<TestEvent, _>(OriginListener {
+                target: target.clone(),
+            });
+
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let bus = EventBus::new(app, EventRegistryBuilder::freeze_shared(registry));
+        bus.dispatch_with_origin(
+            TestEvent,
+            Some(EventOrigin::new(
+                Some(Actor::new("admin-1", GuardId::new("admin"))),
+                Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+                Some("ForgeTest/1.0".to_string()),
+                Some("req-events".to_string()),
+            )),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *target.lock().unwrap(),
+            Some((
+                "admin-1".to_string(),
+                Some("req-events".to_string()),
+                Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+            ))
+        );
     }
 }

@@ -25,6 +25,7 @@ mod metrics;
 mod middleware;
 mod observability;
 mod probes;
+mod reporter;
 mod request_id;
 mod types;
 
@@ -35,18 +36,27 @@ pub use probes::{
     REDIS_PING_PROBE, RUNTIME_BACKEND_PROBE,
 };
 pub(crate) use probes::{ReadinessRegistryBuilder, ReadinessRegistryHandle};
+pub use reporter::{
+    ErrorReporter, HandlerErrorReport, JobDeadLetteredReport, PanicContext, PanicReport,
+};
 pub use request_id::{RequestId, REQUEST_ID_HEADER};
 pub use types::{
     AuthOutcome, HttpOutcomeClass, JobOutcome, LogLevel, ProbeState, RuntimeBackendKind,
     SchedulerLeadershipState, WebSocketConnectionState,
 };
 
+pub use context::CurrentRequest;
 pub(crate) use context::{
-    current_actor, current_request, scope_current_actor, scope_current_request,
+    current_actor, current_execution, current_request, scope_current_actor,
+    scope_current_execution, scope_current_request, ExecutionContext,
 };
 pub(crate) use middleware::{request_context_middleware, request_origin_middleware};
 pub(crate) use observability::register_observability_routes;
 pub(crate) use observability::{register_openapi_route, set_openapi_spec};
+pub(crate) use reporter::{
+    mark_handler_error_response, report_handler_error_response, set_global_panic_reporters,
+    ErrorReporterJobMiddleware, ErrorReporterRegistry,
+};
 
 /// Timer that formats timestamps using the framework's configured timezone.
 struct ForgeTimer {
@@ -109,6 +119,7 @@ pub fn init(config: &ConfigRepository) -> Result<()> {
             error = %message,
             "Thread panicked"
         );
+        reporter::report_panic_from_hook(message, location);
     }));
 
     let _ = LOGGING.set(());

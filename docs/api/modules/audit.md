@@ -11,6 +11,7 @@ struct AuditLog
   const SUBJECT_MODEL: Column<Self, String>
   const SUBJECT_TABLE: Column<Self, String>
   const SUBJECT_ID: Column<Self, String>
+  const AREA: Column<Self, Option<String>>
   const ACTOR_GUARD: Column<Self, Option<String>>
   const ACTOR_ID: Column<Self, Option<String>>
   const REQUEST_ID: Column<Self, Option<String>>

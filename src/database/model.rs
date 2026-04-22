@@ -11,7 +11,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::config::DatabaseModelConfig;
-use crate::events::{Event, EventBus};
+use crate::events::{Event, EventBus, EventOrigin};
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::{Date, DateTime, EventId, LocalDateTime, ModelId, Time};
 
@@ -914,7 +914,7 @@ pub struct ModelHookContext<'a> {
     app: &'a AppContext,
     database: Arc<DatabaseManager>,
     transaction: &'a DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
 }
 
 impl<'a> ModelHookContext<'a> {
@@ -922,13 +922,13 @@ impl<'a> ModelHookContext<'a> {
         app: &'a AppContext,
         database: Arc<DatabaseManager>,
         transaction: &'a DatabaseTransaction,
-        actor: Option<crate::auth::Actor>,
+        origin: Option<EventOrigin>,
     ) -> Self {
         Self {
             app,
             database,
             transaction,
-            actor,
+            origin,
         }
     }
 
@@ -945,7 +945,13 @@ impl<'a> ModelHookContext<'a> {
     }
 
     pub fn actor(&self) -> Option<&crate::auth::Actor> {
-        self.actor.as_ref()
+        self.origin
+            .as_ref()
+            .and_then(|origin| origin.actor.as_ref())
+    }
+
+    pub fn origin(&self) -> Option<&EventOrigin> {
+        self.origin.as_ref()
     }
 
     pub fn executor(&self) -> &dyn QueryExecutor {
@@ -960,7 +966,9 @@ impl<'a> ModelHookContext<'a> {
     where
         E: Event,
     {
-        self.events()?.dispatch(event).await
+        self.events()?
+            .dispatch_with_origin(event, self.origin.clone())
+            .await
     }
 }
 

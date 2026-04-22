@@ -15,7 +15,6 @@ enum Environment { Development, Production, Testing }
 enum GuardDriver { Token, Session, Custom }
 struct AppConfig
   fn signing_key_bytes(&self) -> Result<Vec<u8>>
-struct AuditConfig
 struct AuthConfig
 struct CacheConfig
 struct ConfigRepository
@@ -33,7 +32,6 @@ struct ConfigRepository
   fn websocket(&self) -> Result<WebSocketConfig>
   fn jobs(&self) -> Result<JobsConfig>
   fn auth(&self) -> Result<AuthConfig>
-  fn audit(&self) -> Result<AuditConfig>
   fn scheduler(&self) -> Result<SchedulerConfig>
   fn logging(&self) -> Result<LoggingConfig>
   fn i18n(&self) -> Result<I18nConfig>
@@ -51,7 +49,9 @@ struct GuardDriverConfig
 struct HashingConfig
 struct I18nConfig
 struct JobsConfig
+struct LockoutConfig
 struct LoggingConfig
+struct MfaConfig
 struct ObservabilityConfig
 struct RedisConfig
 struct SchedulerConfig

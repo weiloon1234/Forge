@@ -1,4 +1,6 @@
 pub mod email_verification;
+pub mod lockout;
+pub mod mfa;
 pub mod password_reset;
 pub mod session;
 pub mod token;

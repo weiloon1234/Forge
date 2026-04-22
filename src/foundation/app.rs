@@ -27,9 +27,9 @@ use crate::kernel::{
     worker::WorkerKernel,
 };
 use crate::logging::{
-    ObservabilityOptions, ProbeResult, ReadinessRegistryBuilder, ReadinessRegistryHandle,
-    RuntimeBackendKind, RuntimeDiagnostics, FRAMEWORK_BOOTSTRAP_PROBE, REDIS_PING_PROBE,
-    RUNTIME_BACKEND_PROBE,
+    ErrorReporter, ErrorReporterRegistry, ObservabilityOptions, ProbeResult,
+    ReadinessRegistryBuilder, ReadinessRegistryHandle, RuntimeBackendKind, RuntimeDiagnostics,
+    FRAMEWORK_BOOTSTRAP_PROBE, REDIS_PING_PROBE, RUNTIME_BACKEND_PROBE,
 };
 use crate::plugin::{Plugin, PluginRegistry};
 use crate::redis::RedisManager;
@@ -451,6 +451,7 @@ pub struct AppBuilder {
     validation_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
     middlewares: Vec<MiddlewareConfig>,
     middleware_groups: std::collections::HashMap<String, Vec<MiddlewareConfig>>,
+    error_reporters: Vec<Arc<dyn ErrorReporter>>,
     observability: Option<ObservabilityOptions>,
     spa_dir: Option<PathBuf>,
 }
@@ -475,6 +476,7 @@ impl AppBuilder {
             validation_rules: Vec::new(),
             middlewares: Vec::new(),
             middleware_groups: std::collections::HashMap::new(),
+            error_reporters: Vec::new(),
             observability: None,
             spa_dir: None,
         }
@@ -576,6 +578,19 @@ impl AppBuilder {
 
     pub fn register_middleware(mut self, config: MiddlewareConfig) -> Self {
         self.middlewares.push(config);
+        self
+    }
+
+    pub fn register_error_reporter<R>(mut self) -> Self
+    where
+        R: ErrorReporter + Default,
+    {
+        self.error_reporters.push(Arc::new(R::default()));
+        self
+    }
+
+    pub fn register_error_reporter_instance(mut self, reporter: Arc<dyn ErrorReporter>) -> Self {
+        self.error_reporters.push(reporter);
         self
     }
 
@@ -715,6 +730,7 @@ impl AppBuilder {
             validation_rules,
             middlewares,
             middleware_groups,
+            error_reporters,
             observability,
             spa_dir,
         } = self;
@@ -788,6 +804,9 @@ impl AppBuilder {
         registrar.register_job::<crate::notifications::SendNotificationJob>()?;
 
         let app = AppContext::new(container, config, rules)?;
+        let error_reporter_registry = Arc::new(ErrorReporterRegistry::new(error_reporters));
+        crate::logging::set_global_panic_reporters(error_reporter_registry.clone());
+        registrar.register_job_middleware(crate::logging::ErrorReporterJobMiddleware)?;
         let database = Arc::new(DatabaseManager::from_config(&app.config().database()?).await?);
 
         let auth_config = app.config().auth()?;
@@ -922,7 +941,7 @@ impl AppBuilder {
             )),
         };
         let cache_manager = Arc::new(crate::cache::CacheManager::new(cache_store));
-        let audit_manager = Arc::new(AuditManager::new(app.config().audit()?));
+        let audit_manager = Arc::new(AuditManager::new());
 
         let password_reset_manager =
             Arc::new(crate::auth::password_reset::PasswordResetManager::new(
@@ -950,6 +969,7 @@ impl AppBuilder {
         app.container().singleton_arc(email_verification_manager)?;
         app.container().singleton_arc(cache_manager)?;
         app.container().singleton_arc(audit_manager)?;
+        app.container().singleton_arc(error_reporter_registry)?;
 
         app.container().singleton_arc(diagnostics.clone())?;
         app.container().singleton_arc(websocket_publisher)?;

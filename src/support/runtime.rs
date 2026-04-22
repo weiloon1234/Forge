@@ -369,6 +369,36 @@ impl RuntimeBackend {
         }
     }
 
+    /// Set a key to a value with a TTL, replacing any previous value.
+    pub async fn set_value(&self, key: &str, value: &str, ttl_secs: u64) -> Result<()> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let _: () = ::redis::cmd("SET")
+                    .arg(&full_key)
+                    .arg(value)
+                    .arg("EX")
+                    .arg(ttl_secs as i64)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(())
+            }
+            Self::Memory(runtime) => {
+                let now = std::time::Instant::now();
+                let ttl = std::time::Duration::from_secs(ttl_secs);
+                let mut unique_keys = runtime.unique_keys.lock().await;
+                unique_keys.insert(key.to_string(), (value.to_string(), now + ttl));
+                Ok(())
+            }
+        }
+    }
+
     /// Delete a key only if its current value matches the expected value.
     ///
     /// Returns `true` if the key was deleted.

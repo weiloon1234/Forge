@@ -92,65 +92,20 @@ impl Notification for OrderPlaced {
 
 ---
 
-## 2. Audit Log Plugin
+## 2. Audit Review Plugin
 
-A feature plugin that captures domain events, stores them asynchronously, provides a viewing API, and cleans up old entries on a schedule.
+Forge now ships first-party audit capture, so a plugin should extend the built-in `audit_logs`
+table instead of reimplementing event listeners and writers. A plugin is still a good fit for
+review APIs, exports, retention policy, or project-specific admin tooling.
 
-**Capabilities used:** `listen_event`, `register_job`, `register_routes`, `register_schedule`, `register_middleware`, `config_defaults`
+**Capabilities used:** `register_routes`, `register_schedule`
 
 ```rust
 use forge::prelude::*;
+use forge::audit::AuditLog;
 use semver::{Version, VersionReq};
 
-struct AuditPlugin;
-
-// ── Job: async write to audit_logs table ──
-
-#[derive(Debug, Serialize, Deserialize)]
-struct WriteAuditEntry {
-    actor_id: String,
-    action: String,
-    resource: String,
-    payload: Value,
-}
-
-const AUDIT_JOB: JobId = JobId::new("audit.write");
-
-#[async_trait]
-impl Job for WriteAuditEntry {
-    const ID: JobId = AUDIT_JOB;
-
-    async fn handle(&self, ctx: JobContext) -> Result<()> {
-        let db = ctx.app().database()?;
-        db.raw_execute(
-            "INSERT INTO audit_logs (actor_id, action, resource, payload) VALUES ($1, $2, $3, $4)",
-            &[
-                DbValue::Text(self.actor_id.clone()),
-                DbValue::Text(self.action.clone()),
-                DbValue::Text(self.resource.clone()),
-                DbValue::Json(self.payload.clone()),
-            ],
-        ).await?;
-        Ok(())
-    }
-}
-
-// ── Event listener: capture model changes ──
-
-struct AuditListener;
-
-#[async_trait]
-impl EventListener<ModelCreatedEvent> for AuditListener {
-    async fn handle(&self, ctx: &EventContext, event: &ModelCreatedEvent) -> Result<()> {
-        ctx.app().jobs()?.dispatch(WriteAuditEntry {
-            actor_id: "system".into(),
-            action: "created".into(),
-            resource: event.table.clone(),
-            payload: json!({}),
-        })?;
-        Ok(())
-    }
-}
+struct AuditReviewPlugin;
 
 // ── Schedule: purge old entries ──
 
@@ -158,27 +113,20 @@ const AUDIT_CLEANUP: ScheduleId = ScheduleId::new("audit.cleanup");
 
 // ── Plugin registration ──
 
-impl Plugin for AuditPlugin {
+impl Plugin for AuditReviewPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest::new("audit", Version::new(1, 0, 0), VersionReq::parse(">=0.1").unwrap())
-            .description("Audit logging for model changes")
+            .description("Routes and retention policy for built-in audit logs")
     }
 
     fn register(&self, r: &mut PluginRegistrar) -> Result<()> {
-        r.config_defaults(toml::from_str(r#"
-            [plugins.audit]
-            retention_days = 90
-        "#).unwrap());
-
-        // Capture events
-        r.listen_event::<ModelCreatedEvent, _>(AuditListener);
-
-        // Register async job for writing
-        r.register_job::<WriteAuditEntry>();
-
         // API to view audit logs
         r.register_routes(|r| {
-            r.route("/audit/logs", get(list_audit_logs));
+            r.route_with_options(
+                "/audit/logs",
+                get(list_audit_logs),
+                HttpRouteOptions::new().guard(Guard::Admin),
+            );
             Ok(())
         });
 
@@ -200,25 +148,24 @@ impl Plugin for AuditPlugin {
 
 async fn list_audit_logs(State(app): State<AppContext>) -> impl IntoResponse {
     let db = app.database().unwrap();
-    let rows = db.raw_query(
-        "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50", &[]
-    ).await.unwrap();
-    Json(json!({ "logs": rows.len() }))
+    let logs = AuditLog::query()
+        .where_(AuditLog::AREA.eq(Some("admin".to_string())))
+        .order_by(AuditLog::CREATED_AT.desc())
+        .limit(50)
+        .all(&*db)
+        .await
+        .unwrap();
+    Json(logs)
 }
-```
-
-**What the consumer sees:**
-
-```toml
-# config/plugins.toml
-[plugins.audit]
-retention_days = 30  # override default 90 days
 ```
 
 ```
 GET /audit/logs          → JSON list of recent audit entries
-Schedule: daily cleanup  → purges entries older than retention_days
+Schedule: daily cleanup  → purges entries older than 90 days
 ```
+
+If your project uses area-gated auditing, plugins can use `AuditLog::AREA` to expose separate admin,
+support, or operations review screens without reimplementing audit capture.
 
 ---
 

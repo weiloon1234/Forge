@@ -185,6 +185,7 @@ struct ModelHookContext
   fn database(&self) -> &DatabaseManager
   fn transaction(&self) -> &DatabaseTransaction
   fn actor(&self) -> Option<&Actor>
+  fn origin(&self) -> Option<&EventOrigin>
   fn executor(&self) -> &dyn QueryExecutor
   fn events(&self) -> Result<Arc<EventBus>>
   async fn dispatch<E>(&self, event: E) -> Result<()>

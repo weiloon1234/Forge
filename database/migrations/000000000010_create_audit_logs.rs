@@ -14,6 +14,7 @@ impl MigrationFile for Entry {
                 subject_model TEXT NOT NULL,
                 subject_table TEXT NOT NULL,
                 subject_id TEXT NOT NULL,
+                area TEXT,
                 actor_guard TEXT,
                 actor_id TEXT,
                 request_id TEXT,
@@ -37,6 +38,12 @@ impl MigrationFile for Entry {
 
         ctx.raw_execute(
             "CREATE INDEX idx_audit_logs_actor ON audit_logs (actor_guard, actor_id)",
+            &[],
+        )
+        .await?;
+
+        ctx.raw_execute(
+            "CREATE INDEX idx_audit_logs_area_created_at ON audit_logs (area, created_at)",
             &[],
         )
         .await?;

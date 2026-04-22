@@ -266,6 +266,8 @@ pub struct AuthConfig {
     pub bearer_prefix: String,
     pub tokens: TokenConfig,
     pub sessions: SessionConfig,
+    pub lockout: LockoutConfig,
+    pub mfa: MfaConfig,
     #[serde(default)]
     pub guards: std::collections::HashMap<String, GuardDriverConfig>,
 }
@@ -277,6 +279,8 @@ impl Default for AuthConfig {
             bearer_prefix: "Bearer".to_string(),
             tokens: TokenConfig::default(),
             sessions: SessionConfig::default(),
+            lockout: LockoutConfig::default(),
+            mfa: MfaConfig::default(),
             guards: std::collections::HashMap::new(),
         }
     }
@@ -284,13 +288,43 @@ impl Default for AuthConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
-pub struct AuditConfig {
+pub struct LockoutConfig {
     pub enabled: bool,
+    pub max_failures: u32,
+    pub lockout_minutes: u64,
+    pub window_minutes: u64,
 }
 
-impl Default for AuditConfig {
+impl Default for LockoutConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            max_failures: 5,
+            lockout_minutes: 15,
+            window_minutes: 15,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct MfaConfig {
+    pub enabled: bool,
+    pub issuer: String,
+    pub pending_token_ttl_minutes: u64,
+    pub recovery_codes: usize,
+    pub required_roles: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl Default for MfaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            issuer: "forge".to_string(),
+            pending_token_ttl_minutes: 10,
+            recovery_codes: 8,
+            required_roles: std::collections::HashMap::new(),
+        }
     }
 }
 
@@ -628,10 +662,6 @@ impl ConfigRepository {
         self.section("auth")
     }
 
-    pub fn audit(&self) -> Result<AuditConfig> {
-        self.section("audit")
-    }
-
     pub fn scheduler(&self) -> Result<SchedulerConfig> {
         self.section("scheduler")
     }
@@ -772,9 +802,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, AuditConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig,
-        LoggingConfig, ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig,
-        WebSocketConfig,
+        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig, LoggingConfig,
+        ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -971,32 +1000,6 @@ mod tests {
 
         assert_eq!(auth.default_guard, GuardId::new("admin"));
         assert_eq!(auth.bearer_prefix, "Token");
-    }
-
-    #[test]
-    fn audit_config_defaults_to_enabled() {
-        let config = ConfigRepository::default();
-        let audit: AuditConfig = config.audit().unwrap();
-
-        assert!(audit.enabled);
-    }
-
-    #[test]
-    fn parses_audit_config_section() {
-        let directory = tempdir().unwrap();
-        fs::write(
-            directory.path().join("00-audit.toml"),
-            r#"
-                [audit]
-                enabled = false
-            "#,
-        )
-        .unwrap();
-
-        let config = ConfigRepository::from_dir(directory.path()).unwrap();
-        let audit: AuditConfig = config.audit().unwrap();
-
-        assert!(!audit.enabled);
     }
 
     #[test]

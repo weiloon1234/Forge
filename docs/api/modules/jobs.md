@@ -20,6 +20,7 @@ struct JobContext
   fn app(&self) -> &AppContext
   fn queue(&self) -> &QueueId
   fn attempt(&self) -> u32
+struct JobDeadLetterContext
 struct JobDispatcher
   async fn dispatch<J>(&self, job: J) -> Result<()>
   async fn dispatch_later<J>(&self, job: J, run_at_millis: i64) -> Result<()>
@@ -43,6 +44,7 @@ trait JobMiddleware
   fn before<'life0, 'life1, 'life2, 'async_trait>(
   fn after<'life0, 'life1, 'life2, 'async_trait>(
   fn failed<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+  fn on_dead_lettered<'life0, 'life1, 'async_trait>(
 fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 ```
 

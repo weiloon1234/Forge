@@ -5,12 +5,10 @@ use axum::middleware::Next;
 use axum::response::Response;
 use tracing::Instrument;
 
-use crate::foundation::AppContext;
-use crate::http::middleware::RealIp;
-
 use super::context::CurrentRequest;
 use super::request_id::{generate_request_id, RequestId, REQUEST_ID_HEADER};
 use super::scope_current_request;
+use crate::foundation::AppContext;
 
 pub(crate) async fn request_context_middleware(
     State(app): State<AppContext>,
@@ -31,6 +29,11 @@ pub(crate) async fn request_context_middleware(
 
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let user_agent = request
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
     let span = tracing::info_span!(
         "forge.http.request",
         method = %method,
@@ -40,9 +43,16 @@ pub(crate) async fn request_context_middleware(
 
     let locale = resolve_request_locale(&request, &app);
     let start = std::time::Instant::now();
-    let mut response = crate::translations::CURRENT_LOCALE
-        .scope(locale, next.run(request).instrument(span))
-        .await;
+    let execution_context = super::ExecutionContext::Http {
+        method: method.to_string(),
+        path: path.clone(),
+        request_id: Some(request_id.clone()),
+    };
+    let mut response = super::scope_current_execution(
+        execution_context,
+        crate::translations::CURRENT_LOCALE.scope(locale, next.run(request).instrument(span)),
+    )
+    .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
@@ -50,6 +60,30 @@ pub(crate) async fn request_context_middleware(
             .headers_mut()
             .insert(HeaderName::from_static(REQUEST_ID_HEADER), value);
     }
+    let current_request = response
+        .extensions()
+        .get::<CurrentRequest>()
+        .cloned()
+        .unwrap_or(CurrentRequest {
+            request_id: Some(request_id.clone()),
+            ip: None,
+            user_agent,
+            audit_area: None,
+        });
+    let error_extension = response
+        .extensions()
+        .get::<super::reporter::HandlerErrorResponseExtension>()
+        .cloned();
+    let actor = response.extensions().get::<crate::auth::Actor>().cloned();
+    super::report_handler_error_response(
+        &app,
+        method.as_str(),
+        &path,
+        &current_request,
+        actor,
+        error_extension,
+    )
+    .await;
     let status = response.status();
     if let Ok(diagnostics) = app.diagnostics() {
         diagnostics.record_http_response_with_duration(status, duration_ms);
@@ -72,25 +106,18 @@ pub(crate) async fn request_origin_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let request_id = request
-        .extensions()
-        .get::<RequestId>()
-        .map(|value| value.as_str().to_string())
-        .unwrap_or_else(generate_request_id);
-    let current = CurrentRequest {
-        request_id,
-        ip: request
-            .extensions()
-            .get::<RealIp>()
-            .map(|value| value.0.to_string()),
-        user_agent: request
-            .headers()
-            .get(axum::http::header::USER_AGENT)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned),
-    };
+    let (parts, body) = request.into_parts();
+    let current = CurrentRequest::from_parts(&parts);
+    let request = Request::from_parts(parts, body);
 
-    scope_current_request(current, next.run(request)).await
+    let mut response = scope_current_request(current.clone(), next.run(request)).await;
+    let current = response
+        .extensions()
+        .get::<CurrentRequest>()
+        .cloned()
+        .unwrap_or(current);
+    response.extensions_mut().insert(current);
+    response
 }
 
 fn resolve_request_locale(request: &Request, app: &AppContext) -> String {

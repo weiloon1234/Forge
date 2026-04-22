@@ -468,6 +468,13 @@ cargo run -- migrate:publish
 cargo run -- seed:publish
 ```
 
+`config:publish` now emits the framework-owned `[auth.lockout]` and `[auth.mfa]` sections.
+`env:publish` emits the matching `AUTH__LOCKOUT__*`, `AUTH__MFA__*`, and
+`AUTH__MFA__REQUIRED_ROLES__<GUARD>` overrides. Built-in audit logging is code-driven: mark the
+admin route tree with `audit_area("admin")`, and unmarked routes will not produce audit rows.
+There is no global audit config section anymore. Error reporters are registered in code with
+`AppBuilder::register_error_reporter*()`, so they do not appear in the generated config yet.
+
 Environment variables override config using double-underscore notation:
 
 ```bash
@@ -514,10 +521,10 @@ impl ServiceProvider for AppServiceProvider {
 | Command | Description |
 |---------|-------------|
 | **Setup** | |
-| `config:publish` | Publish sample configuration to your project |
-| `env:publish` | Generate `.env.example` with all overridable variables |
+| `config:publish` | Publish sample configuration, including auth lockout, MFA, and audit sections |
+| `env:publish` | Generate `.env.example` with all supported env overrides, including lockout, MFA, and audit |
 | `key:generate` | Generate signing and encryption keys |
-| `migrate:publish` | Publish framework migration files |
+| `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |
 | `about` | Display framework version and environment info |
 | **Database** | |

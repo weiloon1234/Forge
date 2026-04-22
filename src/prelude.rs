@@ -2,6 +2,14 @@ pub use crate::attachments::{Attachment, AttachmentUploadBuilder, HasAttachments
 pub use crate::audit::AuditLog;
 pub use crate::auth::{
     email_verification::EmailVerificationManager,
+    lockout::{
+        LockoutError, LockoutStore, LoginLockedOutEvent, LoginThrottle, RuntimeLockoutStore,
+    },
+    mfa::{
+        routes as mfa_routes, CodeRequest as MfaCodeRequest, EnrollChallenge, MfaDisabledEvent,
+        MfaEnrolledEvent, MfaFactor, MfaFailedEvent, MfaManager, MfaVerifiedEvent,
+        RecoveryCodesRequest, RecoveryCodesResponse, TotpFactor,
+    },
     password_reset::PasswordResetManager,
     session::SessionManager,
     token::{
@@ -40,7 +48,7 @@ pub use crate::email::{
     TemplateRenderer,
 };
 pub use crate::events::{
-    dispatch_job, publish_websocket, Event, EventBus, EventContext, EventListener,
+    dispatch_job, publish_websocket, Event, EventBus, EventContext, EventListener, EventOrigin,
 };
 pub use crate::foundation::{
     App, AppBuilder, AppContext, AppTransaction, Container, Error, Result, ServiceProvider,
@@ -61,12 +69,12 @@ pub use crate::http::{
 pub use crate::i18n::{I18n, I18nManager, Locale};
 pub use crate::imaging::{ImageFormat, ImageProcessor, Rotation};
 pub use crate::jobs::{
-    spawn_worker, Job, JobBatchBuilder, JobChainBuilder, JobContext, JobDispatcher, JobMiddleware,
-    Worker,
+    spawn_worker, Job, JobBatchBuilder, JobChainBuilder, JobContext, JobDeadLetterContext,
+    JobDispatcher, JobMiddleware, Worker,
 };
 pub use crate::kernel::worker::WorkerKernel;
 pub use crate::logging::{
-    AuthOutcome, HttpOutcomeClass, JobOutcome, LivenessReport, LogFormat, LogLevel,
+    AuthOutcome, CurrentRequest, HttpOutcomeClass, JobOutcome, LivenessReport, LogFormat, LogLevel,
     ObservabilityOptions, ProbeResult, ProbeState, ReadinessCheck, ReadinessReport, RequestId,
     RuntimeBackendKind, RuntimeDiagnostics, RuntimeSnapshot, SchedulerLeadershipState,
     WebSocketConnectionState,
@@ -93,7 +101,9 @@ pub use crate::support::{
     PluginId, PluginScaffoldId, PolicyId, ProbeId, QueueId, RoleId, ScheduleId, SeederId, Time,
     Timezone, Token, ValidationRuleId,
 };
-pub use crate::testing::{Factory, FactoryBuilder, TestApp, TestClient, TestResponse};
+pub use crate::testing::{
+    assert_safe_to_wipe, Factory, FactoryBuilder, TestApp, TestClient, TestResponse,
+};
 pub use crate::translations::{HasTranslations, ModelTranslation, TranslatedFields};
 pub use crate::validation::{
     FieldError, RequestValidator, RuleContext, ValidationError, ValidationErrors, ValidationRule,

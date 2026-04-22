@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::config::AuditConfig;
 use crate::database::{DbRecord, DbType, DbValue, Model, QueryExecutor};
 use crate::foundation::{Error, Result};
 
@@ -16,6 +15,7 @@ pub struct AuditLog {
     pub subject_model: String,
     pub subject_table: String,
     pub subject_id: String,
+    pub area: Option<String>,
     pub actor_guard: Option<String>,
     pub actor_id: Option<String>,
     pub request_id: Option<String>,
@@ -56,15 +56,13 @@ struct AuditPayload {
 }
 
 pub(crate) struct AuditManager {
-    enabled: bool,
     availability: AtomicU8,
     warned_missing: AtomicBool,
 }
 
 impl AuditManager {
-    pub(crate) fn new(config: AuditConfig) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            enabled: config.enabled,
             availability: AtomicU8::new(0),
             warned_missing: AtomicBool::new(false),
         }
@@ -74,14 +72,25 @@ impl AuditManager {
     where
         M: Model,
     {
-        self.enabled && M::audit_enabled() && M::table_meta().name() != "audit_logs"
+        let request = crate::logging::current_request();
+        self.active_for_request::<M>(request.as_ref())
+    }
+
+    pub(crate) fn active_for_request<M>(
+        &self,
+        request: Option<&crate::logging::CurrentRequest>,
+    ) -> bool
+    where
+        M: Model,
+    {
+        M::audit_enabled()
+            && M::table_meta().name() != "audit_logs"
+            && request
+                .and_then(|request| request.audit_area.as_deref())
+                .is_some()
     }
 
     async fn table_available(&self, executor: &dyn QueryExecutor) -> Result<bool> {
-        if !self.enabled {
-            return Ok(false);
-        }
-
         match self.availability.load(Ordering::Relaxed) {
             1 => return Ok(true),
             2 => return Ok(false),
@@ -89,12 +98,30 @@ impl AuditManager {
         }
 
         let rows = executor
-            .raw_query("SELECT to_regclass('audit_logs')::TEXT AS audit_table", &[])
+            .raw_query(
+                r#"
+                SELECT
+                    to_regclass('audit_logs')::TEXT AS audit_table,
+                    EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'audit_logs'
+                          AND column_name = 'area'
+                    ) AS audit_area_column
+                "#,
+                &[],
+            )
             .await?;
-        let available = rows
+        let table_exists = rows
             .first()
             .and_then(|row| row.get("audit_table"))
             .is_some_and(|value| !matches!(value, DbValue::Null(_)));
+        let has_area_column = rows
+            .first()
+            .and_then(|row| row.get("audit_area_column"))
+            .is_some_and(|value| matches!(value, DbValue::Bool(true)));
+        let available = table_exists && has_area_column;
 
         self.availability
             .store(if available { 1 } else { 2 }, Ordering::Relaxed);
@@ -102,7 +129,7 @@ impl AuditManager {
         if !available && !self.warned_missing.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 target: "forge.audit",
-                "audit_logs table is missing; built-in audit logging is disabled until the migration is published and applied"
+                "audit_logs table or `area` column is missing; built-in audit logging is disabled until framework migrations are published and applied"
             );
         }
 
@@ -120,7 +147,10 @@ where
     M: Model,
 {
     let audit = context.app().audit()?;
-    if !audit.active_for::<M>() || !audit.table_available(context.transaction()).await? {
+    let request = crate::logging::current_request();
+    if !audit.active_for_request::<M>(request.as_ref())
+        || !audit.table_available(context.transaction()).await?
+    {
         return Ok(());
     }
 
@@ -131,8 +161,6 @@ where
             M::table_meta().name()
         ))
     })?;
-
-    let request = crate::logging::current_request();
     let actor = context.actor();
 
     context
@@ -144,6 +172,7 @@ where
                 subject_model,
                 subject_table,
                 subject_id,
+                area,
                 actor_guard,
                 actor_id,
                 request_id,
@@ -153,17 +182,22 @@ where
                 after_data,
                 changes
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
             &[
                 DbValue::Text(event_type.as_str().to_string()),
                 DbValue::Text(std::any::type_name::<M>().to_string()),
                 DbValue::Text(M::table_meta().name().to_string()),
                 DbValue::Text(subject_id_for_record::<M>(subject_source)?),
+                nullable_text(request.as_ref().and_then(|value| value.audit_area.clone())),
                 nullable_text(actor.map(|value| value.guard.as_ref().to_string())),
                 nullable_text(actor.map(|value| value.id.clone())),
-                nullable_text(request.as_ref().map(|value| value.request_id.clone())),
-                nullable_text(request.as_ref().and_then(|value| value.ip.clone())),
+                nullable_text(request.as_ref().and_then(|value| value.request_id.clone())),
+                nullable_text(
+                    request
+                        .as_ref()
+                        .and_then(|value| value.ip.map(|ip| ip.to_string())),
+                ),
                 nullable_text(request.as_ref().and_then(|value| value.user_agent.clone())),
                 nullable_json(payload.before_data),
                 nullable_json(payload.after_data),

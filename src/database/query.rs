@@ -3,8 +3,9 @@ use std::{collections::VecDeque, future::Future, marker::PhantomData, pin::Pin};
 use serde::Serialize;
 
 use crate::audit::{record_with_assignments, write_model_audit, AuditEventType};
+use crate::events::EventOrigin;
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::current_actor;
+use crate::logging::{current_actor, current_request};
 use crate::support::{Collection, ModelId};
 use futures_util::stream::{self, BoxStream, StreamExt};
 
@@ -2632,10 +2633,10 @@ where
         E: ModelWriteExecutor,
     {
         let create_many = self.clone();
-        with_model_write_transaction(executor, |app, transaction, actor| {
+        with_model_write_transaction(executor, |app, transaction, origin| {
             Box::pin(async move {
                 let prepared =
-                    prepare_create_many_for_execution(&create_many, app, transaction, actor)
+                    prepare_create_many_for_execution(&create_many, app, transaction, origin)
                         .await?;
                 transaction
                     .execute_compiled_with(
@@ -2653,10 +2654,10 @@ where
         E: ModelWriteExecutor,
     {
         let create_many = self.clone();
-        with_model_write_transaction(executor, |app, transaction, actor| {
+        with_model_write_transaction(executor, |app, transaction, origin| {
             Box::pin(async move {
                 let prepared =
-                    prepare_create_many_for_execution(&create_many, app, transaction, actor)
+                    prepare_create_many_for_execution(&create_many, app, transaction, origin)
                         .await?;
                 let records = transaction
                     .query_records_with(&prepared.compiled_sql(true)?, create_many.options.clone())
@@ -2896,10 +2897,10 @@ where
         E: ModelWriteExecutor,
     {
         let update = self.clone();
-        with_model_write_transaction(executor, |app, transaction, actor| {
+        with_model_write_transaction(executor, |app, transaction, origin| {
             Box::pin(async move {
                 let prepared =
-                    prepare_update_for_execution(&update, app, transaction, actor).await?;
+                    prepare_update_for_execution(&update, app, transaction, origin).await?;
                 transaction
                     .execute_compiled_with(&prepared.compiled_sql(false)?, update.options.clone())
                     .await
@@ -2913,10 +2914,10 @@ where
         E: ModelWriteExecutor,
     {
         let update = self.clone();
-        with_model_write_transaction(executor, |app, transaction, actor| {
+        with_model_write_transaction(executor, |app, transaction, origin| {
             Box::pin(async move {
                 let prepared =
-                    prepare_update_for_execution(&update, app, transaction, actor).await?;
+                    prepare_update_for_execution(&update, app, transaction, origin).await?;
                 let records = transaction
                     .query_records_with(&prepared.compiled_sql(true)?, update.options.clone())
                     .await?;
@@ -3183,20 +3184,21 @@ async fn with_model_write_transaction<E, T>(
     operation: impl for<'a> FnOnce(
         &'a AppContext,
         &'a super::runtime::DatabaseTransaction,
-        Option<crate::auth::Actor>,
+        Option<EventOrigin>,
     ) -> ModelWriteFuture<'a, T>,
 ) -> Result<T>
 where
     E: ModelWriteExecutor,
 {
     let actor = executor.actor().cloned().or_else(current_actor);
+    let origin = event_origin_from_context(actor, current_request());
 
     if let Some(transaction) = executor.active_transaction() {
-        return operation(executor.app_context(), transaction, actor).await;
+        return operation(executor.app_context(), transaction, origin).await;
     }
 
     let transaction = executor.app_context().begin_transaction().await?;
-    let result = operation(transaction.app(), transaction.transaction(), actor).await;
+    let result = operation(transaction.app(), transaction.transaction(), origin).await;
     match result {
         Ok(value) => {
             transaction.commit().await?;
@@ -3212,6 +3214,13 @@ where
             Err(error)
         }
     }
+}
+
+fn event_origin_from_context(
+    actor: Option<crate::auth::Actor>,
+    request: Option<crate::logging::CurrentRequest>,
+) -> Option<EventOrigin> {
+    EventOrigin::from_request(actor, request.as_ref())
 }
 
 async fn apply_assignment_write_mutators<M>(
@@ -3294,13 +3303,13 @@ where
 {
     create.validate_rows()?;
     let create = create.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
+    with_model_write_transaction(executor, |app, transaction, origin| {
         Box::pin(async move {
             create_model_records_in_transaction_inner(
                 &create,
                 app,
                 transaction,
-                actor,
+                origin,
                 LifecycleMode::Enabled,
             )
             .await
@@ -3319,7 +3328,7 @@ where
 {
     create_many.validate_rows()?;
     let create_many = create_many.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
+    with_model_write_transaction(executor, |app, transaction, origin| {
         Box::pin(async move {
             let mut created = Vec::new();
             for row in &create_many.rows {
@@ -3334,7 +3343,7 @@ where
                         &create,
                         app,
                         transaction,
-                        actor.clone(),
+                        origin.clone(),
                         LifecycleMode::Disabled,
                     )
                     .await?,
@@ -3356,7 +3365,7 @@ where
 {
     create_many.validate_rows()?;
     let create_many = create_many.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
+    with_model_write_transaction(executor, |app, transaction, origin| {
         Box::pin(async move {
             let mut created = Vec::new();
             for row in &create_many.rows {
@@ -3371,7 +3380,7 @@ where
                         &create,
                         app,
                         transaction,
-                        actor.clone(),
+                        origin.clone(),
                         LifecycleMode::Enabled,
                     )
                     .await?,
@@ -3399,7 +3408,7 @@ async fn create_model_records_in_transaction_inner<M>(
     create: &CreateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
     lifecycle_mode: LifecycleMode,
 ) -> Result<Vec<M>>
 where
@@ -3409,7 +3418,7 @@ where
     let mut values = create.rows[0].clone();
     apply_create_model_conventions(create.table, app, &mut values)?;
     let mut draft = CreateDraft::<M>::new(values);
-    let context = ModelHookContext::new(app, database, transaction, actor);
+    let context = ModelHookContext::new(app, database, transaction, origin);
     if lifecycle_mode.enabled() {
         M::Lifecycle::creating(&context, &mut draft).await?;
     }
@@ -3472,9 +3481,9 @@ where
 {
     update.validate()?;
     let update = update.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
+    with_model_write_transaction(executor, |app, transaction, origin| {
         Box::pin(async move {
-            update_model_records_in_transaction(&update, app, transaction, actor).await
+            update_model_records_in_transaction(&update, app, transaction, origin).await
         })
     })
     .await
@@ -3490,13 +3499,13 @@ where
 {
     update.validate()?;
     let update = update.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
+    with_model_write_transaction(executor, |app, transaction, origin| {
         Box::pin(async move {
             update_model_records_in_transaction_inner(
                 &update,
                 app,
                 transaction,
-                actor,
+                origin,
                 LifecycleMode::Disabled,
             )
             .await
@@ -3509,7 +3518,7 @@ async fn update_model_records_in_transaction<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
 ) -> Result<Vec<M>>
 where
     M: Model,
@@ -3518,7 +3527,7 @@ where
         update,
         app,
         transaction,
-        actor,
+        origin,
         LifecycleMode::Enabled,
     )
     .await
@@ -3528,7 +3537,7 @@ async fn update_model_records_in_transaction_inner<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
     lifecycle_mode: LifecycleMode,
 ) -> Result<Vec<M>>
 where
@@ -3536,7 +3545,7 @@ where
 {
     let current_records = select_update_target_records(update, transaction).await?;
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction, actor);
+    let context = ModelHookContext::new(app, database, transaction, origin);
     let mut updated_models = Vec::with_capacity(current_records.len());
     let audit_event_type = audit_event_type_for_update(update.system_action);
 
@@ -3626,10 +3635,10 @@ where
 {
     delete.validate()?;
     let delete = delete.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
-        Box::pin(
-            async move { delete_model_rows_in_transaction(&delete, app, transaction, actor).await },
-        )
+    with_model_write_transaction(executor, |app, transaction, origin| {
+        Box::pin(async move {
+            delete_model_rows_in_transaction(&delete, app, transaction, origin).await
+        })
     })
     .await
 }
@@ -3644,13 +3653,13 @@ where
 {
     delete.validate()?;
     let delete = delete.clone();
-    with_model_write_transaction(executor, |app, transaction, actor| {
+    with_model_write_transaction(executor, |app, transaction, origin| {
         Box::pin(async move {
             delete_model_rows_in_transaction_inner(
                 &delete,
                 app,
                 transaction,
-                actor,
+                origin,
                 LifecycleMode::Disabled,
             )
             .await
@@ -3663,12 +3672,12 @@ async fn delete_model_rows_in_transaction<M>(
     delete: &DeleteModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
 ) -> Result<u64>
 where
     M: Model,
 {
-    delete_model_rows_in_transaction_inner(delete, app, transaction, actor, LifecycleMode::Enabled)
+    delete_model_rows_in_transaction_inner(delete, app, transaction, origin, LifecycleMode::Enabled)
         .await
 }
 
@@ -3676,7 +3685,7 @@ async fn delete_model_rows_in_transaction_inner<M>(
     delete: &DeleteModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
     lifecycle_mode: LifecycleMode,
 ) -> Result<u64>
 where
@@ -3684,7 +3693,7 @@ where
 {
     let current_records = select_delete_target_records(delete, transaction).await?;
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction, actor);
+    let context = ModelHookContext::new(app, database, transaction, origin);
 
     for current_record in &current_records {
         let current_model = delete.table.hydrate_record(current_record)?;
@@ -3859,14 +3868,14 @@ async fn prepare_create_many_for_execution<M>(
     create_many: &CreateManyModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
 ) -> Result<CreateManyModel<M>>
 where
     M: Model,
 {
     let mut prepared = create_many.clone();
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction, actor);
+    let context = ModelHookContext::new(app, database, transaction, origin);
     for row in &mut prepared.rows {
         apply_create_model_conventions(prepared.table, app, row)?;
         apply_assignment_write_mutators(prepared.table, &context, row).await?;
@@ -3886,7 +3895,7 @@ async fn prepare_update_for_execution<M>(
     update: &UpdateModel<M>,
     app: &AppContext,
     transaction: &super::runtime::DatabaseTransaction,
-    actor: Option<crate::auth::Actor>,
+    origin: Option<EventOrigin>,
 ) -> Result<UpdateModel<M>>
 where
     M: Model,
@@ -3899,7 +3908,7 @@ where
         prepared.system_action,
     )?;
     let database = app.database()?;
-    let context = ModelHookContext::new(app, database, transaction, actor);
+    let context = ModelHookContext::new(app, database, transaction, origin);
     apply_update_write_mutators(prepared.table, &context, &mut prepared.values).await?;
     prepared.system_action = SystemUpdateAction::None;
     Ok(prepared)

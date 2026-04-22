@@ -89,6 +89,7 @@ struct User {
 |-----------|----------|---------|-------------|
 | `#[forge(table = "...")]` | Yes | — | Database table name |
 | `lifecycle = Type` | No | No hooks | Struct implementing `ModelLifecycle<M>` |
+| `audit = true/false` | No | `true` | Enable or disable the built-in audit writer for this model |
 | `timestamps = true/false` | No | Config default | Auto-manage `created_at`/`updated_at` |
 | `soft_deletes = true/false` | No | Config default | Enable soft deletes via `deleted_at` |
 | `primary_key_strategy = "uuid_v7"` | No | `uuid_v7` | `uuid_v7` (auto) or `manual` |
@@ -99,6 +100,7 @@ struct User {
 |-----------|-------------|
 | `#[forge(write_mutator = "fn_name")]` | Transform value on create/update (e.g., hash password) |
 | `#[forge(read_accessor = "fn_name")]` | Transform value on read |
+| `#[forge(audit_exclude)]` | Exclude this persisted column from built-in audit payloads |
 | `#[forge(skip)]` | Skip this field in DB operations |
 
 ### ModelId\<M\>
@@ -574,6 +576,74 @@ ctx.actor()        // → Option<&Actor> (who triggered this write)
 ctx.executor()     // → &dyn QueryExecutor
 ctx.dispatch(event).await?  // dispatch a domain event
 ```
+
+## Built-in Audit Logging
+
+Forge can write one audit row per create, update, soft delete, restore, and hard delete. Audit
+rows are written inside the same database transaction as the model change, but only for HTTP
+requests that resolve to an explicit audit area. There is no global audit config switch.
+
+Mark the route tree that should produce audit rows:
+
+```rust
+r.scope("/admin", |admin| {
+    admin
+        .name_prefix("admin")
+        .guard(Guard::Admin)
+        .audit_area("admin");
+
+    admin.post("/users", "store", create_admin_user, |_| {});
+    Ok(())
+})?;
+```
+
+Control auditing per model and per field:
+
+```rust
+#[derive(Model)]
+#[forge(table = "admins")]
+struct Admin {
+    id: ModelId<Self>,
+    email: String,
+    #[forge(audit_exclude)]
+    password_hash: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+}
+
+#[derive(Model)]
+#[forge(table = "cache_entries", audit = false)]
+struct CacheEntry {
+    id: ModelId<Self>,
+    key: String,
+    value: String,
+}
+```
+
+Query audit rows through the built-in `AuditLog` model:
+
+```rust
+let logs = AuditLog::query()
+    .where_(AuditLog::SUBJECT_TABLE.eq("admins"))
+    .where_(AuditLog::AREA.eq(Some("admin".to_string())))
+    .order_by(AuditLog::CREATED_AT.desc())
+    .limit(50)
+    .all(&*db)
+    .await?;
+```
+
+Payload shape is stable:
+
+- `event_type`: `created`, `updated`, `soft_deleted`, `restored`, or `deleted`
+- `area`: the resolved route/scope audit area, such as `admin`
+- `before_data`: full row snapshot before destructive changes
+- `after_data`: full row snapshot after create/update/restore/soft delete
+- `changes`: dirty-only JSON payload for updates, soft deletes, and restores
+
+Unmarked routes, routes under `audit_disabled()`, and non-HTTP writes from jobs, scheduler tasks,
+or CLI commands do not produce audit rows by default.
+
+The framework `AuditLog` model is excluded from auditing automatically to avoid recursion.
 
 ---
 

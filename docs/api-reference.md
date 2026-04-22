@@ -1647,6 +1647,7 @@ trait JobMiddleware: Send + Sync + 'static {
     async fn before(&self, ...) -> Result<()>;
     async fn after(&self, ...) -> Result<()>;
     async fn failed(&self, ...) -> Result<()>;
+    async fn on_dead_lettered(&self, ...) -> Result<()>;
 }
 ```
 
@@ -1655,6 +1656,7 @@ trait JobMiddleware: Send + Sync + 'static {
 | Name | Summary |
 |------|---------|
 | `JobContext` | `app`, `queue`, `attempt` |
+| `JobDeadLetterContext` | Dead-letter payload, attempts, error, and app context |
 | `JobDispatcher` | Dispatch jobs to queue |
 | `JobBatchBuilder` | Build job batches |
 | `JobChainBuilder` | Build job chains |
@@ -1792,12 +1794,14 @@ trait EventListener<E: Event>: Send + Sync + 'static {
 
 | Name | Summary |
 |------|---------|
-| `EventContext` | `app: AppContext` |
+| `EventContext` | `app: AppContext` plus optional actor/request origin metadata |
+| `EventOrigin` | Optional actor, IP, user-agent, and request ID payload for listeners |
 | `EventBus` | Dispatches events to registered listeners |
 
 ### Functions
 
 ```rust
+fn dispatch_with_origin<E>(event: E, origin: Option<EventOrigin>) -> Result<()>      // dispatch with origin metadata
 fn dispatch_job<E, J, F>(mapper: F) -> JobDispatchListener<E, J, F>         // event → job dispatch
 fn publish_websocket<E, F>(mapper: F) -> WebSocketPublishListener<E, F>      // event → WS broadcast
 ```
@@ -2329,6 +2333,12 @@ fn command<I, F, Fut>(&mut self, id: I, command: Command, handler: F) -> Result<
 ## testing/
 
 Test infrastructure.
+
+### Functions
+
+```rust
+fn assert_safe_to_wipe(db_url: &str) -> Result<()>
+```
 
 ### Structs
 

@@ -54,6 +54,7 @@ impl ServiceProvider for GeneratedDatabaseProvider {
 struct TestRuntime {
     _dir: TempDir,
     database: DatabaseManager,
+    database_url: String,
     schema: String,
     migration_table: String,
 }
@@ -67,7 +68,7 @@ impl TestRuntime {
 
         write_runtime_config(dir.path(), &url, &schema, &migration_table);
         let database = DatabaseManager::from_config(&DatabaseConfig {
-            url,
+            url: url.clone(),
             schema: schema.clone(),
             migration_table: migration_table.clone(),
             ..DatabaseConfig::default()
@@ -78,6 +79,7 @@ impl TestRuntime {
         let runtime = Self {
             _dir: dir,
             database,
+            database_url: url,
             schema,
             migration_table,
         };
@@ -90,6 +92,8 @@ impl TestRuntime {
     }
 
     async fn cleanup(&self) {
+        forge::testing::assert_safe_to_wipe(&self.database_url)
+            .expect("test database URL must be explicitly safe to wipe");
         let _ = self
             .database
             .raw_execute(

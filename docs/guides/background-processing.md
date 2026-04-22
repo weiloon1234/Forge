@@ -175,11 +175,56 @@ impl JobMiddleware for LogJobExecution {
         tracing::error!(job = %job_id, error, "job failed");
         Ok(())
     }
+
+    async fn on_dead_lettered(&self, ctx: &JobDeadLetterContext) -> Result<()> {
+        tracing::error!(
+            job = %ctx.class,
+            id = %ctx.id,
+            attempts = ctx.attempts,
+            error = %ctx.last_error,
+            "job dead-lettered"
+        );
+        Ok(())
+    }
 }
 
 // Register
 registrar.register_job_middleware(LogJobExecution)?;
 ```
+
+`on_dead_lettered()` runs once after retries are exhausted and the job has been moved to the
+dead-letter queue. Middleware hooks are called in registration order, and hook failures are logged
+without aborting the dead-letter transition.
+
+### Error Reporters
+
+Use `ErrorReporter` when you want one integration point for handler 500s, panics, and dead-lettered
+jobs:
+
+```rust
+#[derive(Default)]
+struct OpsReporter;
+
+#[async_trait]
+impl ErrorReporter for OpsReporter {
+    async fn report_handler_error(&self, report: HandlerErrorReport) {
+        tracing::error!(path = %report.path, status = report.status, error = %report.error);
+    }
+
+    async fn report_panic(&self, report: PanicReport) {
+        tracing::error!(location = %report.location, message = %report.message);
+    }
+
+    async fn report_job_dead_lettered(&self, report: JobDeadLetteredReport) {
+        tracing::error!(job = %report.job_class, id = %report.job_id, error = %report.last_error);
+    }
+}
+
+App::builder()
+    .register_error_reporter::<OpsReporter>();
+```
+
+Reporters are code-registered, not config-driven. Forge fans out to every registered reporter.
 
 ### Running the Worker
 
@@ -411,6 +456,33 @@ events.dispatch(OrderPlaced {
     total: 99.99,
 }).await?;
 ```
+
+### Event Origin Metadata
+
+`EventContext` now carries optional request and actor origin metadata. Model lifecycle events fired
+from HTTP writes automatically include the authenticated actor, IP, user-agent, and request ID.
+
+```rust
+struct RecordOrigin;
+
+#[async_trait]
+impl EventListener<ModelUpdatedEvent> for RecordOrigin {
+    async fn handle(&self, ctx: &EventContext, event: &ModelUpdatedEvent) -> Result<()> {
+        tracing::info!(
+            table = %event.table,
+            actor_id = ctx.actor().map(|actor| actor.id.as_str()).unwrap_or("system"),
+            request_id = ?ctx.request_id(),
+            ip = ?ctx.ip(),
+            user_agent = ?ctx.user_agent(),
+            "model updated"
+        );
+        Ok(())
+    }
+}
+```
+
+Scheduled tasks, CLI commands, and background jobs default to `None` for origin metadata unless you
+explicitly pass an origin with `EventBus::dispatch_with_origin(...)`.
 
 ### Event → Job (Async Processing)
 

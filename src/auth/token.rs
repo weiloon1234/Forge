@@ -14,6 +14,7 @@ use crate::support::{sha256_hex_str, CommandId, GuardId, PermissionId, Token};
 use super::{Actor, AuthError, AuthErrorCode, Authenticatable, BearerAuthenticator};
 
 const TOKEN_PRUNE_COMMAND: CommandId = CommandId::new("token:prune");
+pub const MFA_PENDING_ABILITY: &str = "auth:mfa_pending";
 
 /// A pair of access + refresh tokens returned to the client after login.
 #[derive(
@@ -139,7 +140,7 @@ impl TokenManager {
         actor_id: &str,
         name: &str,
     ) -> Result<TokenPair> {
-        self.insert_token_pair(M::guard().as_ref(), actor_id, name, &[])
+        self.insert_token_pair_default_ttl(M::guard().as_ref(), actor_id, name, &[])
             .await
     }
 
@@ -162,8 +163,45 @@ impl TokenManager {
         name: &str,
         abilities: Vec<String>,
     ) -> Result<TokenPair> {
-        self.insert_token_pair(M::guard().as_ref(), actor_id, name, &abilities)
+        self.insert_token_pair_default_ttl(M::guard().as_ref(), actor_id, name, &abilities)
             .await
+    }
+
+    pub async fn issue_actor(&self, actor: &Actor) -> Result<TokenPair> {
+        self.issue_actor_named(actor, "").await
+    }
+
+    pub async fn issue_actor_named(&self, actor: &Actor, name: &str) -> Result<TokenPair> {
+        self.insert_token_pair_default_ttl(actor.guard.as_ref(), &actor.id, name, &[])
+            .await
+    }
+
+    pub async fn issue_actor_with_abilities(
+        &self,
+        actor: &Actor,
+        name: &str,
+        abilities: Vec<String>,
+    ) -> Result<TokenPair> {
+        self.insert_token_pair_default_ttl(actor.guard.as_ref(), &actor.id, name, &abilities)
+            .await
+    }
+
+    pub async fn issue_mfa_pending(
+        &self,
+        actor: &Actor,
+        name: &str,
+        ttl_minutes: u64,
+    ) -> Result<TokenPair> {
+        let ttl_secs = ttl_minutes.max(1) * 60;
+        self.insert_token_pair_with_ttl(
+            actor.guard.as_ref(),
+            &actor.id,
+            name,
+            &[MFA_PENDING_ABILITY.to_string()],
+            ttl_secs,
+            ttl_secs,
+        )
+        .await
     }
 
     /// Validate an access token and return the Actor if valid.
@@ -319,6 +357,26 @@ impl TokenManager {
     }
 
     /// Core token pair creation — shared by issue and refresh.
+    async fn insert_token_pair_default_ttl(
+        &self,
+        guard: &str,
+        actor_id: &str,
+        name: &str,
+        abilities: &[String],
+    ) -> Result<TokenPair> {
+        let expires_in_secs = self.config.access_token_ttl_minutes * 60;
+        let refresh_expires_in_secs = self.config.refresh_token_ttl_days * 24 * 60 * 60;
+        self.insert_token_pair_with_ttl(
+            guard,
+            actor_id,
+            name,
+            abilities,
+            expires_in_secs,
+            refresh_expires_in_secs,
+        )
+        .await
+    }
+
     async fn insert_token_pair(
         &self,
         guard: &str,
@@ -326,14 +384,24 @@ impl TokenManager {
         name: &str,
         abilities: &[String],
     ) -> Result<TokenPair> {
+        self.insert_token_pair_default_ttl(guard, actor_id, name, abilities)
+            .await
+    }
+
+    async fn insert_token_pair_with_ttl(
+        &self,
+        guard: &str,
+        actor_id: &str,
+        name: &str,
+        abilities: &[String],
+        expires_in_secs: u64,
+        refresh_expires_in_secs: u64,
+    ) -> Result<TokenPair> {
         let access_plain = Token::base64(self.config.token_length)?;
         let refresh_plain = Token::base64(self.config.token_length)?;
 
         let access_hash = sha256_hex_str(&access_plain);
         let refresh_hash = sha256_hex_str(&refresh_plain);
-
-        let expires_in_secs = self.config.access_token_ttl_minutes * 60;
-        let refresh_expires_in_secs = self.config.refresh_token_ttl_days * 24 * 60 * 60;
 
         let abilities_json = serde_json::Value::Array(
             abilities
@@ -370,6 +438,13 @@ impl TokenManager {
             token_type: "Bearer".to_string(),
         })
     }
+}
+
+pub fn actor_has_mfa_pending(actor: &Actor) -> bool {
+    actor
+        .permissions
+        .iter()
+        .any(|permission| permission.as_ref() == MFA_PENDING_ABILITY)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -272,10 +272,10 @@ These are available automatically — no registration needed:
 
 | Command | Description |
 |---------|-------------|
-| `config:publish` | Generate sample config file |
-| `env:publish` | Generate `.env.example` |
+| `config:publish` | Generate sample config file, including auth lockout and MFA sections |
+| `env:publish` | Generate `.env.example`, including lockout and MFA env overrides |
 | `key:generate` | Generate signing + encryption keys |
-| `migrate:publish` | Publish framework migration files |
+| `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |
 | `db:migrate` | Run pending migrations |
 | `db:migrate:status` | Show migration status |
@@ -296,6 +296,13 @@ These are available automatically — no registration needed:
 | `plugin:scaffold` | Run plugin scaffold |
 | `docs:api` | Generate API surface docs |
 | `about` | Show framework version and environment |
+
+`config:publish` writes the current framework-owned auth sections, including `[auth.lockout]` and
+`[auth.mfa]`. `env:publish` writes the matching `AUTH__LOCKOUT__*`, `AUTH__MFA__*`, and
+`AUTH__MFA__REQUIRED_ROLES__<GUARD>` entries. Built-in audit logging is code-driven via
+`audit_area(...)`, so it no longer appears in generated config files. Error reporters are
+registered in code with `AppBuilder::register_error_reporter*()`, so they are intentionally not
+part of the generated config files either.
 
 ---
 

@@ -15,6 +15,7 @@ enum Error { Message, Http, Validation, NotFound, Other }
   fn http_with_metadata( status: u16, message: impl Into<String>, error_code: Option<String>, message_key: Option<String>, ) -> Self
   fn not_found(message: impl Into<String>) -> Self
   fn other<E>(error: E) -> Self
+  fn source_chain(&self) -> Vec<String>
   fn payload(&self) -> Value
 struct App
   fn builder() -> AppBuilder
@@ -32,6 +33,8 @@ struct AppBuilder
   fn register_websocket_routes<F>(self, registrar: F) -> Self
   fn register_validation_rule<I, R>(self, id: I, rule: R) -> Self
   fn register_middleware(self, config: MiddlewareConfig) -> Self
+  fn register_error_reporter<R>(self) -> Self
+  fn register_error_reporter_instance( self, reporter: Arc<dyn ErrorReporter>, ) -> Self
   fn middleware_group( self, name: impl Into<String>, middlewares: Vec<MiddlewareConfig>, ) -> Self
   fn enable_observability(self) -> Self
   fn enable_observability_with(self, options: ObservabilityOptions) -> Self

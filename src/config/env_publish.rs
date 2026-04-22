@@ -135,6 +135,21 @@ REDIS__URL=redis://127.0.0.1/
 # AUTH__SESSIONS__SLIDING_EXPIRY=true
 # AUTH__SESSIONS__REMEMBER_TTL_DAYS=30
 
+# Login Lockout
+# AUTH__LOCKOUT__ENABLED=true
+# AUTH__LOCKOUT__MAX_FAILURES=5
+# AUTH__LOCKOUT__LOCKOUT_MINUTES=15
+# AUTH__LOCKOUT__WINDOW_MINUTES=15
+
+# Multi-Factor Authentication
+# AUTH__MFA__ENABLED=true
+# AUTH__MFA__ISSUER=forge
+# AUTH__MFA__PENDING_TOKEN_TTL_MINUTES=10
+# AUTH__MFA__RECOVERY_CODES=8
+#
+# Required roles per guard (TOML/JSON-style arrays are supported):
+# AUTH__MFA__REQUIRED_ROLES__ADMIN=["developer","super_admin"]
+
 # Guard Drivers (per guard name)
 # AUTH__GUARDS__API__DRIVER=token
 # AUTH__GUARDS__WEB__DRIVER=session

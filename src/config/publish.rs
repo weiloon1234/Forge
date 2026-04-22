@@ -95,18 +95,28 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # sliding_expiry = true
 # remember_ttl_days = 30
 
+[auth.lockout]
+# enabled = true
+# max_failures = 5
+# lockout_minutes = 15
+# window_minutes = 15
+
+[auth.mfa]
+# enabled = true
+# issuer = "forge"
+# pending_token_ttl_minutes = 10
+# recovery_codes = 8
+
+# Required roles per guard:
+# [auth.mfa.required_roles]
+# admin = ["developer", "super_admin"]
+
 # Define guards (one per authentication portal):
 # [auth.guards.api]
 # driver = "token"                    # "token", "session", or "custom"
 #
 # [auth.guards.web]
 # driver = "session"
-
-# -----------------------------------------------------------------------------
-# Audit Logging
-# -----------------------------------------------------------------------------
-[audit]
-# enabled = true
 
 # -----------------------------------------------------------------------------
 # Jobs (Background Queue)
@@ -557,6 +567,14 @@ const FRAMEWORK_MIGRATIONS: &[(&str, &str)] = &[
     (
         "000000000010_create_audit_logs.rs",
         include_str!("../../database/migrations/000000000010_create_audit_logs.rs"),
+    ),
+    (
+        "000000000011_create_auth_mfa_totp_factors.rs",
+        include_str!("../../database/migrations/000000000011_create_auth_mfa_totp_factors.rs"),
+    ),
+    (
+        "000000000012_add_area_to_audit_logs.rs",
+        include_str!("../../database/migrations/000000000012_add_area_to_audit_logs.rs"),
     ),
 ];
 

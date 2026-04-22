@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
 use axum::Router;
 
-use crate::auth::{AccessScope, Actor, AuthError, Authenticatable};
+use crate::auth::{token::actor_has_mfa_pending, AccessScope, Actor, AuthError, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
 use crate::logging::AuthOutcome;
@@ -29,6 +29,14 @@ pub type HttpRouter = Router<AppContext>;
 pub type HttpAuthorizeCallback = Arc<
     dyn Fn(HttpAuthorizeContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
 >;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum AuditAreaSetting {
+    #[default]
+    Inherit,
+    Disabled,
+    Area(String),
+}
 
 #[derive(Clone)]
 pub struct HttpAuthorizeContext {
@@ -61,6 +69,8 @@ pub struct HttpRouteOptions {
     middleware_group_name: Option<String>,
     pub(crate) authorize: Option<HttpAuthorizeCallback>,
     pub(crate) post_auth_rate_limit: Option<middleware::RateLimit>,
+    pub(crate) allow_mfa_pending_token: bool,
+    audit_area: AuditAreaSetting,
     pub(crate) doc: Option<crate::openapi::RouteDoc>,
 }
 
@@ -114,6 +124,21 @@ impl HttpRouteOptions {
     /// Multiple calls append middleware in order.
     pub fn middleware(mut self, config: MiddlewareConfig) -> Self {
         self.middlewares.push(config);
+        self
+    }
+
+    pub fn allow_mfa_pending_token(mut self) -> Self {
+        self.allow_mfa_pending_token = true;
+        self
+    }
+
+    pub fn audit_area(mut self, area: &str) -> Self {
+        self.audit_area = AuditAreaSetting::Area(area.to_string());
+        self
+    }
+
+    pub fn audit_disabled(mut self) -> Self {
+        self.audit_area = AuditAreaSetting::Disabled;
         self
     }
 
@@ -200,6 +225,13 @@ impl HttpRouteOptions {
         self.access.permissions()
     }
 
+    fn resolved_audit_area(&self) -> Option<&str> {
+        match &self.audit_area {
+            AuditAreaSetting::Area(area) => Some(area.as_str()),
+            AuditAreaSetting::Disabled | AuditAreaSetting::Inherit => None,
+        }
+    }
+
     fn with_defaults(mut self, defaults: &Self) -> Self {
         self.access = merge_access_scope(&self.access, &defaults.access);
 
@@ -216,6 +248,10 @@ impl HttpRouteOptions {
         if self.post_auth_rate_limit.is_none() {
             self.post_auth_rate_limit = defaults.post_auth_rate_limit.clone();
         }
+        if defaults.allow_mfa_pending_token {
+            self.allow_mfa_pending_token = true;
+        }
+        self.audit_area = merge_audit_area_setting(&self.audit_area, &defaults.audit_area);
 
         self.doc = match (self.doc.take(), defaults.doc.as_ref()) {
             (Some(doc), Some(default_doc)) => Some(doc.merge_defaults(default_doc)),
@@ -242,6 +278,16 @@ fn merge_access_scope(explicit: &AccessScope, defaults: &AccessScope) -> AccessS
             merged.permissions.extend(explicit.permissions.clone());
             AccessScope::Guarded(merged)
         }
+    }
+}
+
+fn merge_audit_area_setting(
+    explicit: &AuditAreaSetting,
+    defaults: &AuditAreaSetting,
+) -> AuditAreaSetting {
+    match explicit {
+        AuditAreaSetting::Inherit => defaults.clone(),
+        AuditAreaSetting::Disabled | AuditAreaSetting::Area(_) => explicit.clone(),
     }
 }
 
@@ -429,6 +475,16 @@ impl<'a> HttpScope<'a> {
 
     pub fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self {
         self.state.options.middleware_group_name = Some(name.into());
+        self
+    }
+
+    pub fn audit_area(&mut self, area: &str) -> &mut Self {
+        self.state.options.audit_area = AuditAreaSetting::Area(area.to_string());
+        self
+    }
+
+    pub fn audit_disabled(&mut self) -> &mut Self {
+        self.state.options.audit_area = AuditAreaSetting::Disabled;
         self
     }
 
@@ -631,6 +687,16 @@ impl HttpRouteBuilder {
 
     pub fn middleware_group(&mut self, name: impl Into<String>) -> &mut Self {
         self.options.middleware_group_name = Some(name.into());
+        self
+    }
+
+    pub fn audit_area(&mut self, area: &str) -> &mut Self {
+        self.options.audit_area = AuditAreaSetting::Area(area.to_string());
+        self
+    }
+
+    pub fn audit_disabled(&mut self) -> &mut Self {
+        self.options.audit_area = AuditAreaSetting::Disabled;
         self
     }
 
@@ -1009,6 +1075,7 @@ impl HttpRegistrar {
                         options,
                         ..
                     } = *route;
+                    let audit_area = options.resolved_audit_area().map(ToOwned::to_owned);
                     let mut route_middlewares = Vec::new();
                     // Expand middleware group if specified
                     if let Some(ref group_name) = options.middleware_group_name {
@@ -1040,12 +1107,23 @@ impl HttpRegistrar {
                         method_router
                     };
 
-                    if route_middlewares.is_empty() {
+                    if route_middlewares.is_empty() && audit_area.is_none() {
                         router = router.route(&path, method_router);
                     } else {
-                        let mini = Router::<AppContext>::new().route(&path, method_router);
-                        let mini =
-                            middleware::apply_ordered_middlewares(mini, route_middlewares, &app);
+                        let mut mini = Router::<AppContext>::new().route(&path, method_router);
+                        if !route_middlewares.is_empty() {
+                            mini = middleware::apply_ordered_middlewares(
+                                mini,
+                                route_middlewares,
+                                &app,
+                            );
+                        }
+                        if let Some(audit_area) = audit_area {
+                            mini = mini.layer(axum_middleware::from_fn_with_state(
+                                RouteRequestContextState { audit_area },
+                                route_request_context_middleware,
+                            ));
+                        }
                         router = router.merge(mini);
                     }
                 }
@@ -1107,10 +1185,32 @@ impl HttpRegistrar {
 }
 
 #[derive(Clone)]
+struct RouteRequestContextState {
+    audit_area: String,
+}
+
+#[derive(Clone)]
 struct HttpAuthState {
     app: AppContext,
     options: HttpRouteOptions,
     post_auth_rl: Option<middleware::RateLimitState>,
+}
+
+async fn route_request_context_middleware(
+    State(state): State<RouteRequestContextState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let (mut parts, body) = request.into_parts();
+    let current = crate::logging::CurrentRequest::from_parts(&parts)
+        .with_audit_area(Some(state.audit_area.clone()));
+    parts.extensions.insert(current.clone());
+    let request = Request::from_parts(parts, body);
+
+    let mut response =
+        crate::logging::scope_current_request(current.clone(), next.run(request)).await;
+    response.extensions_mut().insert(current);
+    response
 }
 
 async fn http_auth_middleware(
@@ -1143,6 +1243,12 @@ async fn http_auth_middleware(
         }
     };
 
+    if actor_has_mfa_pending(&actor) && !state.options.allow_mfa_pending_token {
+        record_auth_outcome(&state.app, AuthOutcome::Forbidden);
+        return AuthError::forbidden("Multi-factor authentication verification is required.")
+            .into_response();
+    }
+
     let permissions = state.options.permissions_set();
     if let Err(error) = authorizer.authorize_permissions(&actor, &permissions).await {
         record_auth_outcome(&state.app, auth_outcome_from_error(&error));
@@ -1168,8 +1274,10 @@ async fn http_auth_middleware(
     crate::logging::scope_current_actor(actor.clone(), async move {
         record_auth_outcome(&state.app, AuthOutcome::Success);
         request.extensions_mut().insert(state.app.clone());
-        request.extensions_mut().insert(actor);
-        next.run(request).await
+        request.extensions_mut().insert(actor.clone());
+        let mut response = next.run(request).await;
+        response.extensions_mut().insert(actor);
+        response
     })
     .await
 }
@@ -1466,6 +1574,7 @@ mod tests {
                 admin
                     .name_prefix("admin")
                     .guard(GuardId::new("admin"))
+                    .audit_area("admin")
                     .permission(PermissionId::new("users.view"))
                     .middleware_group("api")
                     .rate_limit(RateLimit::new(60).per_minute().by_actor())
@@ -1493,6 +1602,7 @@ mod tests {
             .expect("scope rate limit should be inherited");
 
         assert_eq!(route.options.guard_id(), Some(&GuardId::new("admin")));
+        assert_eq!(route.options.resolved_audit_area(), Some("admin"));
         assert_eq!(
             route.options.permissions_set(),
             BTreeSet::from([PermissionId::new("users.view")])
@@ -1515,6 +1625,7 @@ mod tests {
                 admin
                     .name_prefix("admin")
                     .guard(GuardId::new("admin"))
+                    .audit_area("admin")
                     .permission(PermissionId::new("admin.access"))
                     .authorize(|_ctx| async { Ok(()) });
 
@@ -1527,6 +1638,7 @@ mod tests {
 
         let route = route_by_path(&registrar, "/admin/login");
         assert_eq!(route.options.guard_id(), None);
+        assert_eq!(route.options.resolved_audit_area(), Some("admin"));
         assert!(route.options.permissions_set().is_empty());
         assert!(route.options.authorize.is_none());
         assert!(!route.options.requires_auth());
@@ -1540,6 +1652,7 @@ mod tests {
                 admin
                     .name_prefix("admin")
                     .guard(GuardId::new("admin"))
+                    .audit_area("admin")
                     .permission(PermissionId::new("admin.access"));
 
                 admin.scope("/auth", |auth| {
@@ -1554,8 +1667,49 @@ mod tests {
 
         let route = route_by_path(&registrar, "/admin/auth/login");
         assert_eq!(route.options.guard_id(), None);
+        assert_eq!(route.options.resolved_audit_area(), Some("admin"));
         assert!(route.options.permissions_set().is_empty());
         assert!(!route.options.requires_auth());
+    }
+
+    #[test]
+    fn route_can_disable_inherited_audit_area() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin.name_prefix("admin").audit_area("admin");
+                admin.get("/health", "health", ok, |route| {
+                    route.audit_disabled();
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/health");
+        assert!(matches!(
+            route.options.audit_area,
+            super::AuditAreaSetting::Disabled
+        ));
+        assert_eq!(route.options.resolved_audit_area(), None);
+    }
+
+    #[test]
+    fn child_scope_can_override_inherited_audit_area() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .scope("/admin", |admin| {
+                admin.name_prefix("admin").audit_area("admin");
+                admin.scope("/support", |support| {
+                    support.name_prefix("support").audit_area("support");
+                    support.get("/tickets", "tickets", ok, |_| {});
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let route = route_by_path(&registrar, "/admin/support/tickets");
+        assert_eq!(route.options.resolved_audit_area(), Some("support"));
     }
 
     #[test]

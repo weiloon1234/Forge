@@ -58,6 +58,27 @@ r.route_with_options("/posts", post(create_post),
         .rate_limit(RateLimit::new(10).per_minute().by_actor()));
 ```
 
+For MFA completion routes, opt in to pending tokens explicitly. This is what allows the short-lived
+`auth:mfa_pending` token to reach `/auth/mfa/verify` while every other guarded route continues to
+reject it.
+
+```rust
+r.route_with_options("/auth/mfa/verify", post(forge::auth::mfa::routes::verify),
+    HttpRouteOptions::new()
+        .guard(Guard::Admin)
+        .allow_mfa_pending_token());
+```
+
+Built-in audit logging is activated the same way: opt an admin route tree into an audit area once,
+then let child routes inherit it.
+
+```rust
+r.route_with_options("/admin/users", post(create_admin_user),
+    HttpRouteOptions::new()
+        .guard(Guard::Admin)
+        .audit_area("admin"));
+```
+
 See [Auth Guide](auth.md) for setting up `Guard` and `Permission` enums.
 
 ### Scope DSL
@@ -68,7 +89,7 @@ For portal-style route modules, prefer `scope()` so path prefixes, relative rout
 fn routes(r: &mut HttpRegistrar) -> Result<()> {
     r.api_version(1, |r| {
         r.scope("/admin", |admin| {
-            admin.name_prefix("admin");
+            admin.name_prefix("admin").audit_area("admin");
 
             admin.scope("/auth", |auth| {
                 auth.name_prefix("auth").tag("admin:auth");
@@ -116,6 +137,53 @@ fn routes(r: &mut HttpRegistrar) -> Result<()> {
 
 This registers named routes such as `admin.auth.login`, `admin.auth.me`, and `admin.profile.update` automatically.
 
+### Area-Gated Audit Logging
+
+Forge's built-in audit writer is area-gated by default. A mutation is only written to `audit_logs`
+when all of the following are true:
+
+- the current HTTP route/scope/group resolves to an audit area
+- the model has not opted out with `#[forge(audit = false)]`
+
+Audit activation is code-driven only. `config:publish` and `env:publish` do not emit audit
+settings anymore.
+
+The usual project-level setup is one line on the outer admin scope:
+
+```rust
+r.scope("/admin", |admin| {
+    admin
+        .name_prefix("admin")
+        .guard(Guard::Admin)
+        .audit_area("admin");
+
+    admin.post("/users", "store", create_admin_user, |_| {});
+
+    admin.scope("/sensitive", |sensitive| {
+        sensitive.name_prefix("sensitive").audit_disabled();
+        sensitive.post("/exports", "exports", export_sensitive_data, |_| {});
+        Ok(())
+    })?;
+
+    Ok(())
+})?;
+```
+
+Use `audit_disabled()` for exceptions inside an audited parent scope, or override with a different
+area such as `support.audit_area("support")`.
+
+Handlers can also read the resolved area through the public `CurrentRequest` extractor:
+
+```rust
+async fn create_admin_user(
+    request: CurrentRequest,
+    State(app): State<AppContext>,
+) -> Result<StatusCode> {
+    assert_eq!(request.audit_area.as_deref(), Some("admin"));
+    Ok(StatusCode::CREATED)
+}
+```
+
 ### Route Groups
 
 Prefix a set of routes without nesting into a separate router:
@@ -148,6 +216,7 @@ r.group_with_options(
     "/api/admin",
     HttpRouteOptions::new()
         .guard(Guard::Admin)
+        .audit_area("admin")
         .middleware_group("api")
         .tag("admin"),
     |r| {

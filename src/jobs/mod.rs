@@ -35,6 +35,10 @@ pub trait JobMiddleware: Send + Sync + 'static {
     async fn failed(&self, _job_id: &JobId, _context: &JobContext, _error: &str) -> Result<()> {
         Ok(())
     }
+
+    async fn on_dead_lettered(&self, _context: &JobDeadLetterContext) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) type JobMiddlewareRegistryHandle = Arc<Mutex<JobMiddlewareRegistryBuilder>>;
@@ -106,6 +110,20 @@ impl JobMiddlewareRegistry {
             }
         }
     }
+
+    async fn run_dead_lettered(&self, context: &JobDeadLetterContext) {
+        for mw in &self.middlewares {
+            if let Err(error) = mw.on_dead_lettered(context).await {
+                tracing::warn!(
+                    target: "forge.worker",
+                    job = %context.class,
+                    job_id = %context.id,
+                    error = %error,
+                    "job middleware dead-letter hook failed"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -135,6 +153,16 @@ impl JobContext {
     pub fn attempt(&self) -> u32 {
         self.attempt
     }
+}
+
+#[derive(Clone)]
+pub struct JobDeadLetterContext {
+    pub class: String,
+    pub id: String,
+    pub attempts: u32,
+    pub last_error: String,
+    pub payload: serde_json::Value,
+    pub app: AppContext,
 }
 
 #[async_trait]
@@ -674,15 +702,19 @@ impl Worker {
         let (heartbeat, shutdown_heartbeat) =
             self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
         let default_timeout = Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
-        let execution = registration
-            .handler
-            .execute(
+        let execution = crate::logging::scope_current_execution(
+            crate::logging::ExecutionContext::Job {
+                class: envelope.job.to_string(),
+                id: lease.token.clone(),
+            },
+            registration.handler.execute(
                 &self.app,
                 &envelope,
                 self.runtime.config.max_retries,
                 default_timeout,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         let _ = shutdown_heartbeat.send(());
         heartbeat.abort();
         let _ = heartbeat.await;
@@ -807,6 +839,7 @@ impl Worker {
                 }
                 let job_name = envelope.job.clone();
                 let queue_name = envelope.queue.clone();
+                let payload_json = envelope.payload.clone();
                 let dead_letter = FailedJobEnvelope {
                     failed_at: Utc::now().timestamp_millis(),
                     error: error.clone(),
@@ -851,6 +884,18 @@ impl Worker {
                     duration_ms,
                 })
                 .await;
+
+                if let Some(ref mw) = middleware {
+                    mw.run_dead_lettered(&JobDeadLetterContext {
+                        class: job_name.to_string(),
+                        id: lease.token.clone(),
+                        attempts,
+                        last_error: error.clone(),
+                        payload: payload_json,
+                        app: self.app.clone(),
+                    })
+                    .await;
+                }
 
                 Ok(())
             }
@@ -1378,7 +1423,10 @@ mod tests {
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
 
-    use super::{Job, JobContext, JobDispatcher, JobRegistryBuilder, JobRuntime, Worker};
+    use super::{
+        Job, JobContext, JobDeadLetterContext, JobDispatcher, JobMiddleware,
+        JobMiddlewareRegistryBuilder, JobRegistryBuilder, JobRuntime, Worker,
+    };
     use crate::config::JobsConfig;
     use crate::foundation::{AppContext, Container, Error};
     use crate::logging::{ReadinessRegistryBuilder, RuntimeBackendKind, RuntimeDiagnostics};
@@ -1454,6 +1502,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dead_letters.len(), 1);
+    }
+
+    struct RecordingMiddleware {
+        target: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl JobMiddleware for RecordingMiddleware {
+        async fn on_dead_lettered(&self, context: &JobDeadLetterContext) -> crate::Result<()> {
+            self.target
+                .lock()
+                .unwrap()
+                .push(format!("{}:{}", context.class, context.id));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_lettered_jobs_trigger_middleware_hook() {
+        let _guard = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+        let backend = RuntimeBackend::memory("jobs-dead-letter-hook");
+        let mut registry = JobRegistryBuilder::default();
+        registry.register::<FailingJob>().unwrap();
+
+        let jobs_config = JobsConfig {
+            max_retries: 1,
+            poll_interval_ms: 1,
+            lease_ttl_ms: 50,
+            requeue_batch_size: 8,
+            ..JobsConfig::default()
+        };
+        let runtime = Arc::new(JobRuntime::new(
+            backend,
+            jobs_config.clone(),
+            JobRegistryBuilder::freeze_shared(Arc::new(Mutex::new(registry)), &jobs_config),
+        ));
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistryBuilder::freeze_shared(ReadinessRegistryBuilder::shared()),
+        ));
+        let dispatcher = JobDispatcher::new(runtime.clone(), diagnostics.clone());
+        let app = build_app(runtime, diagnostics);
+        let target = Arc::new(Mutex::new(Vec::new()));
+        let mut middleware_builder = JobMiddlewareRegistryBuilder::default();
+        middleware_builder.register(Arc::new(RecordingMiddleware {
+            target: target.clone(),
+        }));
+        app.container()
+            .singleton_arc(Arc::new(JobMiddlewareRegistryBuilder::freeze_shared(
+                Arc::new(Mutex::new(middleware_builder)),
+            )))
+            .unwrap();
+
+        dispatcher.dispatch(FailingJob).await.unwrap();
+        let worker = Worker::from_app(app).unwrap();
+        assert!(worker.run_once().await.unwrap());
+
+        let entries = target.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].starts_with("failing.job:"));
     }
 
     // --- Batch & chain test helpers ---

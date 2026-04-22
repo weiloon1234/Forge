@@ -158,7 +158,13 @@ impl SchedulerKernel {
                 }
 
                 // Execute the task with error isolation
-                let result = handler(app.clone()).await;
+                let result = crate::logging::scope_current_execution(
+                    crate::logging::ExecutionContext::Scheduler {
+                        id: task_id.to_string(),
+                    },
+                    handler(app.clone()),
+                )
+                .await;
 
                 match &result {
                     Ok(()) => {

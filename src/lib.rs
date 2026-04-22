@@ -97,6 +97,14 @@ pub use attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
 pub use audit::AuditLog;
 pub use auth::{
     email_verification::EmailVerificationManager,
+    lockout::{
+        LockoutError, LockoutStore, LoginLockedOutEvent, LoginThrottle, RuntimeLockoutStore,
+    },
+    mfa::{
+        routes as mfa_routes, CodeRequest as MfaCodeRequest, EnrollChallenge, MfaDisabledEvent,
+        MfaEnrolledEvent, MfaFactor, MfaFailedEvent, MfaManager, MfaVerifiedEvent,
+        RecoveryCodesRequest, RecoveryCodesResponse, TotpFactor,
+    },
     password_reset::PasswordResetManager,
     session::SessionManager,
     token::{
@@ -155,11 +163,12 @@ pub use http::{
 };
 pub use i18n::{I18n, I18nManager, Locale};
 pub use imaging::{ImageFormat, ImageProcessor, Rotation};
-pub use jobs::{spawn_worker, JobHistoryStatus, JobMiddleware};
+pub use jobs::{spawn_worker, JobDeadLetterContext, JobHistoryStatus, JobMiddleware};
 pub use kernel::worker::WorkerKernel;
 pub use logging::{
-    AuthOutcome, HttpOutcomeClass, JobOutcome, LivenessReport, LogFormat, LogLevel,
-    ObservabilityOptions, ProbeResult, ProbeState, ReadinessCheck, ReadinessReport, RequestId,
+    AuthOutcome, CurrentRequest, ErrorReporter, HandlerErrorReport, HttpOutcomeClass,
+    JobDeadLetteredReport, JobOutcome, LivenessReport, LogFormat, LogLevel, ObservabilityOptions,
+    PanicContext, PanicReport, ProbeResult, ProbeState, ReadinessCheck, ReadinessReport, RequestId,
     RuntimeBackendKind, RuntimeDiagnostics, RuntimeSnapshot, SchedulerLeadershipState,
     WebSocketConnectionState,
 };
@@ -189,7 +198,9 @@ pub use support::{
     PluginId, PluginScaffoldId, PolicyId, ProbeId, QueueId, RoleId, ScheduleId, SeederId, Time,
     Timezone, Token, ValidationRuleId,
 };
-pub use testing::{Factory, FactoryBuilder, TestApp, TestClient, TestResponse};
+pub use testing::{
+    assert_safe_to_wipe, Factory, FactoryBuilder, TestApp, TestClient, TestResponse,
+};
 pub use translations::{
     current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,
 };

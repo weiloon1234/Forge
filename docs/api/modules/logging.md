@@ -18,11 +18,15 @@ enum JobOutcome { Enqueued, Leased, Started, Succeeded, Retried, ExpiredLeaseReq
 enum LogFormat { Json, Text }
 enum LogLevel { Trace, Debug, Info, Warn, Error }
   fn as_filter_directive(self) -> &'static str
+enum PanicContext { Http, Job, Scheduler, Other }
 enum ProbeState { Healthy, Unhealthy }
   fn is_healthy(self) -> bool
 enum RuntimeBackendKind { Redis, Memory }
 enum SchedulerLeadershipState { Acquired, Lost }
 enum WebSocketConnectionState { Opened, Closed }
+struct CurrentRequest
+struct HandlerErrorReport
+struct JobDeadLetteredReport
 struct LivenessReport
 struct ObservabilityOptions
   fn new() -> Self
@@ -31,6 +35,7 @@ struct ObservabilityOptions
   fn permissions<I, P>(self, permissions: I) -> Self
   fn authorize<F, Fut>(self, f: F) -> Self
   fn access(&self) -> &AccessScope
+struct PanicReport
 struct ProbeResult
   fn healthy<I>(id: I) -> Self
   fn unhealthy<I>(id: I, message: impl Into<String>) -> Self
@@ -64,6 +69,10 @@ struct RuntimeDiagnostics
   fn set_scheduler_leader_active(&self, active: bool)
   fn record_job_outcome(&self, outcome: JobOutcome)
 struct RuntimeSnapshot
+trait ErrorReporter
+  fn report_handler_error<'life0, 'async_trait>(
+  fn report_panic<'life0, 'async_trait>(
+  fn report_job_dead_lettered<'life0, 'async_trait>(
 trait ReadinessCheck
   fn run<'life0, 'life1, 'async_trait>(
 fn init(config: &ConfigRepository) -> Result<()>

@@ -361,6 +361,56 @@ token_length = 32                   # random bytes in token
 rotate_refresh_tokens = true        # issue new refresh token on refresh
 ```
 
+## Login Lockout
+
+Use `LoginThrottle` in your login handler to enforce per-identifier failure tracking. This is
+different from request rate limiting: failed logins increment the counter, successful logins reset
+it.
+
+```rust
+use forge::auth::lockout::LoginThrottle;
+
+async fn login(
+    State(app): State<AppContext>,
+    Json(body): Json<LoginRequest>,
+) -> Result<impl IntoResponse> {
+    let db = app.database()?;
+    let throttle = LoginThrottle::new(&app)?;
+
+    throttle.before_attempt(&body.email).await?;
+
+    let user = User::model_query()
+        .where_col(User::EMAIL, &body.email)
+        .first(&*db).await?
+        .ok_or_else(|| Error::http_with_code(401, "Invalid credentials", "invalid_credentials"))?;
+
+    let hash = app.hash()?;
+    if !hash.check(&body.password, &user.password_hash)? {
+        throttle.record_failure(&body.email).await?;
+        return Err(Error::http_with_code(
+            401,
+            "Invalid credentials",
+            "invalid_credentials",
+        ));
+    }
+
+    throttle.record_success(&body.email).await?;
+    Ok(Json(TokenResponse::new(user.create_token(&app).await?)))
+}
+```
+
+When the threshold is exceeded, `before_attempt()` returns `LockoutError::LockedOut`, which maps to
+an HTTP 429 response with the stable error code `login_locked_out`. Forge also emits
+`LoginLockedOutEvent` so you can notify security or write custom audit entries.
+
+```toml
+[auth.lockout]
+enabled = true
+max_failures = 5
+lockout_minutes = 15
+window_minutes = 15
+```
+
 ---
 
 ## Auth Error Responses
@@ -429,6 +479,94 @@ cookie_path = "/"
 sliding_expiry = true               # extend TTL on activity
 remember_ttl_days = 30              # "remember me" duration
 ```
+
+## Multi-Factor Authentication (TOTP)
+
+Forge ships a first-party TOTP baseline with built-in handlers for enroll, confirm, verify,
+disable, and recovery-code rotation. Publish the framework migrations before turning it on:
+
+```bash
+cargo run -- migrate:publish
+```
+
+Register the built-in handlers on the routes you want to expose:
+
+```rust
+fn routes(r: &mut HttpRegistrar) -> Result<()> {
+    r.route_with_options(
+        "/auth/mfa/enroll",
+        post(forge::auth::mfa::routes::enroll),
+        HttpRouteOptions::new().guard(Guard::Admin),
+    );
+    r.route_with_options(
+        "/auth/mfa/confirm",
+        post(forge::auth::mfa::routes::confirm),
+        HttpRouteOptions::new().guard(Guard::Admin),
+    );
+    r.route_with_options(
+        "/auth/mfa/verify",
+        post(forge::auth::mfa::routes::verify),
+        HttpRouteOptions::new()
+            .guard(Guard::Admin)
+            .allow_mfa_pending_token(),
+    );
+    r.route_with_options(
+        "/auth/mfa/disable",
+        post(forge::auth::mfa::routes::disable),
+        HttpRouteOptions::new().guard(Guard::Admin),
+    );
+    r.route_with_options(
+        "/auth/mfa/recovery-codes",
+        post(forge::auth::mfa::routes::recovery),
+        HttpRouteOptions::new().guard(Guard::Admin),
+    );
+    Ok(())
+}
+```
+
+For login flows, issue a short-lived pending token when the actor's roles require MFA:
+
+```rust
+use forge::auth::mfa::MfaManager;
+
+async fn admin_login(
+    State(app): State<AppContext>,
+    Json(body): Json<LoginRequest>,
+) -> Result<impl IntoResponse> {
+    let admin = authenticate_admin(&app, &body).await?;
+    let admin_roles = load_admin_roles(&app, &admin).await?;
+
+    let actor = Actor::new(admin.id.to_string(), Guard::Admin)
+        .with_roles(admin_roles);
+    let mfa = MfaManager::new(&app)?;
+
+    let tokens = if mfa.requires_mfa(&actor) {
+        mfa.issue_pending_token(&actor, "admin-login").await?
+    } else {
+        mfa.issue_full_token(&actor, "admin-login").await?
+    };
+
+    Ok(Json(TokenResponse::new(tokens)))
+}
+```
+
+Pending tokens carry the reserved `auth:mfa_pending` ability. Guarded routes reject them by
+default; only routes marked with `allow_mfa_pending_token()` can accept them. The `/auth/mfa/verify`
+handler exchanges a pending token for a normal full-access token pair.
+
+```toml
+[auth.mfa]
+enabled = true
+issuer = "forge"
+pending_token_ttl_minutes = 10
+recovery_codes = 8
+
+[auth.mfa.required_roles]
+admin = ["developer", "super_admin"]
+```
+
+Recovery codes are one-time use, and repeated MFA failures reuse the built-in lockout backend under
+a separate internal key.
 
 ---
 
@@ -632,6 +770,21 @@ cookie_secure = true
 cookie_path = "/"
 sliding_expiry = true
 remember_ttl_days = 30
+
+[auth.lockout]
+enabled = true
+max_failures = 5
+lockout_minutes = 15
+window_minutes = 15
+
+[auth.mfa]
+enabled = true
+issuer = "forge"
+pending_token_ttl_minutes = 10
+recovery_codes = 8
+
+[auth.mfa.required_roles]
+admin = ["developer", "super_admin"]
 
 [auth.guards.user]
 driver = "token"

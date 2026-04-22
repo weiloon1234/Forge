@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, MutexGuard};
 
 const AUDIT_LOGS_TABLE: &str = "audit_logs";
 const AUDIT_ENTRIES_TABLE: &str = "forge_test_audit_entries";
+const NO_AUDIT_ENTRIES_TABLE: &str = "forge_test_no_audit_entries";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
 fn postgres_url() -> Option<String> {
@@ -39,9 +40,6 @@ impl AuditRuntime {
                 r#"
                 [database]
                 url = "{url}"
-
-                [audit]
-                enabled = true
                 "#
             ),
         )
@@ -65,6 +63,16 @@ impl AuditRuntime {
     fn config_dir(&self) -> &Path {
         self._dir.path()
     }
+}
+
+async fn build_test_app(config_dir: &Path) -> TestApp {
+    TestApp::builder()
+        .load_config_dir(config_dir)
+        .register_provider(AuditAuthProvider)
+        .register_middleware(TrustedProxy::new().build())
+        .register_routes(audit_routes)
+        .build()
+        .await
 }
 
 #[derive(Clone)]
@@ -94,19 +102,88 @@ struct AuditEntry {
     deleted_at: Option<DateTime>,
 }
 
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(model = NO_AUDIT_ENTRIES_TABLE, primary_key_strategy = "manual", audit = false)]
+struct NoAuditEntry {
+    id: i64,
+    title: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+}
+
 fn audit_routes(registrar: &mut HttpRegistrar) -> Result<()> {
-    registrar.route_with_options(
-        "/audit-entry",
-        post(create_audit_entry),
-        HttpRouteOptions::new().guard(GuardId::new("admin")),
-    );
+    registrar.scope("/admin", |admin| {
+        admin
+            .name_prefix("admin")
+            .guard(GuardId::new("admin"))
+            .audit_area("admin");
+
+        admin.post("/audit-entry", "audit_entry", create_audit_entry, |_| {});
+        admin.post(
+            "/audit-entry/commit",
+            "audit_entry_commit",
+            create_audit_entry_in_transaction_and_commit,
+            |_| {},
+        );
+        admin.post(
+            "/audit-entry/rollback",
+            "audit_entry_rollback",
+            create_audit_entry_in_transaction_and_rollback,
+            |_| {},
+        );
+        admin.post(
+            "/audit-entry/lifecycle",
+            "audit_entry_lifecycle",
+            create_update_and_delete_audit_entry,
+            |_| {},
+        );
+        admin.post(
+            "/no-audit-entry",
+            "no_audit_entry",
+            create_no_audit_entry,
+            |_| {},
+        );
+
+        admin.scope("/sensitive", |sensitive| {
+            sensitive.name_prefix("sensitive").audit_disabled();
+            sensitive.post(
+                "/audit-entry",
+                "audit_entry",
+                create_disabled_audit_entry,
+                |_| {},
+            );
+            Ok(())
+        })?;
+
+        admin.scope("/support", |support| {
+            support.name_prefix("support").audit_area("support");
+            support.post(
+                "/audit-entry",
+                "audit_entry",
+                create_support_area_audit_entry,
+                |_| {},
+            );
+            Ok(())
+        })?;
+
+        Ok(())
+    })?;
+
+    registrar.scope("/plain", |plain| {
+        plain.name_prefix("plain").guard(GuardId::new("admin"));
+        plain.post(
+            "/audit-entry",
+            "audit_entry",
+            create_plain_audit_entry,
+            |_| {},
+        );
+        Ok(())
+    })?;
+
     Ok(())
 }
 
-async fn create_audit_entry(
-    State(app): State<AppContext>,
-    _actor: CurrentActor,
-) -> impl IntoResponse {
+async fn create_audit_entry(State(app): State<AppContext>, _actor: CurrentActor) -> StatusCode {
     AuditEntry::create()
         .set(AuditEntry::ID, 101_i64)
         .set(AuditEntry::TITLE, "Created over HTTP")
@@ -116,6 +193,133 @@ async fn create_audit_entry(
         .unwrap();
 
     StatusCode::CREATED
+}
+
+async fn create_plain_audit_entry(
+    State(app): State<AppContext>,
+    _actor: CurrentActor,
+) -> StatusCode {
+    AuditEntry::create()
+        .set(AuditEntry::ID, 104_i64)
+        .set(AuditEntry::TITLE, "Created without area")
+        .set(AuditEntry::SECRET, "plain-secret")
+        .save(&app)
+        .await
+        .unwrap();
+
+    StatusCode::CREATED
+}
+
+async fn create_disabled_audit_entry(
+    State(app): State<AppContext>,
+    _actor: CurrentActor,
+) -> StatusCode {
+    AuditEntry::create()
+        .set(AuditEntry::ID, 102_i64)
+        .set(AuditEntry::TITLE, "Created with audit disabled")
+        .set(AuditEntry::SECRET, "disabled-secret")
+        .save(&app)
+        .await
+        .unwrap();
+
+    StatusCode::CREATED
+}
+
+async fn create_support_area_audit_entry(
+    State(app): State<AppContext>,
+    _actor: CurrentActor,
+) -> StatusCode {
+    AuditEntry::create()
+        .set(AuditEntry::ID, 103_i64)
+        .set(AuditEntry::TITLE, "Created in support area")
+        .set(AuditEntry::SECRET, "support-secret")
+        .save(&app)
+        .await
+        .unwrap();
+
+    StatusCode::CREATED
+}
+
+async fn create_no_audit_entry(State(app): State<AppContext>, _actor: CurrentActor) -> StatusCode {
+    NoAuditEntry::create()
+        .set(NoAuditEntry::ID, 1_i64)
+        .set(NoAuditEntry::TITLE, "Sensitive model")
+        .save(&app)
+        .await
+        .unwrap();
+
+    StatusCode::CREATED
+}
+
+async fn create_audit_entry_in_transaction_and_commit(
+    State(app): State<AppContext>,
+    _actor: CurrentActor,
+) -> Result<StatusCode> {
+    let tx = app.begin_transaction().await?;
+    AuditEntry::create()
+        .set(AuditEntry::ID, 301_i64)
+        .set(AuditEntry::TITLE, "Committed")
+        .set(AuditEntry::SECRET, "commit-secret")
+        .save(&tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn create_audit_entry_in_transaction_and_rollback(
+    State(app): State<AppContext>,
+    _actor: CurrentActor,
+) -> Result<StatusCode> {
+    let tx = app.begin_transaction().await?;
+    AuditEntry::create()
+        .set(AuditEntry::ID, 302_i64)
+        .set(AuditEntry::TITLE, "Rolled back")
+        .set(AuditEntry::SECRET, "rollback-secret")
+        .save(&tx)
+        .await?;
+    tx.rollback().await?;
+    Err(Error::http(500, "rolled back"))
+}
+
+async fn create_update_and_delete_audit_entry(
+    State(app): State<AppContext>,
+    _actor: CurrentActor,
+) -> StatusCode {
+    AuditEntry::create()
+        .set(AuditEntry::ID, 10_i64)
+        .set(AuditEntry::TITLE, "Draft")
+        .set(AuditEntry::SECRET, "hidden-1")
+        .save(&app)
+        .await
+        .unwrap();
+
+    AuditEntry::update()
+        .where_(AuditEntry::ID.eq(10_i64))
+        .set(AuditEntry::TITLE, "Published")
+        .set(AuditEntry::SECRET, "hidden-2")
+        .save(&app)
+        .await
+        .unwrap();
+
+    AuditEntry::delete()
+        .where_(AuditEntry::ID.eq(10_i64))
+        .execute(&app)
+        .await
+        .unwrap();
+
+    AuditEntry::restore()
+        .where_(AuditEntry::ID.eq(10_i64))
+        .save(&app)
+        .await
+        .unwrap();
+
+    AuditEntry::force_delete()
+        .where_(AuditEntry::ID.eq(10_i64))
+        .execute(&app)
+        .await
+        .unwrap();
+
+    StatusCode::NO_CONTENT
 }
 
 async fn execute_batch(database: &DatabaseManager, statements: &[&str]) {
@@ -128,6 +332,7 @@ async fn reset_schema(database: &DatabaseManager) {
     execute_batch(
         database,
         &[
+            &format!("DROP TABLE IF EXISTS {NO_AUDIT_ENTRIES_TABLE}"),
             &format!("DROP TABLE IF EXISTS {AUDIT_ENTRIES_TABLE}"),
             &format!("DROP TABLE IF EXISTS {AUDIT_LOGS_TABLE}"),
             &format!(
@@ -137,6 +342,7 @@ async fn reset_schema(database: &DatabaseManager) {
                     subject_model TEXT NOT NULL,
                     subject_table TEXT NOT NULL,
                     subject_id TEXT NOT NULL,
+                    area TEXT,
                     actor_guard TEXT,
                     actor_id TEXT,
                     request_id TEXT,
@@ -158,17 +364,29 @@ async fn reset_schema(database: &DatabaseManager) {
                     deleted_at TIMESTAMPTZ NULL
                 )"
             ),
+            &format!(
+                "CREATE TABLE {NO_AUDIT_ENTRIES_TABLE} (
+                    id BIGINT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )"
+            ),
         ],
     )
     .await;
 }
 
-async fn audit_logs_for_subject<E>(executor: &E, subject_id: i64) -> Vec<AuditLog>
+async fn audit_logs_for_subject<E>(
+    executor: &E,
+    subject_table: &str,
+    subject_id: impl ToString,
+) -> Vec<AuditLog>
 where
     E: QueryExecutor,
 {
     AuditLog::query()
-        .where_(AuditLog::SUBJECT_TABLE.eq(AUDIT_ENTRIES_TABLE))
+        .where_(AuditLog::SUBJECT_TABLE.eq(subject_table))
         .where_(AuditLog::SUBJECT_ID.eq(subject_id.to_string()))
         .order_by(AuditLog::CREATED_AT.asc())
         .order_by(AuditLog::ID.asc())
@@ -178,11 +396,15 @@ where
         .into_vec()
 }
 
-async fn latest_audit_log<E>(executor: &E, subject_id: i64) -> AuditLog
+async fn latest_audit_log<E>(
+    executor: &E,
+    subject_table: &str,
+    subject_id: impl ToString,
+) -> AuditLog
 where
     E: QueryExecutor,
 {
-    audit_logs_for_subject(executor, subject_id)
+    audit_logs_for_subject(executor, subject_table, subject_id)
         .await
         .into_iter()
         .last()
@@ -200,56 +422,59 @@ async fn audit_rows_commit_and_rollback_with_parent_transaction() {
         return;
     };
 
-    reset_schema(runtime.database.as_ref()).await;
+    let app = build_test_app(runtime.config_dir()).await;
+    reset_schema(app.app().database().unwrap().as_ref()).await;
 
-    let rollback_tx = runtime.app.begin_transaction().await.unwrap();
-    AuditEntry::create()
-        .set(AuditEntry::ID, 1_i64)
-        .set(AuditEntry::TITLE, "Rollback me")
-        .set(AuditEntry::SECRET, "rollback-secret")
-        .save(&rollback_tx)
+    let rollback = app
+        .client()
+        .post("/admin/audit-entry/rollback")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(rollback.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 302)
         .await
-        .unwrap();
-    assert_eq!(audit_logs_for_subject(&rollback_tx, 1).await.len(), 1);
-    rollback_tx.rollback().await.unwrap();
-    assert!(audit_logs_for_subject(&runtime.app, 1).await.is_empty());
-
-    let commit_tx = runtime.app.begin_transaction().await.unwrap();
-    AuditEntry::create()
-        .set(AuditEntry::ID, 2_i64)
-        .set(AuditEntry::TITLE, "Keep me")
-        .set(AuditEntry::SECRET, "commit-secret")
-        .save(&commit_tx)
+        .is_empty());
+    assert!(AuditEntry::query()
+        .where_(AuditEntry::ID.eq(302_i64))
+        .first(app.app())
         .await
-        .unwrap();
-    assert_eq!(audit_logs_for_subject(&commit_tx, 2).await.len(), 1);
-    commit_tx.commit().await.unwrap();
+        .unwrap()
+        .is_none());
 
-    let committed = audit_logs_for_subject(&runtime.app, 2).await;
+    let commit = app
+        .client()
+        .post("/admin/audit-entry/commit")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(commit.status(), StatusCode::CREATED);
+
+    let committed = audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 301).await;
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].event_type, "created");
+    assert_eq!(committed[0].area.as_deref(), Some("admin"));
+    assert!(AuditEntry::query()
+        .where_(AuditEntry::ID.eq(301_i64))
+        .first(app.app())
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
-async fn http_writes_capture_actor_and_request_origin() {
+async fn http_writes_capture_actor_request_origin_and_area() {
     let _guard = audit_lock().await;
     let Some(runtime) = AuditRuntime::new().await else {
         return;
     };
 
-    let app = TestApp::builder()
-        .load_config_dir(runtime.config_dir())
-        .register_provider(AuditAuthProvider)
-        .register_middleware(TrustedProxy::new().build())
-        .register_routes(audit_routes)
-        .build()
-        .await;
-
+    let app = build_test_app(runtime.config_dir()).await;
     reset_schema(app.app().database().unwrap().as_ref()).await;
 
     let response = app
         .client()
-        .post("/audit-entry")
+        .post("/admin/audit-entry")
         .bearer_auth("admin-token")
         .header(REQUEST_ID_HEADER, "req-audit-http")
         .header("x-forwarded-for", "203.0.113.5, 10.0.0.1")
@@ -259,9 +484,10 @@ async fn http_writes_capture_actor_and_request_origin() {
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let log = latest_audit_log(app.app(), 101).await;
+    let log = latest_audit_log(app.app(), AUDIT_ENTRIES_TABLE, 101).await;
     assert_eq!(log.event_type, "created");
     assert_eq!(log.subject_table, AUDIT_ENTRIES_TABLE);
+    assert_eq!(log.area.as_deref(), Some("admin"));
     assert_eq!(log.actor_guard.as_deref(), Some("admin"));
     assert_eq!(log.actor_id.as_deref(), Some("admin-1"));
     assert_eq!(log.request_id.as_deref(), Some("req-audit-http"));
@@ -274,7 +500,51 @@ async fn http_writes_capture_actor_and_request_origin() {
 }
 
 #[tokio::test]
-async fn direct_writes_leave_origin_empty_and_track_event_types() {
+async fn unmarked_and_disabled_routes_do_not_audit_but_explicit_areas_do() {
+    let _guard = audit_lock().await;
+    let Some(runtime) = AuditRuntime::new().await else {
+        return;
+    };
+
+    let app = build_test_app(runtime.config_dir()).await;
+    reset_schema(app.app().database().unwrap().as_ref()).await;
+
+    let plain = app
+        .client()
+        .post("/plain/audit-entry")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(plain.status(), StatusCode::CREATED);
+    assert!(audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 104)
+        .await
+        .is_empty());
+
+    let disabled = app
+        .client()
+        .post("/admin/sensitive/audit-entry")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(disabled.status(), StatusCode::CREATED);
+    assert!(audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 102)
+        .await
+        .is_empty());
+
+    let support = app
+        .client()
+        .post("/admin/support/audit-entry")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(support.status(), StatusCode::CREATED);
+    let support_logs = audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 103).await;
+    assert_eq!(support_logs.len(), 1);
+    assert_eq!(support_logs[0].area.as_deref(), Some("support"));
+}
+
+#[tokio::test]
+async fn direct_non_http_writes_do_not_audit_by_default() {
     let _guard = audit_lock().await;
     let Some(runtime) = AuditRuntime::new().await else {
         return;
@@ -283,47 +553,39 @@ async fn direct_writes_leave_origin_empty_and_track_event_types() {
     reset_schema(runtime.database.as_ref()).await;
 
     AuditEntry::create()
-        .set(AuditEntry::ID, 10_i64)
-        .set(AuditEntry::TITLE, "Draft")
-        .set(AuditEntry::SECRET, "hidden-1")
+        .set(AuditEntry::ID, 11_i64)
+        .set(AuditEntry::TITLE, "Direct write")
+        .set(AuditEntry::SECRET, "direct-secret")
         .save(&runtime.app)
         .await
         .unwrap();
 
-    let created = latest_audit_log(&runtime.app, 10).await;
-    assert!(created.actor_guard.is_none());
-    assert!(created.actor_id.is_none());
-    assert!(created.request_id.is_none());
-    assert!(created.ip.is_none());
-    assert!(created.user_agent.is_none());
+    assert!(
+        audit_logs_for_subject(&runtime.app, AUDIT_ENTRIES_TABLE, 11)
+            .await
+            .is_empty()
+    );
+}
 
-    AuditEntry::update()
-        .where_(AuditEntry::ID.eq(10_i64))
-        .set(AuditEntry::TITLE, "Published")
-        .set(AuditEntry::SECRET, "hidden-2")
-        .save(&runtime.app)
-        .await
-        .unwrap();
+#[tokio::test]
+async fn admin_area_tracks_event_types_and_excludes_sensitive_fields() {
+    let _guard = audit_lock().await;
+    let Some(runtime) = AuditRuntime::new().await else {
+        return;
+    };
 
-    AuditEntry::delete()
-        .where_(AuditEntry::ID.eq(10_i64))
-        .execute(&runtime.app)
-        .await
-        .unwrap();
+    let app = build_test_app(runtime.config_dir()).await;
+    reset_schema(app.app().database().unwrap().as_ref()).await;
 
-    AuditEntry::restore()
-        .where_(AuditEntry::ID.eq(10_i64))
-        .save(&runtime.app)
-        .await
-        .unwrap();
+    let response = app
+        .client()
+        .post("/admin/audit-entry/lifecycle")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    AuditEntry::force_delete()
-        .where_(AuditEntry::ID.eq(10_i64))
-        .execute(&runtime.app)
-        .await
-        .unwrap();
-
-    let logs = audit_logs_for_subject(&runtime.app, 10).await;
+    let logs = audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 10).await;
     let event_types = logs
         .iter()
         .map(|log| log.event_type.as_str())
@@ -332,6 +594,7 @@ async fn direct_writes_leave_origin_empty_and_track_event_types() {
         event_types,
         vec!["created", "updated", "soft_deleted", "restored", "deleted"]
     );
+    assert!(logs.iter().all(|log| log.area.as_deref() == Some("admin")));
 
     let created_after = logs[0].after_data.as_ref().unwrap();
     assert_eq!(created_after["title"], "Draft");
@@ -372,7 +635,29 @@ async fn direct_writes_leave_origin_empty_and_track_event_types() {
 }
 
 #[tokio::test]
-async fn audit_log_model_does_not_recurse() {
+async fn model_level_opt_out_still_suppresses_audit_inside_active_area() {
+    let _guard = audit_lock().await;
+    let Some(runtime) = AuditRuntime::new().await else {
+        return;
+    };
+
+    let app = build_test_app(runtime.config_dir()).await;
+    reset_schema(app.app().database().unwrap().as_ref()).await;
+
+    let response = app
+        .client()
+        .post("/admin/no-audit-entry")
+        .bearer_auth("admin-token")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(audit_logs_for_subject(app.app(), NO_AUDIT_ENTRIES_TABLE, 1)
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
+async fn audit_log_model_does_not_recurse_and_null_area_rows_hydrate() {
     let _guard = audit_lock().await;
     let Some(runtime) = AuditRuntime::new().await else {
         return;
@@ -384,10 +669,15 @@ async fn audit_log_model_does_not_recurse() {
         .set(AuditLog::EVENT_TYPE, "manual")
         .set(AuditLog::SUBJECT_MODEL, "audit_acceptance::Manual")
         .set(AuditLog::SUBJECT_TABLE, "manual_subjects")
-        .set(AuditLog::SUBJECT_ID, "manual-1")
+        .set(AuditLog::SUBJECT_ID, "legacy-1")
         .save(&runtime.app)
         .await
         .unwrap();
+
+    let log = latest_audit_log(&runtime.app, "manual_subjects", "legacy-1").await;
+    assert_eq!(log.event_type, "manual");
+    assert_eq!(log.subject_table, "manual_subjects");
+    assert!(log.area.is_none());
 
     let logs = AuditLog::query()
         .order_by(AuditLog::CREATED_AT.asc())
@@ -398,6 +688,4 @@ async fn audit_log_model_does_not_recurse() {
         .into_vec();
 
     assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].event_type, "manual");
-    assert_eq!(logs[0].subject_table, "manual_subjects");
 }

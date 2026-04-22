@@ -33,5 +33,6 @@ struct TestResponse
   fn bytes(&self) -> &[u8] ⓘ
 trait Factory: Model
   fn definition() -> Vec<(&'static str, DbValue)>
+fn assert_safe_to_wipe(db_url: &str) -> Result<()>
 ```
 

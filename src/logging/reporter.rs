@@ -136,6 +136,29 @@ pub(crate) async fn report_handler_error_response(
     let Some(extension) = extension else {
         return;
     };
+
+    if extension.status >= 500 {
+        tracing::error!(
+            method = %method,
+            path = %path,
+            status = extension.status,
+            request_id = ?request.request_id,
+            error = %extension.error,
+            chain = ?extension.chain,
+            "Handler returned server error response"
+        );
+    } else {
+        tracing::warn!(
+            method = %method,
+            path = %path,
+            status = extension.status,
+            request_id = ?request.request_id,
+            error = %extension.error,
+            chain = ?extension.chain,
+            "Handler returned client error response"
+        );
+    }
+
     let Ok(registry) = app.resolve::<ErrorReporterRegistry>() else {
         return;
     };

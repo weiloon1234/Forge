@@ -43,6 +43,8 @@ pub use template::{RenderedTemplate, TemplateRenderer};
 pub type EmailDriverFactory =
     Arc<dyn Fn(&ConfigRepository, &toml::Table) -> Result<Arc<dyn EmailDriver>> + Send + Sync>;
 
+const BUILT_IN_EMAIL_DRIVERS: &[&str] = &["smtp", "log", "resend", "postmark", "mailgun", "ses"];
+
 pub(crate) type EmailDriverRegistryHandle = Arc<Mutex<EmailDriverRegistryBuilder>>;
 
 pub(crate) struct EmailDriverRegistryBuilder {
@@ -120,6 +122,11 @@ impl EmailManager {
             let driver_key = table
                 .get("driver")
                 .and_then(|v| v.as_str())
+                .or_else(|| {
+                    BUILT_IN_EMAIL_DRIVERS
+                        .contains(&name.as_str())
+                        .then_some(name.as_str())
+                })
                 .ok_or_else(|| {
                     Error::message(format!("mailer `{name}` missing required 'driver' field"))
                 })?;
@@ -222,7 +229,30 @@ impl EmailManager {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::foundation::Container;
+    use crate::validation::RuleRegistry;
+
+    fn config_from_toml(raw: &str) -> ConfigRepository {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("email.toml");
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        f.write_all(raw.as_bytes()).unwrap();
+        ConfigRepository::from_dir(dir.path()).unwrap()
+    }
+
+    fn test_app() -> AppContext {
+        AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap()
+    }
 
     // --- Config-only tests (no AppContext needed) ---
 
@@ -257,6 +287,42 @@ mod tests {
         assert_eq!(config.from.address, "noreply@example.com");
         assert_eq!(config.from.name, "Forge App");
         assert_eq!(config.mailers.len(), 2);
+    }
+
+    #[test]
+    fn email_manager_infers_builtin_driver_from_mailer_name() {
+        let config = config_from_toml(
+            r#"
+            [email]
+            default = "resend"
+            from.address = "noreply@example.com"
+
+            [email.mailers.resend]
+            api_key = "test-key"
+        "#,
+        );
+        let manager = EmailManager::from_config(&config, HashMap::new(), test_app())
+            .expect("resend mailer should infer driver from mailer name");
+
+        assert_eq!(manager.default_mailer_name(), "resend");
+        assert_eq!(manager.configured_mailers(), vec!["resend"]);
+    }
+
+    #[test]
+    fn email_manager_custom_mailer_still_requires_driver() {
+        let config = config_from_toml(
+            r#"
+            [email]
+            default = "transactional"
+
+            [email.mailers.transactional]
+            api_key = "test-key"
+        "#,
+        );
+        let err = EmailManager::from_config(&config, HashMap::new(), test_app())
+            .expect_err("custom mailer names must declare a driver");
+
+        assert!(err.to_string().contains("missing required 'driver' field"));
     }
 
     // --- Driver registry tests ---

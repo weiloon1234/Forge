@@ -628,6 +628,7 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                 Some("SMTP Mailer"),
                 &[
                     "# [email.mailers.smtp]",
+                    "# driver = \"smtp\"",
                     "# host = \"smtp.example.com\"",
                     "# port = 587",
                     "# username = \"\"",
@@ -636,6 +637,7 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                     "# timeout_secs = 30",
                 ],
                 &[
+                    "# EMAIL__MAILERS__SMTP__DRIVER=smtp",
                     "# EMAIL__MAILERS__SMTP__HOST=smtp.example.com",
                     "# EMAIL__MAILERS__SMTP__PORT=587",
                     "# EMAIL__MAILERS__SMTP__USERNAME=",
@@ -649,11 +651,13 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                 Some("Amazon SES Mailer"),
                 &[
                     "# [email.mailers.ses]",
+                    "# driver = \"ses\"",
                     "# key = \"\"",
                     "# secret = \"\"",
                     "# region = \"us-east-1\"",
                 ],
                 &[
+                    "# EMAIL__MAILERS__SES__DRIVER=ses",
                     "# EMAIL__MAILERS__SES__KEY=",
                     "# EMAIL__MAILERS__SES__SECRET=",
                     "# EMAIL__MAILERS__SES__REGION=us-east-1",
@@ -664,29 +668,39 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                 Some("Postmark Mailer"),
                 &[
                     "# [email.mailers.postmark]",
+                    "# driver = \"postmark\"",
                     "# server_token = \"\"",
                 ],
-                &["# EMAIL__MAILERS__POSTMARK__SERVER_TOKEN="],
+                &[
+                    "# EMAIL__MAILERS__POSTMARK__DRIVER=postmark",
+                    "# EMAIL__MAILERS__POSTMARK__SERVER_TOKEN=",
+                ],
             ),
             example(
                 Some("Resend mailer:"),
                 Some("Resend Mailer"),
                 &[
                     "# [email.mailers.resend]",
+                    "# driver = \"resend\"",
                     "# api_key = \"\"",
                 ],
-                &["# EMAIL__MAILERS__RESEND__API_KEY="],
+                &[
+                    "# EMAIL__MAILERS__RESEND__DRIVER=resend",
+                    "# EMAIL__MAILERS__RESEND__API_KEY=",
+                ],
             ),
             example(
                 Some("Mailgun mailer:"),
                 Some("Mailgun Mailer"),
                 &[
                     "# [email.mailers.mailgun]",
+                    "# driver = \"mailgun\"",
                     "# domain = \"\"",
                     "# api_key = \"\"",
                     "# region = \"us\"  # \"us\" or \"eu\"",
                 ],
                 &[
+                    "# EMAIL__MAILERS__MAILGUN__DRIVER=mailgun",
                     "# EMAIL__MAILERS__MAILGUN__DOMAIN=",
                     "# EMAIL__MAILERS__MAILGUN__API_KEY=",
                     "# EMAIL__MAILERS__MAILGUN__REGION=us  # \"us\" or \"eu\"",
@@ -697,9 +711,13 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                 Some("Log Mailer (development - logs instead of sending)"),
                 &[
                     "# [email.mailers.log]",
+                    "# driver = \"log\"",
                     "# target = \"email.outbound\"",
                 ],
-                &["# EMAIL__MAILERS__LOG__TARGET=email.outbound"],
+                &[
+                    "# EMAIL__MAILERS__LOG__DRIVER=log",
+                    "# EMAIL__MAILERS__LOG__TARGET=email.outbound",
+                ],
             ),
         ],
     ),

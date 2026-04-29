@@ -41,6 +41,8 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    const INTERNAL_SERVER_ERROR_MESSAGE: &'static str = "Internal server error";
+
     /// Create a message error (replaces old `Error::message()`).
     pub fn message(message: impl Into<String>) -> Self {
         Self::Message(message.into())
@@ -109,6 +111,15 @@ impl Error {
         }
     }
 
+    fn public_message(&self) -> String {
+        let status = self.status_code();
+        if status.is_server_error() {
+            return Self::INTERNAL_SERVER_ERROR_MESSAGE.to_string();
+        }
+
+        self.to_string()
+    }
+
     pub fn source_chain(&self) -> Vec<String> {
         let mut chain = Vec::new();
         let mut current = self.source();
@@ -131,7 +142,7 @@ impl Error {
         };
 
         let mut payload = serde_json::json!({
-            "message": self.to_string(),
+            "message": self.public_message(),
             "status": status.as_u16(),
         });
 
@@ -168,7 +179,7 @@ impl IntoResponse for Error {
 
         let status = self.status_code();
         let body = ErrorResponse {
-            message: self.to_string(),
+            message: self.public_message(),
             status: status.as_u16(),
             error_code: match &self {
                 Error::Http { error_code, .. } => error_code.clone(),
@@ -213,6 +224,9 @@ impl From<crate::auth::AuthError> for Error {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
     use crate::auth::{AuthError, AuthErrorCode};
 
     use super::Error;
@@ -230,5 +244,41 @@ mod tests {
         );
         assert_eq!(payload["error_code"], "missing_auth_credentials");
         assert_eq!(payload["message_key"], "auth.missing_auth_credentials");
+    }
+
+    #[test]
+    fn internal_error_payload_uses_generic_public_message() {
+        let leaked_sql = r#"database query failed while running `INSERT INTO "users"`: password authentication failed"#;
+        let payload = Error::other(anyhow::anyhow!(leaked_sql)).payload();
+
+        assert_eq!(payload["status"], 500);
+        assert_eq!(payload["message"], Error::INTERNAL_SERVER_ERROR_MESSAGE);
+        assert!(!payload["message"].as_str().unwrap().contains("INSERT INTO"));
+        assert!(!payload["message"].as_str().unwrap().contains("password"));
+    }
+
+    #[test]
+    fn client_error_payload_preserves_public_message() {
+        let payload = Error::http(422, "The email field is invalid.").payload();
+
+        assert_eq!(payload["status"], 422);
+        assert_eq!(payload["message"], "The email field is invalid.");
+    }
+
+    #[tokio::test]
+    async fn internal_error_response_body_uses_generic_public_message() {
+        let leaked_sql = r#"database query failed while running `INSERT INTO "users"`"#;
+        let response = Error::message(leaked_sql).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["status"], 500);
+        assert_eq!(payload["message"], Error::INTERNAL_SERVER_ERROR_MESSAGE);
+        assert!(!payload["message"].as_str().unwrap().contains("INSERT INTO"));
     }
 }

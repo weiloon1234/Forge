@@ -279,6 +279,8 @@ mod tests {
     use crate::support::GuardId;
     use crate::validation::RuleRegistry;
 
+    type OriginSnapshot = Option<(String, Option<String>, Option<IpAddr>)>;
+
     #[derive(Clone, serde::Serialize)]
     struct TestEvent;
 
@@ -331,7 +333,7 @@ mod tests {
     }
 
     struct OriginListener {
-        target: Arc<Mutex<Option<(String, Option<String>, Option<IpAddr>)>>>,
+        target: Arc<Mutex<OriginSnapshot>>,
     }
 
     #[async_trait]

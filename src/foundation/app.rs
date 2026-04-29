@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -13,8 +12,9 @@ use crate::auth::{
 use crate::cli::CommandRegistrar;
 use crate::config::ConfigRepository;
 use crate::database::{
-    set_runtime_model_defaults, DatabaseManager, DatabaseTransaction, MigrationRegistryBuilder,
-    ModelWriteExecutor, QueryExecutionOptions, QueryExecutor, SeederRegistryBuilder,
+    set_runtime_model_defaults, AfterCommitCallback, AfterCommitSink, DatabaseManager,
+    DatabaseTransaction, MigrationRegistryBuilder, ModelWriteExecutor, QueryExecutionOptions,
+    QueryExecutor, SeederRegistryBuilder,
 };
 use crate::email::{job::SendQueuedEmailJob, EmailDriverRegistryBuilder, EmailManager};
 use crate::events::{EventBus, EventRegistryBuilder};
@@ -48,13 +48,10 @@ pub struct AppContext {
     rules: RuleRegistry,
 }
 
-type AfterCommitFn =
-    Box<dyn FnOnce(AppContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
-
 pub struct AppTransaction {
     app: AppContext,
     transaction: DatabaseTransaction,
-    after_commit: Vec<AfterCommitFn>,
+    after_commit: Mutex<Vec<AfterCommitCallback>>,
     actor: Option<Actor>,
 }
 
@@ -158,7 +155,7 @@ impl AppContext {
         Ok(AppTransaction {
             app: self.clone(),
             transaction,
-            after_commit: Vec::new(),
+            after_commit: Mutex::new(Vec::new()),
             actor: None,
         })
     }
@@ -305,8 +302,8 @@ impl AppTransaction {
     /// Buffer a job dispatch that will only execute after a successful `commit()`.
     ///
     /// If the transaction is rolled back (or dropped), the job is never dispatched.
-    pub fn dispatch_after_commit<J: crate::jobs::Job>(&mut self, job: J) {
-        self.after_commit.push(Box::new(move |app| {
+    pub fn dispatch_after_commit<J: crate::jobs::Job>(&self, job: J) {
+        self.defer_after_commit(Box::new(move |app| {
             Box::pin(async move { app.jobs()?.dispatch(job).await })
         }));
     }
@@ -316,7 +313,7 @@ impl AppTransaction {
     /// Channel payloads are pre-rendered immediately (at call time) so
     /// the notification/notifiable do not need to outlive the transaction.
     pub fn notify_after_commit(
-        &mut self,
+        &self,
         notifiable: &dyn crate::notifications::Notifiable,
         notification: &dyn crate::notifications::Notification,
     ) {
@@ -325,13 +322,12 @@ impl AppTransaction {
     }
 
     /// Register an arbitrary async callback to run after a successful `commit()`.
-    pub fn after_commit<F, Fut>(&mut self, callback: F)
+    pub fn after_commit<F, Fut>(&self, callback: F)
     where
         F: FnOnce(AppContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        self.after_commit
-            .push(Box::new(move |app| Box::pin(callback(app))));
+        self.defer_after_commit(Box::new(move |app| Box::pin(callback(app))));
     }
 
     /// Commit the database transaction, then flush all pending after-commit callbacks.
@@ -342,7 +338,12 @@ impl AppTransaction {
     pub async fn commit(self) -> Result<()> {
         self.transaction.commit().await?;
 
-        for callback in self.after_commit {
+        let callbacks = self
+            .after_commit
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        for callback in callbacks {
             if let Err(error) = callback(self.app.clone()).await {
                 tracing::error!(error = %error, "after-commit dispatch failed");
             }
@@ -411,6 +412,21 @@ impl QueryExecutor for AppTransaction {
 impl ModelWriteExecutor for AppContext {
     fn app_context(&self) -> &AppContext {
         self
+    }
+}
+
+impl AfterCommitSink for AppContext {}
+
+impl AfterCommitSink for AppTransaction {
+    fn supports_after_commit(&self) -> bool {
+        true
+    }
+
+    fn defer_after_commit(&self, callback: AfterCommitCallback) {
+        self.after_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(callback);
     }
 }
 

@@ -15,6 +15,7 @@ use crate::http::{HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions};
 use crate::openapi::spec::{generate_openapi_spec, DocumentedRoute};
 use crate::support::{GuardId, PermissionId};
 
+#[derive(Default)]
 pub struct ObservabilityOptions {
     access: AccessScope,
     authorize: Option<crate::http::HttpAuthorizeCallback>,
@@ -25,15 +26,6 @@ impl Clone for ObservabilityOptions {
         Self {
             access: self.access.clone(),
             authorize: self.authorize.clone(),
-        }
-    }
-}
-
-impl Default for ObservabilityOptions {
-    fn default() -> Self {
-        Self {
-            access: AccessScope::default(),
-            authorize: None,
         }
     }
 }

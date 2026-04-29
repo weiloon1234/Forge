@@ -469,6 +469,8 @@ async fn migrate_publish_generates_framework_migrations_without_stale_audit_foll
     let dir = tempfile::tempdir().unwrap();
     let migrations_dir = dir.path().join("migrations");
     let seeders_dir = dir.path().join("seeders");
+    let primitives_migration_path =
+        migrations_dir.join("000000000000_create_database_primitives.rs");
     let audit_migration_path = migrations_dir.join("000000000010_create_audit_logs.rs");
     let stale_follow_up_path = migrations_dir.join("000000000012_add_area_to_audit_logs.rs");
 
@@ -486,8 +488,14 @@ async fn migrate_publish_generates_framework_migrations_without_stale_audit_foll
     .await
     .unwrap();
 
+    assert!(primitives_migration_path.exists());
     assert!(audit_migration_path.exists());
     assert!(!stale_follow_up_path.exists());
+
+    let published_primitives = fs::read_to_string(&primitives_migration_path).unwrap();
+    assert!(published_primitives.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto"));
+    assert!(published_primitives.contains("CREATE FUNCTION public.uuidv7()"));
+    assert!(published_primitives.contains("IF NOT EXISTS"));
 
     let published = fs::read_to_string(&audit_migration_path).unwrap();
     assert!(published.contains("area TEXT"));

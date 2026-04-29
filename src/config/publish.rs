@@ -266,6 +266,10 @@ fn publish_framework_files(
 /// Framework-provided migration files (Rust format, discoverable by forge-build).
 const FRAMEWORK_MIGRATIONS: &[(&str, &str)] = &[
     (
+        "000000000000_create_database_primitives.rs",
+        include_str!("../../database/migrations/000000000000_create_database_primitives.rs"),
+    ),
+    (
         "000000000001_create_personal_access_tokens.rs",
         include_str!("../../database/migrations/000000000001_create_personal_access_tokens.rs"),
     ),

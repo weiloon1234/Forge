@@ -96,9 +96,9 @@ struct AppTransaction
   fn transaction(&self) -> &DatabaseTransaction
   fn set_actor(&mut self, actor: Actor)
   fn actor(&self) -> Option<&Actor>
-  fn dispatch_after_commit<J: Job>(&mut self, job: J)
-  fn notify_after_commit( &mut self, notifiable: &dyn Notifiable, notification: &dyn Notification, )
-  fn after_commit<F, Fut>(&mut self, callback: F)
+  fn dispatch_after_commit<J: Job>(&self, job: J)
+  fn notify_after_commit( &self, notifiable: &dyn Notifiable, notification: &dyn Notification, )
+  fn after_commit<F, Fut>(&self, callback: F)
   async fn commit(self) -> Result<()>
   async fn rollback(self) -> Result<()>
 struct Container

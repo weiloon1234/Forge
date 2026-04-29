@@ -24,11 +24,12 @@ pub use collection_ext::{IntoLoadableRelation, ModelCollectionExt};
 pub use compiler::{CompiledSql, PostgresCompiler};
 pub use lifecycle::{MigrationContext, MigrationFile, SeederContext, SeederFile};
 pub use model::{
-    Column, ColumnInfo, CreateDraft, FromDbValue, IntoColumnValue, IntoFieldValue, Loaded, Model,
-    ModelBehavior, ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent,
-    ModelFeatureSetting, ModelHookContext, ModelInstanceWriteExt, ModelLifecycle,
-    ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent,
-    ModelWriteExecutor, NoModelLifecycle, PersistedModel, TableMeta, ToDbValue, UpdateDraft,
+    AfterCommitCallback, AfterCommitSink, Column, ColumnInfo, CreateDraft, FromDbValue,
+    IntoColumnValue, IntoFieldValue, Loaded, Model, ModelBehavior, ModelCreatedEvent,
+    ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent, ModelFeatureSetting,
+    ModelHookContext, ModelInstanceWriteExt, ModelLifecycle, ModelLifecycleSnapshot,
+    ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent, ModelWriteExecutor,
+    NoModelLifecycle, PersistedModel, TableMeta, ToDbValue, UpdateDraft,
 };
 pub use projection::{Projection, ProjectionField, ProjectionFieldInfo, ProjectionMeta};
 pub use query::{

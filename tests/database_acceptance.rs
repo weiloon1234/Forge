@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 const USERS_TABLE: &str = "forge_test_users";
 const MERCHANTS_TABLE: &str = "forge_test_merchants";
+const USER_PROFILES_TABLE: &str = "forge_test_user_profiles";
 const ORDERS_TABLE: &str = "forge_test_orders";
 const ORDER_ITEMS_TABLE: &str = "forge_test_order_items";
 const PRODUCTS_TABLE: &str = "forge_test_products";
@@ -125,6 +126,7 @@ async fn reset_schema(database: &DatabaseManager) {
             &format!("DROP TABLE IF EXISTS {POSTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {NUMERIC_POSTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PASSWORD_USERS_TABLE}"),
+            &format!("DROP TABLE IF EXISTS {USER_PROFILES_TABLE}"),
             &format!("DROP TABLE IF EXISTS {MERCHANTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {PRODUCTS_TABLE}"),
             &format!("DROP TABLE IF EXISTS {USERS_TABLE}"),
@@ -133,6 +135,9 @@ async fn reset_schema(database: &DatabaseManager) {
             ),
             &format!(
                 "CREATE TABLE {MERCHANTS_TABLE} (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL)"
+            ),
+            &format!(
+                "CREATE TABLE {USER_PROFILES_TABLE} (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES {USERS_TABLE}(id), label TEXT NOT NULL)"
             ),
             &format!(
                 "CREATE TABLE {ORDERS_TABLE} (id BIGINT PRIMARY KEY, merchant_id BIGINT NOT NULL, total BIGINT NOT NULL)"
@@ -548,6 +553,42 @@ impl EventListener<ModelCreatedEvent> for FailingCreatedEventListener {
         if event.snapshot.table == USERS_TABLE {
             return Err(Error::message("created event failed"));
         }
+        Ok(())
+    }
+}
+
+struct ProfileOnUserCreatedListener;
+
+#[async_trait]
+impl EventListener<ModelCreatedEvent> for ProfileOnUserCreatedListener {
+    async fn handle(&self, ctx: &EventContext, event: &ModelCreatedEvent) -> Result<()> {
+        if event.snapshot.table != USERS_TABLE {
+            return Ok(());
+        }
+
+        let Some(after) = event.snapshot.after.as_ref() else {
+            return Ok(());
+        };
+        let user_id = after.decode::<i64>("id")?;
+
+        Query::insert_into(USER_PROFILES_TABLE)
+            .value("id", user_id + 10_000)
+            .value("user_id", user_id)
+            .value("label", "created-after-commit")
+            .execute(ctx.app())
+            .await?;
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ProfileOnUserCreatedProvider;
+
+#[async_trait]
+impl ServiceProvider for ProfileOnUserCreatedProvider {
+    async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+        registrar.listen_event::<ModelCreatedEvent, _>(ProfileOnUserCreatedListener)?;
         Ok(())
     }
 }
@@ -1707,6 +1748,69 @@ async fn model_lifecycle_hooks_and_framework_events_run_automatically() {
 }
 
 #[tokio::test]
+async fn model_created_events_run_after_commit_for_fk_safe_listeners() {
+    let Some(runtime) = test_app_runtime_with_provider(ProfileOnUserCreatedProvider).await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    LifecycleUser::create()
+        .set(LifecycleUser::ID, 95_i64)
+        .set(LifecycleUser::EMAIL, "post-commit@example.com")
+        .set(LifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap();
+
+    let profile_count = Query::table(USER_PROFILES_TABLE)
+        .select_expr(Expr::Aggregate(AggregateExpr::count_all()), "count")
+        .where_(Condition::raw("user_id = ?", vec![DbValue::from(95_i64)]))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode::<i64>("count")
+        .unwrap();
+    assert_eq!(profile_count, 1);
+
+    let tx = app.begin_transaction().await.unwrap();
+    LifecycleUser::create()
+        .set(LifecycleUser::ID, 96_i64)
+        .set(LifecycleUser::EMAIL, "explicit-transaction@example.com")
+        .set(LifecycleUser::ACTIVE, true)
+        .save(&tx)
+        .await
+        .unwrap();
+
+    let profile_count_before_commit = Query::table(USER_PROFILES_TABLE)
+        .select_expr(Expr::Aggregate(AggregateExpr::count_all()), "count")
+        .where_(Condition::raw("user_id = ?", vec![DbValue::from(96_i64)]))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode::<i64>("count")
+        .unwrap();
+    assert_eq!(profile_count_before_commit, 0);
+
+    tx.commit().await.unwrap();
+
+    let profile_count_after_commit = Query::table(USER_PROFILES_TABLE)
+        .select_expr(Expr::Aggregate(AggregateExpr::count_all()), "count")
+        .where_(Condition::raw("user_id = ?", vec![DbValue::from(96_i64)]))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode::<i64>("count")
+        .unwrap();
+    assert_eq!(profile_count_after_commit, 1);
+}
+
+#[tokio::test]
 async fn bulk_model_writes_default_to_lifecycle_and_without_lifecycle_skips_it() {
     let log = std::sync::Arc::new(LifecycleLog::default());
     let Some(runtime) = test_app_runtime_with_provider(LifecycleTestProvider {
@@ -1747,11 +1851,11 @@ async fn bulk_model_writes_default_to_lifecycle_and_without_lifecycle_skips_it()
             "custom:creating",
             "event:creating",
             "hook:created",
-            "event:created",
             "hook:creating",
             "custom:creating",
             "event:creating",
             "hook:created",
+            "event:created",
             "event:created",
         ]
     );
@@ -1771,11 +1875,11 @@ async fn bulk_model_writes_default_to_lifecycle_and_without_lifecycle_skips_it()
             "custom:updating",
             "event:updating",
             "hook:updated",
-            "event:updated",
             "hook:updating",
             "custom:updating",
             "event:updating",
             "hook:updated",
+            "event:updated",
             "event:updated",
         ]
     );
@@ -1802,7 +1906,7 @@ async fn bulk_model_writes_default_to_lifecycle_and_without_lifecycle_skips_it()
 }
 
 #[tokio::test]
-async fn lifecycle_failures_roll_back_manager_owned_writes() {
+async fn lifecycle_pre_commit_failures_roll_back_and_post_commit_failures_do_not() {
     let Some(runtime) = test_app_runtime().await else {
         return;
     };
@@ -1845,14 +1949,14 @@ async fn lifecycle_failures_roll_back_manager_owned_writes() {
     let app = &failing_runtime.app;
     reset_schema(database).await;
 
-    let event_error = LifecycleUser::create()
+    let created = LifecycleUser::create()
         .set(LifecycleUser::ID, 121_i64)
         .set(LifecycleUser::EMAIL, "event-fail@example.com")
         .set(LifecycleUser::ACTIVE, true)
         .save(app)
         .await
-        .unwrap_err();
-    assert!(event_error.to_string().contains("created event failed"));
+        .unwrap();
+    assert_eq!(created.id, 121_i64);
 
     let count_after_event_failure = Query::table(USERS_TABLE)
         .select_expr(Expr::Aggregate(AggregateExpr::count_all()), "count")
@@ -1862,7 +1966,7 @@ async fn lifecycle_failures_roll_back_manager_owned_writes() {
         .unwrap()
         .decode::<i64>("count")
         .unwrap();
-    assert_eq!(count_after_event_failure, 0);
+    assert_eq!(count_after_event_failure, 1);
 }
 
 #[tokio::test]

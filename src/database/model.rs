@@ -1141,7 +1141,20 @@ pub struct NoModelLifecycle;
 #[async_trait]
 impl<M> ModelLifecycle<M> for NoModelLifecycle where M: Model {}
 
-pub trait ModelWriteExecutor: QueryExecutor + Send + Sync {
+pub type AfterCommitCallback =
+    Box<dyn FnOnce(AppContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+
+pub trait AfterCommitSink: Send + Sync {
+    fn supports_after_commit(&self) -> bool {
+        false
+    }
+
+    fn defer_after_commit(&self, callback: AfterCommitCallback) {
+        let _ = callback;
+    }
+}
+
+pub trait ModelWriteExecutor: QueryExecutor + AfterCommitSink + Send + Sync {
     fn app_context(&self) -> &AppContext;
 
     fn active_transaction(&self) -> Option<&DatabaseTransaction> {

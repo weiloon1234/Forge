@@ -205,9 +205,9 @@ fn app(&self) -> &AppContext
 fn transaction(&self) -> &DatabaseTransaction
 fn set_actor(&mut self, actor: Actor)
 fn actor(&self) -> Option<&Actor>
-fn dispatch_after_commit<J: Job>(&mut self, job: J)
-fn notify_after_commit(&mut self, notifiable: &dyn Notifiable, notification: &dyn Notification)
-fn after_commit<F, Fut>(&mut self, callback: F)
+fn dispatch_after_commit<J: Job>(&self, job: J)
+fn notify_after_commit(&self, notifiable: &dyn Notifiable, notification: &dyn Notification)
+fn after_commit<F, Fut>(&self, callback: F)
 async fn commit(self) -> Result<()>
 async fn rollback(self) -> Result<()>
 ```
@@ -732,6 +732,15 @@ trait ModelInstanceWriteExt: PersistedModel + Model {
 | `UpdateDraft<M>` | Accumulated value changes for update |
 | `NoModelLifecycle` | No-op lifecycle implementation |
 
+#### Traits
+
+```rust
+trait AfterCommitSink: Send + Sync {
+    fn supports_after_commit(&self) -> bool; // default false
+    fn defer_after_commit(&self, callback: AfterCommitCallback); // default drops callback
+}
+```
+
 #### Enums
 
 | Name | Variants |
@@ -745,6 +754,8 @@ trait ModelInstanceWriteExt: PersistedModel + Model {
 ```rust
 type ModelFieldWriteMutatorFuture<'a> = Pin<Box<dyn Future<Output = Result<DbValue>> + Send + 'a>>;
 type ModelFieldWriteMutator = for<'a> fn(&'a ModelHookContext<'a>, DbValue) -> ModelFieldWriteMutatorFuture<'a>;
+type AfterCommitCallback =
+    Box<dyn FnOnce(AppContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 ```
 
 #### Model Events (auto-dispatched)
@@ -757,6 +768,15 @@ struct ModelUpdatedEvent  { /* ... */ }
 struct ModelDeletingEvent { /* ... */ }
 struct ModelDeletedEvent  { /* ... */ }
 ```
+
+`ModelCreatingEvent`, `ModelUpdatingEvent`, and `ModelDeletingEvent` are dispatched inside the
+active model write transaction before the mutation is committed. Listener failures from these
+pre-commit events abort the write and roll back framework-owned transactions.
+
+`ModelCreatedEvent`, `ModelUpdatedEvent`, and `ModelDeletedEvent` are deferred until the active
+transaction commits successfully. That makes post-write listeners safe for dependent writes that
+need to see the committed row, including FK-backed records and queued onboarding work. If a
+post-commit listener fails, Forge logs the failure and leaves the already committed write intact.
 
 ---
 

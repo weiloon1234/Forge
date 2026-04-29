@@ -722,6 +722,20 @@ tx.commit().await?;
 // All callbacks run only after successful commit
 ```
 
+### Model Events and Commit Timing
+
+Model lifecycle hooks run inside the active write transaction. Use `creating`, `updating`, and
+`deleting` to validate or mutate data before it is committed; returning an error from these hooks or
+their matching `ModelCreatingEvent`/`ModelUpdatingEvent`/`ModelDeletingEvent` listeners aborts the
+write.
+
+Forge defers the framework post-write events until commit succeeds:
+`ModelCreatedEvent`, `ModelUpdatedEvent`, and `ModelDeletedEvent` are dispatched after the row is
+committed. This makes them safe for onboarding jobs, dependent FK writes, notifications, and other
+listeners that need the committed row to be visible from a normal database connection. If one of
+these post-commit listeners fails, the committed model write is kept and Forge logs the listener
+failure.
+
 ---
 
 ## Raw SQL

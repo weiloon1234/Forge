@@ -499,6 +499,12 @@ registrar.listen_event::<OrderPlaced, _>(
 
 This is the recommended pattern for work that's slow or can fail — the event listener returns immediately, and the job handles retry/backoff.
 
+Built-in model post-write events (`ModelCreatedEvent`, `ModelUpdatedEvent`, and
+`ModelDeletedEvent`) are already post-commit events. A listener can safely dispatch jobs or create
+dependent rows from these events without racing the original transaction. The matching pre-write
+events (`ModelCreatingEvent`, `ModelUpdatingEvent`, and `ModelDeletingEvent`) still run before
+commit and can reject the write.
+
 ### Event → WebSocket (Real-Time)
 
 Broadcast events to connected WebSocket clients:

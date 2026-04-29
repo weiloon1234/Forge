@@ -7,6 +7,7 @@ AST-first query system: models, relations, projections, compiler
 ## forge::database
 
 ```rust
+pub type AfterCommitCallback = Box<dyn FnOnce(AppContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 pub type DbRecordStream<'a> = BoxStream<'a, Result<DbRecord>>;
 pub type RestoreModel<M> = UpdateModel<M>;
 enum Loaded { Unloaded, Loaded }
@@ -457,6 +458,9 @@ struct WindowBuilder
   fn rows_between( self, start: WindowFrameBound, end: WindowFrameBound, ) -> Self
   fn range_between( self, start: WindowFrameBound, end: WindowFrameBound, ) -> Self
   fn finish(self) -> WindowSpec
+trait AfterCommitSink
+  fn supports_after_commit(&self) -> bool
+  fn defer_after_commit(&self, callback: AfterCommitCallback)
 trait FromDbValue
   fn from_db_value(value: &DbValue) -> Result<Self>
 trait IntoColumnValue
@@ -489,7 +493,7 @@ trait ModelLifecycle: 'staticwhere
   fn updated<'life0, 'life1, 'life2, 'life3, 'life4, 'life5, 'async_trait>(
   fn deleting<'life0, 'life1, 'life2, 'life3, 'async_trait>(
   fn deleted<'life0, 'life1, 'life2, 'life3, 'async_trait>(
-trait ModelWriteExecutor
+trait ModelWriteExecutor: AfterCommitSink
   fn app_context(&self) -> &AppContext
   fn active_transaction(&self) -> Option<&DatabaseTransaction>
   fn actor(&self) -> Option<&Actor>

@@ -1060,6 +1060,13 @@ impl Query {
             .map(Collection::from)
     }
 
+    pub async fn all<E>(&self, executor: &E) -> Result<Collection<DbRecord>>
+    where
+        E: QueryExecutor,
+    {
+        self.get(executor).await
+    }
+
     pub async fn first<E>(&self, executor: &E) -> Result<Option<DbRecord>>
     where
         E: QueryExecutor,
@@ -1999,6 +2006,13 @@ where
         Ok(entries.drain(..).map(|(_, model)| model).collect())
     }
 
+    pub async fn all<E>(&self, executor: &E) -> Result<Collection<M>>
+    where
+        E: QueryExecutor,
+    {
+        self.get(executor).await
+    }
+
     pub fn stream<'a, E>(&'a self, executor: &'a E) -> Result<BoxStream<'a, Result<M>>>
     where
         E: QueryExecutor,
@@ -2030,6 +2044,244 @@ where
             .await?
             .into_iter()
             .next())
+    }
+
+    pub async fn first_or_fail<E>(&self, executor: &E) -> Result<M>
+    where
+        E: QueryExecutor,
+    {
+        self.first(executor).await?.ok_or_else(|| {
+            Error::message(format!(
+                "model query for `{}` returned no records",
+                self.table.name()
+            ))
+        })
+    }
+
+    pub async fn find<E, K>(&self, executor: &E, key: K) -> Result<Option<M>>
+    where
+        E: QueryExecutor,
+        K: ToDbValue,
+    {
+        Ok(self
+            .clone()
+            .where_(self.primary_key_condition(key)?)
+            .limit(1)
+            .get(executor)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    pub async fn find_or_fail<E, K>(&self, executor: &E, key: K) -> Result<M>
+    where
+        E: QueryExecutor,
+        K: ToDbValue,
+    {
+        self.find(executor, key).await?.ok_or_else(|| {
+            Error::message(format!(
+                "model query for `{}` did not find a matching primary key",
+                self.table.name()
+            ))
+        })
+    }
+
+    pub async fn find_many<E, I, K>(&self, executor: &E, keys: I) -> Result<Collection<M>>
+    where
+        E: QueryExecutor,
+        I: IntoIterator<Item = K>,
+        K: ToDbValue,
+    {
+        let values = keys
+            .into_iter()
+            .map(ToDbValue::to_db_value)
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            return Ok(Collection::new());
+        }
+
+        self.clone()
+            .where_(Condition::InList {
+                expr: Expr::column(self.primary_key_column_ref()?),
+                values,
+            })
+            .get(executor)
+            .await
+    }
+
+    pub async fn exists<E>(&self, executor: &E) -> Result<bool>
+    where
+        E: QueryExecutor,
+    {
+        let compiled = PostgresCompiler::compile(&self.exists_ast())?;
+        Ok(!executor
+            .query_records_with(&compiled, self.options.clone())
+            .await?
+            .is_empty())
+    }
+
+    pub async fn doesnt_exist<E>(&self, executor: &E) -> Result<bool>
+    where
+        E: QueryExecutor,
+    {
+        Ok(!self.exists(executor).await?)
+    }
+
+    pub async fn value<E, T>(&self, executor: &E, column: Column<M, T>) -> Result<Option<T>>
+    where
+        E: QueryExecutor,
+        T: FromDbValue,
+    {
+        let mut select = self.select.clone();
+        select.columns =
+            vec![SelectItem::new(Expr::column(column.column_ref())).aliased(column.name())];
+        select.aggregates.clear();
+        select.relations.clear();
+        select.condition = self.effective_condition();
+        select.limit = Some(1);
+
+        let compiled = PostgresCompiler::compile(&QueryAst {
+            with: self.with.clone(),
+            body: QueryBody::Select(Box::new(select)),
+        })?;
+        executor
+            .query_records_with(&compiled, self.options.clone())
+            .await?
+            .into_iter()
+            .next()
+            .map(|record| record.decode::<T>(column.name()))
+            .transpose()
+    }
+
+    pub async fn chunk<E, F, Fut>(&self, executor: &E, size: u64, mut handler: F) -> Result<()>
+    where
+        E: QueryExecutor,
+        F: FnMut(Collection<M>) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let size = size.max(1);
+        let mut offset = 0_u64;
+
+        loop {
+            let batch = self
+                .clone()
+                .limit(size)
+                .offset(offset)
+                .get(executor)
+                .await?;
+            let batch_len = batch.len();
+            if batch_len == 0 {
+                break;
+            }
+
+            handler(batch).await?;
+            if batch_len < size as usize {
+                break;
+            }
+            offset += size;
+        }
+
+        Ok(())
+    }
+
+    pub async fn chunk_by_id<E, T, F, Fut>(
+        &self,
+        executor: &E,
+        column: Column<M, T>,
+        size: u64,
+        mut handler: F,
+    ) -> Result<()>
+    where
+        E: QueryExecutor,
+        T: Clone + FromDbValue + ToDbValue,
+        F: FnMut(Collection<M>) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let size = size.max(1);
+        let mut last_value = None::<T>;
+
+        loop {
+            let mut query = self.clone();
+            query.select.order_by.clear();
+            if let Some(value) = last_value.clone() {
+                query = query.where_(column.gt(value));
+            }
+            let entries = query
+                .order_by(column.asc())
+                .limit(size)
+                .fetch_entries_dyn(executor)
+                .await?;
+            let batch_len = entries.len();
+            if batch_len == 0 {
+                break;
+            }
+
+            let next_last_value = entries
+                .last()
+                .map(|(record, _)| record.decode::<T>(column.name()))
+                .transpose()?;
+            let models = entries
+                .into_iter()
+                .map(|(_, model)| model)
+                .collect::<Collection<_>>();
+            handler(models).await?;
+            last_value = next_last_value;
+
+            if batch_len < size as usize {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn each_by_id<E, T, F, Fut>(
+        &self,
+        executor: &E,
+        column: Column<M, T>,
+        size: u64,
+        mut handler: F,
+    ) -> Result<()>
+    where
+        E: QueryExecutor,
+        T: Clone + FromDbValue + ToDbValue,
+        F: FnMut(M) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let size = size.max(1);
+        let mut last_value = None::<T>;
+
+        loop {
+            let mut query = self.clone();
+            query.select.order_by.clear();
+            if let Some(value) = last_value.clone() {
+                query = query.where_(column.gt(value));
+            }
+            let entries = query
+                .order_by(column.asc())
+                .limit(size)
+                .fetch_entries_dyn(executor)
+                .await?;
+            let batch_len = entries.len();
+            if batch_len == 0 {
+                break;
+            }
+
+            let next_last_value = entries
+                .last()
+                .map(|(record, _)| record.decode::<T>(column.name()))
+                .transpose()?;
+            for (_, model) in entries {
+                handler(model).await?;
+            }
+            last_value = next_last_value;
+
+            if batch_len < size as usize {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn paginate<E>(&self, executor: &E, pagination: Pagination) -> Result<Paginated<M>>
@@ -2251,6 +2503,43 @@ where
             ..existing
         });
         self
+    }
+
+    fn exists_ast(&self) -> QueryAst {
+        let mut select = self.select.clone();
+        select.columns = vec![SelectItem::new(Expr::value(1_i64)).aliased("__forge_exists")];
+        select.aggregates.clear();
+        select.relations.clear();
+        select.order_by.clear();
+        select.condition = self.effective_condition();
+        select.limit = Some(1);
+
+        QueryAst {
+            with: self.with.clone(),
+            body: QueryBody::Select(Box::new(select)),
+        }
+    }
+
+    fn primary_key_column_ref(&self) -> Result<ColumnRef> {
+        let column = self.table.primary_key_column_info().ok_or_else(|| {
+            Error::message(format!(
+                "missing primary key column `{}` on table `{}`",
+                self.table.primary_key_name(),
+                self.table.name()
+            ))
+        })?;
+        Ok(ColumnRef::new(self.table.name(), column.name).typed(column.db_type))
+    }
+
+    fn primary_key_condition<K>(&self, key: K) -> Result<Condition>
+    where
+        K: ToDbValue,
+    {
+        Ok(Condition::compare(
+            Expr::column(self.primary_key_column_ref()?),
+            ComparisonOp::Eq,
+            Expr::value(key.to_db_value()),
+        ))
     }
 }
 
@@ -2557,6 +2846,15 @@ where
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.options.label = Some(label.into());
+        self
+    }
+
+    /// Skip model lifecycle hooks and framework lifecycle events for this bulk insert.
+    ///
+    /// Built-in model conventions, write mutators, validation, and audit recording still apply.
+    /// When auditing is inactive this enables Forge's single-statement insert path.
+    pub fn without_lifecycle(mut self) -> Self {
+        self.without_lifecycle = true;
         self
     }
 
@@ -2896,6 +3194,10 @@ where
         self
     }
 
+    /// Skip model lifecycle hooks and framework lifecycle events for this update.
+    ///
+    /// Built-in model conventions, write mutators, validation, and audit recording still apply.
+    /// When auditing is inactive this enables Forge's single-statement update path.
     pub fn without_lifecycle(mut self) -> Self {
         self.without_lifecycle = true;
         self
@@ -3138,6 +3440,10 @@ where
         self
     }
 
+    /// Skip model lifecycle hooks and framework lifecycle events for this delete.
+    ///
+    /// Built-in soft-delete conventions, validation, and audit recording still apply. When auditing
+    /// is inactive this enables Forge's direct delete or soft-delete update path.
     pub fn without_lifecycle(mut self) -> Self {
         self.without_lifecycle = true;
         self
@@ -4442,7 +4748,8 @@ fn decode_cursor<V: std::str::FromStr>(raw: &str) -> Result<V> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InsertSource, Query, QueryBody};
+    use super::{InsertSource, ModelQuery, PostgresCompiler, Query, QueryBody};
+    use crate::{Model, ModelId};
 
     #[test]
     fn insert_builder_switches_from_select_source_to_values_without_panicking() {
@@ -4462,5 +4769,24 @@ mod tests {
             }
             InsertSource::Select(_) => panic!("insert source should have normalized to values"),
         }
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(model = "exists_users")]
+    struct ExistsUser {
+        id: ModelId<Self>,
+        active: bool,
+    }
+
+    #[test]
+    fn model_exists_query_drops_ordering() {
+        let ast = ModelQuery::new(ExistsUser::table_meta())
+            .where_(ExistsUser::ACTIVE.eq(true))
+            .order_by(ExistsUser::ID.desc())
+            .exists_ast();
+        let compiled = PostgresCompiler::compile(&ast).unwrap();
+
+        assert!(!compiled.sql.contains("ORDER BY"));
+        assert!(compiled.sql.contains("LIMIT"));
     }
 }

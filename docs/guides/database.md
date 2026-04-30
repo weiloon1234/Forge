@@ -142,6 +142,28 @@ let has_admins = User::model_query()
     .await?;
 ```
 
+### Finder Helpers
+
+```rust
+let user = User::model_query().find(&*db, user_id).await?;
+let users = User::model_query().find_many(&*db, [first_id, second_id]).await?;
+
+let required = User::model_query()
+    .where_(User::EMAIL.eq("alice@example.com"))
+    .first_or_fail(&*db)
+    .await?;
+
+let email: Option<String> = User::model_query()
+    .where_(User::ID.eq(user_id))
+    .value(&*db, User::EMAIL)
+    .await?;
+
+let no_pending = User::model_query()
+    .where_(User::STATUS.eq(UserStatus::Pending))
+    .doesnt_exist(&*db)
+    .await?;
+```
+
 ### Column Operators
 
 ```rust
@@ -209,6 +231,32 @@ let result = User::model_query()
 result.data;           // Vec<User>
 result.meta.has_next;  // bool
 result.cursors.next;   // Option<String> — pass as .after() for next page
+```
+
+### Chunking
+
+```rust
+User::model_query()
+    .order_by(User::ID.asc())
+    .chunk(&*db, 500, |users| async move {
+        // process Collection<User>
+        Ok(())
+    })
+    .await?;
+
+User::model_query()
+    .chunk_by_id(&*db, User::ID, 500, |users| async move {
+        // keyset pagination; safer for large mutable tables
+        Ok(())
+    })
+    .await?;
+
+User::model_query()
+    .each_by_id(&*db, User::ID, 500, |user| async move {
+        // process one model at a time
+        Ok(())
+    })
+    .await?;
 ```
 
 ### Streaming
@@ -291,6 +339,14 @@ let users = User::model_create_many()
     .row(|r| r.set(User::EMAIL, "c@example.com").set(User::NAME, "Charlie"))
     .get(&*db)
     .await?;  // returns Collection<User>
+
+// Explicit fast path for imports/backfills that do not need lifecycle hooks/events.
+// Model conventions, write mutators, validation, and audit recording still apply.
+User::model_create_many()
+    .row(|r| r.set(User::EMAIL, "import@example.com").set(User::NAME, "Import"))
+    .without_lifecycle()
+    .execute(&*db)
+    .await?;
 ```
 
 ### Upsert (ON CONFLICT)
@@ -325,6 +381,7 @@ User::model_create()
 User::model_update()
     .set(User::STATUS, UserStatus::Suspended)
     .where_(User::LOGIN_COUNT.eq(0))
+    .without_lifecycle() // optional fast path; skips lifecycle hooks/events
     .execute(&*db)
     .await?;
 ```

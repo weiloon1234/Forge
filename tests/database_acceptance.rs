@@ -1006,6 +1006,125 @@ async fn generic_builder_and_model_first_queries_are_typed_and_short() {
     let total_users = User::query().count(database).await.unwrap();
     assert_eq!(total_users, 5);
 
+    let all_users = User::query()
+        .order_by(User::ID.asc())
+        .all(database)
+        .await
+        .unwrap();
+    assert_eq!(all_users.len(), 5);
+
+    let found = User::query().find(database, 2_i64).await.unwrap().unwrap();
+    assert_eq!(found.email, "model@example.com");
+
+    let found_many = User::query()
+        .order_by(User::ID.asc())
+        .find_many(database, [2_i64, 5_i64])
+        .await
+        .unwrap();
+    assert_eq!(
+        found_many
+            .iter()
+            .map(|user| user.email.as_str())
+            .collect::<Vec<_>>(),
+        vec!["model@example.com", "bulk-two@example.com"]
+    );
+
+    let required = User::query()
+        .where_(User::EMAIL.eq("bulk-one@example.com"))
+        .first_or_fail(database)
+        .await
+        .unwrap();
+    assert_eq!(required.id, 3);
+
+    let required_by_key = User::query().find_or_fail(database, 4_i64).await.unwrap();
+    assert_eq!(required_by_key.email, "generic-two@example.com");
+
+    let missing_first = User::query()
+        .where_(User::EMAIL.eq("missing@example.com"))
+        .first_or_fail(database)
+        .await
+        .unwrap_err();
+    assert!(format!("{missing_first:?}").contains("returned no records"));
+
+    assert!(User::query()
+        .where_(User::ACTIVE.eq(true))
+        .exists(database)
+        .await
+        .unwrap());
+    assert!(User::query()
+        .where_(User::EMAIL.eq("missing@example.com"))
+        .doesnt_exist(database)
+        .await
+        .unwrap());
+
+    let model_email = User::query()
+        .where_(User::ID.eq(2_i64))
+        .value(database, User::EMAIL)
+        .await
+        .unwrap();
+    assert_eq!(model_email.as_deref(), Some("model@example.com"));
+
+    let chunked_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<i64>>::new()));
+    User::query()
+        .order_by(User::ID.asc())
+        .chunk(database, 2, {
+            let chunked_ids = chunked_ids.clone();
+            move |users| {
+                let chunked_ids = chunked_ids.clone();
+                async move {
+                    chunked_ids
+                        .lock()
+                        .unwrap()
+                        .push(users.iter().map(|user| user.id).collect());
+                    Ok::<(), Error>(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        chunked_ids.lock().unwrap().clone(),
+        vec![vec![1, 2], vec![3, 4], vec![5]]
+    );
+
+    let chunked_by_id = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<i64>>::new()));
+    User::query()
+        .chunk_by_id(database, User::ID, 2, {
+            let chunked_by_id = chunked_by_id.clone();
+            move |users| {
+                let chunked_by_id = chunked_by_id.clone();
+                async move {
+                    chunked_by_id
+                        .lock()
+                        .unwrap()
+                        .push(users.iter().map(|user| user.id).collect());
+                    Ok::<(), Error>(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        chunked_by_id.lock().unwrap().clone(),
+        vec![vec![1, 2], vec![3, 4], vec![5]]
+    );
+
+    let each_by_id = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+    User::query()
+        .each_by_id(database, User::ID, 3, {
+            let each_by_id = each_by_id.clone();
+            move |user| {
+                let each_by_id = each_by_id.clone();
+                async move {
+                    each_by_id.lock().unwrap().push(user.id);
+                    Ok::<(), Error>(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(each_by_id.lock().unwrap().clone(), vec![1, 2, 3, 4, 5]);
+
     let active_id_sum = User::query()
         .where_(User::ACTIVE.eq(true))
         .sum(database, User::ID)
@@ -1903,6 +2022,26 @@ async fn bulk_model_writes_default_to_lifecycle_and_without_lifecycle_skips_it()
     assert!(rows
         .iter()
         .all(|row| row.nickname.as_deref() == Some("fast-path")));
+
+    log.clear().await;
+    let fast_created = LifecycleUser::create_many()
+        .row(|row| {
+            row.set(LifecycleUser::ID, 102_i64)
+                .set(LifecycleUser::EMAIL, "fast-bulk-one@example.com")
+                .set(LifecycleUser::ACTIVE, true)
+        })
+        .row(|row| {
+            row.set(LifecycleUser::ID, 103_i64)
+                .set(LifecycleUser::EMAIL, "fast-bulk-two@example.com")
+                .set(LifecycleUser::ACTIVE, true)
+        })
+        .without_lifecycle()
+        .get(app)
+        .await
+        .unwrap();
+    assert_eq!(fast_created.len(), 2);
+    assert!(fast_created.iter().all(|user| user.nickname.is_none()));
+    assert!(log.snapshot().await.is_empty());
 }
 
 #[tokio::test]
@@ -2044,6 +2183,73 @@ async fn relation_tree_eager_loads_without_hardcoded_depth() {
     assert!(!updated_user.active);
     assert!(!updated_user.merchants.is_loaded());
     assert!(!updated_user.merchant_count.is_loaded());
+}
+
+#[tokio::test]
+async fn relation_eager_loading_chunks_large_key_sets_and_preserves_duplicates() {
+    let Some(database) = test_database().await else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    reset_schema(&database).await;
+
+    execute_batch(
+        &database,
+        &[
+            &format!(
+                "INSERT INTO {USERS_TABLE} (id, email, active) SELECT i, 'chunk-user-' || i || '@example.com', true FROM generate_series(1, 1005) AS i"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANTS_TABLE} (id, user_id, name, status) SELECT i, i, 'Merchant ' || i, 'active' FROM generate_series(1, 1005) AS i"
+            ),
+            &format!(
+                "INSERT INTO {TAGS_TABLE} (id, user_id, name) SELECT i, i, 'Tag ' || i FROM generate_series(1, 1005) AS i"
+            ),
+            &format!(
+                "INSERT INTO {MERCHANT_TAGS_TABLE} (merchant_id, tag_id, role) SELECT i, i, 'primary' FROM generate_series(1, 1005) AS i"
+            ),
+        ],
+    )
+    .await;
+
+    let empty = User::query()
+        .where_(User::ID.eq(-1_i64))
+        .with(User::merchants())
+        .get(&database)
+        .await
+        .unwrap();
+    assert!(empty.is_empty());
+
+    let users = User::query()
+        .order_by(User::ID.asc())
+        .with(User::merchants())
+        .with_aggregate(User::active_merchant_count())
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(users.len(), 1005);
+    assert_eq!(users[0].merchants.as_ref().unwrap().len(), 1);
+    assert_eq!(users[1004].merchants.as_ref().unwrap()[0].id, 1005);
+    assert_eq!(users[1004].merchant_count.as_ref(), Some(&1));
+
+    let duplicated = Collection::from_vec(vec![users[0].clone(), users[0].clone()])
+        .load(User::merchants(), &database)
+        .await
+        .unwrap();
+    assert_eq!(duplicated[0].merchants.as_ref().unwrap().len(), 1);
+    assert_eq!(duplicated[1].merchants.as_ref().unwrap().len(), 1);
+
+    let merchants = Merchant::query()
+        .order_by(Merchant::ID.asc())
+        .with_many_to_many(Merchant::tags())
+        .with_aggregate(Merchant::tags_count())
+        .get(&database)
+        .await
+        .unwrap();
+    assert_eq!(merchants.len(), 1005);
+    assert_eq!(merchants[0].tags.as_ref().unwrap()[0].id, 1);
+    assert_eq!(merchants[1004].tags.as_ref().unwrap()[0].id, 1005);
+    assert_eq!(merchants[1004].tag_count.as_ref(), Some(&1));
 }
 
 #[tokio::test]

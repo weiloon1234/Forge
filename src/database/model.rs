@@ -753,10 +753,15 @@ pub struct TableMeta<M> {
     primary_key_strategy: ModelPrimaryKeyStrategy,
     behavior: ModelBehavior,
     hydrate: fn(&DbRecord) -> Result<M>,
+    all_select_items: Vec<SelectItem>,
+    primary_key_column: Option<ColumnInfo>,
+    created_at_column: Option<ColumnInfo>,
+    updated_at_column: Option<ColumnInfo>,
+    deleted_at_column: Option<ColumnInfo>,
 }
 
 impl<M> TableMeta<M> {
-    pub const fn new(
+    pub fn new(
         name: &'static str,
         columns: &'static [ColumnInfo],
         primary_key: &'static str,
@@ -764,6 +769,33 @@ impl<M> TableMeta<M> {
         behavior: ModelBehavior,
         hydrate: fn(&DbRecord) -> Result<M>,
     ) -> Self {
+        let all_select_items = columns
+            .iter()
+            .map(|column| {
+                SelectItem::new(
+                    ColumnRef::new(name, column.name)
+                        .typed(column.db_type)
+                        .aliased(column.name),
+                )
+            })
+            .collect();
+        let primary_key_column = columns
+            .iter()
+            .find(|column| column.name == primary_key)
+            .copied();
+        let created_at_column = columns
+            .iter()
+            .find(|column| column.name == "created_at")
+            .copied();
+        let updated_at_column = columns
+            .iter()
+            .find(|column| column.name == "updated_at")
+            .copied();
+        let deleted_at_column = columns
+            .iter()
+            .find(|column| column.name == "deleted_at")
+            .copied();
+
         Self {
             name,
             columns,
@@ -771,6 +803,11 @@ impl<M> TableMeta<M> {
             primary_key_strategy,
             behavior,
             hydrate,
+            all_select_items,
+            primary_key_column,
+            created_at_column,
+            updated_at_column,
+            deleted_at_column,
         }
     }
 
@@ -807,19 +844,19 @@ impl<M> TableMeta<M> {
     }
 
     pub fn primary_key_column_info(&self) -> Option<&ColumnInfo> {
-        self.column_info(self.primary_key)
+        self.primary_key_column.as_ref()
     }
 
     pub fn created_at_column_info(&self) -> Option<&ColumnInfo> {
-        self.column_info("created_at")
+        self.created_at_column.as_ref()
     }
 
     pub fn updated_at_column_info(&self) -> Option<&ColumnInfo> {
-        self.column_info("updated_at")
+        self.updated_at_column.as_ref()
     }
 
     pub fn deleted_at_column_info(&self) -> Option<&ColumnInfo> {
-        self.column_info("deleted_at")
+        self.deleted_at_column.as_ref()
     }
 
     pub fn timestamps_enabled(&self, _app: &AppContext) -> Result<bool> {
@@ -846,16 +883,7 @@ impl<M> TableMeta<M> {
     }
 
     pub fn all_select_items(&self) -> Vec<SelectItem> {
-        self.columns
-            .iter()
-            .map(|column| {
-                SelectItem::new(
-                    ColumnRef::new(self.name, column.name)
-                        .typed(column.db_type)
-                        .aliased(column.name),
-                )
-            })
-            .collect()
+        self.all_select_items.clone()
     }
 
     pub fn hydrate_record(&self, record: &DbRecord) -> Result<M> {

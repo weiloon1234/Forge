@@ -65,6 +65,7 @@ struct CreateDraft
 struct CreateManyModel
   fn with_timeout(self, timeout: Duration) -> Self
   fn with_label(self, label: impl Into<String>) -> Self
+  fn without_lifecycle(self) -> Self
   fn row<F>(self, build: F) -> Self
   fn on_conflict_columns<I, C>(self, columns: I) -> Self
   fn on_conflict_constraint(self, constraint: impl Into<String>) -> Self
@@ -232,8 +233,19 @@ struct ModelQuery
   fn skip_locked(self) -> Self
   fn nowait(self) -> Self
   async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
+  async fn all<E>(&self, executor: &E) -> Result<Collection<M>>
   fn stream<'a, E>( &'a self, executor: &'a E, ) -> Result<BoxStream<'a, Result<M>>>
   async fn first<E>(&self, executor: &E) -> Result<Option<M>>
+  async fn first_or_fail<E>(&self, executor: &E) -> Result<M>
+  async fn find<E, K>(&self, executor: &E, key: K) -> Result<Option<M>>
+  async fn find_or_fail<E, K>(&self, executor: &E, key: K) -> Result<M>
+  async fn find_many<E, I, K>( &self, executor: &E, keys: I, ) -> Result<Collection<M>>
+  async fn exists<E>(&self, executor: &E) -> Result<bool>
+  async fn doesnt_exist<E>(&self, executor: &E) -> Result<bool>
+  async fn value<E, T>( &self, executor: &E, column: Column<M, T>, ) -> Result<Option<T>>
+  async fn chunk<E, F, Fut>( &self, executor: &E, size: u64, handler: F, ) -> Result<()>
+  async fn chunk_by_id<E, T, F, Fut>( &self, executor: &E, column: Column<M, T>, size: u64, handler: F, ) -> Result<()>
+  async fn each_by_id<E, T, F, Fut>( &self, executor: &E, column: Column<M, T>, size: u64, handler: F, ) -> Result<()>
   async fn paginate<E>( &self, executor: &E, pagination: Pagination, ) -> Result<Paginated<M>>
   async fn cursor_paginate<E, V>( self, executor: &E, column: Column<M, V>, cursor: CursorPagination, ) -> Result<CursorPaginated<M>>
   async fn count<E>(&self, executor: &E) -> Result<u64>
@@ -383,6 +395,7 @@ struct Query
   fn skip_locked(self) -> Self
   fn nowait(self) -> Self
   async fn get<E>(&self, executor: &E) -> Result<Collection<DbRecord>>
+  async fn all<E>(&self, executor: &E) -> Result<Collection<DbRecord>>
   async fn first<E>(&self, executor: &E) -> Result<Option<DbRecord>>
   async fn execute<E>(&self, executor: &E) -> Result<u64>
   fn stream<'a, E>(&'a self, executor: &'a E) -> Result<DbRecordStream<'a>>
@@ -423,7 +436,7 @@ struct Sql
   fn concat(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr
   fn op( left: impl Into<Expr>, operator: impl Into<String>, right: impl Into<Expr>, ) -> Expr
 struct TableMeta
-  const fn new( name: &'static str, columns: &'static [ColumnInfo], primary_key: &'static str, primary_key_strategy: ModelPrimaryKeyStrategy, behavior: ModelBehavior, hydrate: fn(&DbRecord) -> Result<M>, ) -> Self
+  fn new( name: &'static str, columns: &'static [ColumnInfo], primary_key: &'static str, primary_key_strategy: ModelPrimaryKeyStrategy, behavior: ModelBehavior, hydrate: fn(&DbRecord) -> Result<M>, ) -> Self
   const fn name(&self) -> &'static str
   fn table_ref(&self) -> TableRef
   fn primary_key_ref(&self) -> ColumnRef

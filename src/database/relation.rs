@@ -20,6 +20,7 @@ use super::runtime::{DbRecord, QueryExecutor};
 const RELATION_GROUP_KEY_ALIAS: &str = "__forge_relation_key";
 const RELATION_AGGREGATE_ALIAS: &str = "__forge_relation_aggregate";
 const PIVOT_ALIAS_PREFIX: &str = "__forge_pivot_";
+const RELATION_KEY_CHUNK_SIZE: usize = 1000;
 
 #[async_trait]
 pub trait RelationLoader<From: Send>: Send + Sync {
@@ -685,50 +686,13 @@ where
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
         let keys = collect_relation_keys(parents, &self.parent_key);
-        let child_entries = if keys.is_empty() {
-            Vec::new()
-        } else {
-            let mut query = ModelQuery::new(self.target_table).where_(Condition::InList {
-                expr: Expr::column(self.target_column.clone()),
-                values: keys,
-            });
-            if let Some(filter) = self.filter.clone() {
-                query = query.where_(filter);
-            }
-            for extension in &self.child_extensions {
-                query = query.with_extension_boxed(extension.clone());
-            }
-            for child in &self.children {
-                query = query.with_boxed(child.clone());
-            }
-            for aggregate in &self.child_aggregates {
-                query = query.with_aggregate_boxed(aggregate.clone());
-            }
-            query.fetch_entries_dyn(executor).await?
-        };
-
-        let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
-        for (record, model) in child_entries {
-            let key = record
-                .get(&self.target_column.name)
-                .ok_or_else(|| {
-                    Error::message(format!(
-                        "missing target relation key `{}` in eager-loaded record",
-                        self.target_column.name
-                    ))
-                })?
-                .relation_key();
-            grouped.entry(key).or_default().push(model);
-        }
+        let child_entries = fetch_relation_child_entries(executor, self, keys).await?;
+        let mut grouped = group_relation_entries(child_entries, &self.target_column)?;
+        let mut remaining = count_parent_relation_keys(parents, &self.parent_key);
 
         for parent in parents.iter_mut() {
             let values = (self.parent_key)(parent)
-                .map(|key| {
-                    grouped
-                        .get(&key.relation_key())
-                        .cloned()
-                        .unwrap_or_default()
-                })
+                .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
             match &self.attach {
                 RelationAttach::Many(attach) => attach(parent, values),
@@ -768,54 +732,16 @@ where
             }
         }
 
-        // Query (same logic as load)
-        let child_entries = if keys.is_empty() {
-            Vec::new()
-        } else {
-            let mut query = ModelQuery::new(self.target_table).where_(Condition::InList {
-                expr: Expr::column(self.target_column.clone()),
-                values: keys,
-            });
-            if let Some(filter) = self.filter.clone() {
-                query = query.where_(filter);
-            }
-            for extension in &self.child_extensions {
-                query = query.with_extension_boxed(extension.clone());
-            }
-            for child in &self.children {
-                query = query.with_boxed(child.clone());
-            }
-            for aggregate in &self.child_aggregates {
-                query = query.with_aggregate_boxed(aggregate.clone());
-            }
-            query.fetch_entries_dyn(executor).await?
-        };
-
-        // Group (same logic as load)
-        let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
-        for (record, model) in child_entries {
-            let key = record
-                .get(&self.target_column.name)
-                .ok_or_else(|| {
-                    Error::message(format!(
-                        "missing target relation key `{}` in eager-loaded record",
-                        self.target_column.name
-                    ))
-                })?
-                .relation_key();
-            grouped.entry(key).or_default().push(model);
-        }
+        let child_entries = fetch_relation_child_entries(executor, self, keys).await?;
+        let mut grouped = group_relation_entries(child_entries, &self.target_column)?;
+        let mut remaining =
+            count_parent_relation_keys_for_indices(parents, &self.parent_key, &unloaded_indices);
 
         // Attach only to unloaded parents
         for &i in &unloaded_indices {
             let parent = &mut parents[i];
             let values = (self.parent_key)(parent)
-                .map(|key| {
-                    grouped
-                        .get(&key.relation_key())
-                        .cloned()
-                        .unwrap_or_default()
-                })
+                .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
             match &self.attach {
                 RelationAttach::Many(attach) => attach(parent, values),
@@ -847,38 +773,7 @@ where
             return Ok(());
         }
 
-        let mut select = SelectNode::from(self.target_table.table_ref());
-        select.columns = self.target_table.all_select_items();
-        select.columns.push(
-            SelectItem::new(Expr::column(self.pivot_parent_column.clone()))
-                .aliased(RELATION_GROUP_KEY_ALIAS),
-        );
-        if let Some(pivot_attacher) = &self.pivot_attacher {
-            select
-                .columns
-                .extend(pivot_attacher.select_items(&self.pivot_table.name)?);
-        }
-        select.joins.push(JoinNode {
-            kind: JoinKind::Inner,
-            table: self.pivot_table.clone().into(),
-            lateral: false,
-            on: Some(Condition::compare(
-                Expr::column(self.target_column.clone()),
-                ComparisonOp::Eq,
-                Expr::column(self.pivot_target_column.clone()),
-            )),
-        });
-        let condition = Condition::InList {
-            expr: Expr::column(self.pivot_parent_column.clone()),
-            values: keys,
-        };
-        select.condition = Some(match self.filter.clone() {
-            Some(filter) => Condition::and([filter, condition]),
-            None => condition,
-        });
-
-        let compiled = PostgresCompiler::compile(&QueryAst::select(select))?;
-        let records = executor.query_records(&compiled).await?;
+        let records = fetch_many_to_many_records(executor, self, keys).await?;
         let mut models = records
             .iter()
             .map(|record| self.target_table.hydrate_record(record))
@@ -912,15 +807,11 @@ where
                 .relation_key();
             grouped.entry(key).or_default().push(model);
         }
+        let mut remaining = count_parent_relation_keys(parents, &self.parent_key);
 
         for parent in parents.iter_mut() {
             let children = (self.parent_key)(parent)
-                .map(|key| {
-                    grouped
-                        .get(&key.relation_key())
-                        .cloned()
-                        .unwrap_or_default()
-                })
+                .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
             (self.attach)(parent, children);
         }
@@ -964,39 +855,7 @@ where
             return Ok(());
         }
 
-        // Same query logic as load
-        let mut select = SelectNode::from(self.target_table.table_ref());
-        select.columns = self.target_table.all_select_items();
-        select.columns.push(
-            SelectItem::new(Expr::column(self.pivot_parent_column.clone()))
-                .aliased(RELATION_GROUP_KEY_ALIAS),
-        );
-        if let Some(pivot_attacher) = &self.pivot_attacher {
-            select
-                .columns
-                .extend(pivot_attacher.select_items(&self.pivot_table.name)?);
-        }
-        select.joins.push(JoinNode {
-            kind: JoinKind::Inner,
-            table: self.pivot_table.clone().into(),
-            lateral: false,
-            on: Some(Condition::compare(
-                Expr::column(self.target_column.clone()),
-                ComparisonOp::Eq,
-                Expr::column(self.pivot_target_column.clone()),
-            )),
-        });
-        let condition = Condition::InList {
-            expr: Expr::column(self.pivot_parent_column.clone()),
-            values: keys,
-        };
-        select.condition = Some(match self.filter.clone() {
-            Some(filter) => Condition::and([filter, condition]),
-            None => condition,
-        });
-
-        let compiled = PostgresCompiler::compile(&QueryAst::select(select))?;
-        let records = executor.query_records(&compiled).await?;
+        let records = fetch_many_to_many_records(executor, self, keys).await?;
         let mut models = records
             .iter()
             .map(|record| self.target_table.hydrate_record(record))
@@ -1029,17 +888,14 @@ where
                 .relation_key();
             grouped.entry(key).or_default().push(model);
         }
+        let mut remaining =
+            count_parent_relation_keys_for_indices(parents, &self.parent_key, &unloaded_indices);
 
         // Attach only to unloaded parents
         for &i in &unloaded_indices {
             let parent = &mut parents[i];
             let children = (self.parent_key)(parent)
-                .map(|key| {
-                    grouped
-                        .get(&key.relation_key())
-                        .cloned()
-                        .unwrap_or_default()
-                })
+                .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
             (self.attach)(parent, children);
         }
@@ -1336,6 +1192,156 @@ fn singularize_relation_name(name: &str) -> String {
     name.to_string()
 }
 
+async fn fetch_relation_child_entries<From, To>(
+    executor: &dyn QueryExecutor,
+    relation: &RelationDef<From, To>,
+    keys: Vec<DbValue>,
+) -> Result<Vec<(DbRecord, To)>>
+where
+    From: Model,
+    To: Model,
+{
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for chunk in keys.chunks(RELATION_KEY_CHUNK_SIZE) {
+        let mut query = ModelQuery::new(relation.target_table).where_(Condition::InList {
+            expr: Expr::column(relation.target_column.clone()),
+            values: chunk.to_vec(),
+        });
+        if let Some(filter) = relation.filter.clone() {
+            query = query.where_(filter);
+        }
+        for extension in &relation.child_extensions {
+            query = query.with_extension_boxed(extension.clone());
+        }
+        for child in &relation.children {
+            query = query.with_boxed(child.clone());
+        }
+        for aggregate in &relation.child_aggregates {
+            query = query.with_aggregate_boxed(aggregate.clone());
+        }
+        entries.extend(query.fetch_entries_dyn(executor).await?);
+    }
+
+    Ok(entries)
+}
+
+fn group_relation_entries<To>(
+    entries: Vec<(DbRecord, To)>,
+    target_column: &ColumnRef,
+) -> Result<HashMap<String, Vec<To>>> {
+    let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
+    for (record, model) in entries {
+        let key = record
+            .get(&target_column.name)
+            .ok_or_else(|| {
+                Error::message(format!(
+                    "missing target relation key `{}` in eager-loaded record",
+                    target_column.name
+                ))
+            })?
+            .relation_key();
+        grouped.entry(key).or_default().push(model);
+    }
+    Ok(grouped)
+}
+
+async fn fetch_many_to_many_records<From, To, Pivot>(
+    executor: &dyn QueryExecutor,
+    relation: &ManyToManyDef<From, To, Pivot>,
+    keys: Vec<DbValue>,
+) -> Result<Vec<DbRecord>>
+where
+    From: Model,
+    To: Model,
+    Pivot: Clone + Send + Sync + 'static,
+{
+    let mut records = Vec::new();
+    for chunk in keys.chunks(RELATION_KEY_CHUNK_SIZE) {
+        let mut select = SelectNode::from(relation.target_table.table_ref());
+        select.columns = relation.target_table.all_select_items();
+        select.columns.push(
+            SelectItem::new(Expr::column(relation.pivot_parent_column.clone()))
+                .aliased(RELATION_GROUP_KEY_ALIAS),
+        );
+        if let Some(pivot_attacher) = &relation.pivot_attacher {
+            select
+                .columns
+                .extend(pivot_attacher.select_items(&relation.pivot_table.name)?);
+        }
+        select.joins.push(JoinNode {
+            kind: JoinKind::Inner,
+            table: relation.pivot_table.clone().into(),
+            lateral: false,
+            on: Some(Condition::compare(
+                Expr::column(relation.target_column.clone()),
+                ComparisonOp::Eq,
+                Expr::column(relation.pivot_target_column.clone()),
+            )),
+        });
+        let condition = Condition::InList {
+            expr: Expr::column(relation.pivot_parent_column.clone()),
+            values: chunk.to_vec(),
+        };
+        select.condition = Some(match relation.filter.clone() {
+            Some(filter) => Condition::and([filter, condition]),
+            None => condition,
+        });
+
+        let compiled = PostgresCompiler::compile(&QueryAst::select(select))?;
+        records.extend(executor.query_records(&compiled).await?);
+    }
+    Ok(records)
+}
+
+fn count_parent_relation_keys<From>(
+    parents: &[From],
+    parent_key: &Arc<ParentKeyFn<From>>,
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for parent in parents {
+        if let Some(key) = parent_key(parent) {
+            *counts.entry(key.relation_key()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn count_parent_relation_keys_for_indices<From>(
+    parents: &[From],
+    parent_key: &Arc<ParentKeyFn<From>>,
+    indices: &[usize],
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for &index in indices {
+        if let Some(key) = parent_key(&parents[index]) {
+            *counts.entry(key.relation_key()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn take_grouped_values<To: Clone>(
+    grouped: &mut HashMap<String, Vec<To>>,
+    remaining: &mut HashMap<String, usize>,
+    key: &str,
+) -> Vec<To> {
+    match remaining.get_mut(key) {
+        Some(count) if *count > 1 => {
+            *count -= 1;
+            grouped.get(key).cloned().unwrap_or_default()
+        }
+        Some(_) => {
+            remaining.remove(key);
+            grouped.remove(key).unwrap_or_default()
+        }
+        None => Vec::new(),
+    }
+}
+
 fn collect_relation_keys<From>(
     parents: &[From],
     parent_key: &Arc<ParentKeyFn<From>>,
@@ -1421,33 +1427,34 @@ async fn execute_grouped_aggregate_query(
         return Ok(HashMap::new());
     }
 
-    let mut select = SelectNode::from(from);
-    select.columns =
-        vec![SelectItem::new(Expr::column(group_key_column.clone()))
-            .aliased(RELATION_GROUP_KEY_ALIAS)];
-    if let Some(join) = join {
-        select.joins.push(join);
-    }
-    let condition = Condition::InList {
-        expr: Expr::column(group_key_column.clone()),
-        values: keys,
-    };
-    select.condition = Some(match filter {
-        Some(filter) => Condition::and([filter, condition]),
-        None => condition,
-    });
-    select.group_by.push(Expr::column(group_key_column));
-    select.aggregates.push(kind.node());
-
-    let compiled = PostgresCompiler::compile(&QueryAst::select(select))?;
-    let rows = executor.query_records(&compiled).await?;
     let mut grouped = HashMap::new();
-    for row in rows {
-        let key = row
-            .get(RELATION_GROUP_KEY_ALIAS)
-            .ok_or_else(|| Error::message("missing relation aggregate group key"))?
-            .relation_key();
-        grouped.insert(key, row);
+    for chunk in keys.chunks(RELATION_KEY_CHUNK_SIZE) {
+        let mut select = SelectNode::from(from.clone());
+        select.columns = vec![SelectItem::new(Expr::column(group_key_column.clone()))
+            .aliased(RELATION_GROUP_KEY_ALIAS)];
+        if let Some(join) = join.clone() {
+            select.joins.push(join);
+        }
+        let condition = Condition::InList {
+            expr: Expr::column(group_key_column.clone()),
+            values: chunk.to_vec(),
+        };
+        select.condition = Some(match filter.clone() {
+            Some(filter) => Condition::and([filter, condition]),
+            None => condition,
+        });
+        select.group_by.push(Expr::column(group_key_column.clone()));
+        select.aggregates.push(kind.clone().node());
+
+        let compiled = PostgresCompiler::compile(&QueryAst::select(select))?;
+        let rows = executor.query_records(&compiled).await?;
+        for row in rows {
+            let key = row
+                .get(RELATION_GROUP_KEY_ALIAS)
+                .ok_or_else(|| Error::message("missing relation aggregate group key"))?
+                .relation_key();
+            grouped.insert(key, row);
+        }
     }
     Ok(grouped)
 }

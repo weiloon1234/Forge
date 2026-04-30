@@ -816,6 +816,24 @@ post-commit listener fails, Forge logs the failure and leaves the already commit
 type RestoreModel<M> = UpdateModel<M>;
 ```
 
+#### ModelQuery — retrieval helpers
+
+```rust
+async fn all<E>(&self, executor: &E) -> Result<Collection<M>>
+async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
+async fn first<E>(&self, executor: &E) -> Result<Option<M>>
+async fn first_or_fail<E>(&self, executor: &E) -> Result<M>
+async fn find<E, K>(&self, executor: &E, key: K) -> Result<Option<M>>
+async fn find_or_fail<E, K>(&self, executor: &E, key: K) -> Result<M>
+async fn find_many<E, I, K>(&self, executor: &E, keys: I) -> Result<Collection<M>>
+async fn exists<E>(&self, executor: &E) -> Result<bool>
+async fn doesnt_exist<E>(&self, executor: &E) -> Result<bool>
+async fn value<E, T>(&self, executor: &E, column: Column<M, T>) -> Result<Option<T>>
+async fn chunk<E, F, Fut>(&self, executor: &E, size: u64, handler: F) -> Result<()>
+async fn chunk_by_id<E, T, F, Fut>(&self, executor: &E, column: Column<M, T>, size: u64, handler: F) -> Result<()>
+async fn each_by_id<E, T, F, Fut>(&self, executor: &E, column: Column<M, T>, size: u64, handler: F) -> Result<()>
+```
+
 #### ModelQuery — relation and extension loading
 
 ```rust

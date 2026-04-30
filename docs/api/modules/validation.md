@@ -141,9 +141,9 @@ trait ValidationRule
 
 ```rust
 fn check_allowed_extensions(file: &UploadedFile, allowed: &[String]) -> bool
-fn async fn check_allowed_mimes( file: &UploadedFile, allowed: &[String], ) -> Result<bool>
+async fn check_allowed_mimes( file: &UploadedFile, allowed: &[String], ) -> Result<bool>
 fn check_max_size(file: &UploadedFile, max_kb: u64) -> bool
-fn async fn get_image_dimensions(file: &UploadedFile) -> Result<(u32, u32)>
-fn async fn is_image(file: &UploadedFile) -> Result<bool>
+async fn get_image_dimensions(file: &UploadedFile) -> Result<(u32, u32)>
+async fn is_image(file: &UploadedFile) -> Result<bool>
 ```
 

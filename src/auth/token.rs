@@ -206,7 +206,7 @@ impl TokenManager {
 
     /// Validate an access token and return the Actor if valid.
     ///
-    /// Read-only — does not write on every request. Use [`touch`] to update
+    /// Read-only — does not write on every request. Use [`Self::touch`] to update
     /// `last_used_at` if needed for auditing.
     pub async fn validate(&self, access_token: &str) -> Result<Option<Actor>> {
         let hash = sha256_hex_str(access_token);

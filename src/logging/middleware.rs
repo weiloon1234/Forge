@@ -50,7 +50,9 @@ pub(crate) async fn request_context_middleware(
     };
     let mut response = super::scope_current_execution(
         execution_context,
-        crate::translations::CURRENT_LOCALE.scope(locale, next.run(request).instrument(span)),
+        crate::database::scope_model_extensions(
+            crate::translations::CURRENT_LOCALE.scope(locale, next.run(request).instrument(span)),
+        ),
     )
     .await;
     let duration_ms = start.elapsed().as_millis() as u64;

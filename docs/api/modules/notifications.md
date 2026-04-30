@@ -29,7 +29,7 @@ trait Notification
 trait NotificationChannel
   fn send<'life0, 'life1, 'life2, 'life3, 'async_trait>(
 fn build_notification_job( notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> SendNotificationJob
-fn async fn notify( app: &AppContext, notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> Result<()>
-fn async fn notify_queued( app: &AppContext, notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> Result<()>
+async fn notify( app: &AppContext, notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> Result<()>
+async fn notify_queued( app: &AppContext, notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> Result<()>
 ```
 

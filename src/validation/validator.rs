@@ -120,12 +120,12 @@ impl Validator {
 
         // Priority 1: validator-level custom_attribute (exact match)
         if let Some(name) = self.custom_attributes.get(field) {
-            return name.clone();
+            return self.resolve_attribute_label(name);
         }
         // Priority 1b: validator-level custom_attribute (base field match)
         if base_field != field {
             if let Some(name) = self.custom_attributes.get(base_field) {
-                return name.clone();
+                return self.resolve_attribute_label(name);
             }
         }
         // Priority 2: i18n validation.attributes.{field}
@@ -139,6 +139,18 @@ impl Validator {
         }
         // Priority 3: raw field name
         base_field.to_string()
+    }
+
+    fn resolve_attribute_label(&self, name: &str) -> String {
+        if let Ok(manager) = self.app.i18n() {
+            let locale = self.locale.as_deref().unwrap_or(manager.default_locale());
+            let resolved = manager.translate(locale, name, &[]);
+            if resolved != name {
+                return resolved;
+            }
+        }
+
+        name.to_string()
     }
 
     pub(crate) fn resolve_message(

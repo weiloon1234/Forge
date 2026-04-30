@@ -22,6 +22,7 @@ use super::ast::{
     WindowFrameBound, WindowFrameUnits, WindowSpec,
 };
 use super::compiler::PostgresCompiler;
+use super::extensions::{register_model_records, AnyModelExtension};
 use super::model::{
     upsert_assignment, AfterCommitSink, Column, CreateDraft, FromDbValue, IntoFieldValue, Model,
     ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent, ModelHookContext,
@@ -1627,6 +1628,7 @@ pub struct ModelQuery<M: 'static> {
     with: Vec<CteNode>,
     select: SelectNode,
     relations: Vec<AnyRelation<M>>,
+    model_extensions: Vec<AnyModelExtension<M>>,
     relation_aggregates: Vec<AnyRelationAggregate<M>>,
     soft_delete_scope: SoftDeleteScope,
     stream_batch_size: usize,
@@ -1658,6 +1660,7 @@ where
                 aggregates: Vec::new(),
             },
             relations: Vec::new(),
+            model_extensions: Vec::new(),
             relation_aggregates: Vec::new(),
             soft_delete_scope: SoftDeleteScope::ActiveOnly,
             stream_batch_size: 256,
@@ -1797,6 +1800,48 @@ where
         self
     }
 
+    pub fn with_attachments(mut self, collection: impl Into<String>) -> Self
+    where
+        M: crate::attachments::HasAttachments,
+    {
+        self.model_extensions
+            .push(crate::attachments::attachment_extension_loader(
+                collection.into(),
+            ));
+        self
+    }
+
+    pub fn with_translated_field(mut self, field: impl Into<String>) -> Self
+    where
+        M: crate::translations::HasTranslations,
+    {
+        self.model_extensions
+            .push(crate::translations::translated_field_extension_loader(
+                field.into(),
+            ));
+        self
+    }
+
+    pub fn with_translations_for(mut self, locale: impl Into<String>) -> Self
+    where
+        M: crate::translations::HasTranslations,
+    {
+        self.model_extensions
+            .push(crate::translations::translations_for_extension_loader(
+                locale.into(),
+            ));
+        self
+    }
+
+    pub fn with_all_translations(mut self) -> Self
+    where
+        M: crate::translations::HasTranslations,
+    {
+        self.model_extensions
+            .push(crate::translations::all_translations_extension_loader());
+        self
+    }
+
     pub fn with_many_to_many<To, Pivot>(mut self, relation: ManyToManyDef<M, To, Pivot>) -> Self
     where
         To: Model,
@@ -1822,6 +1867,11 @@ where
     pub(crate) fn with_boxed(mut self, relation: AnyRelation<M>) -> Self {
         self.select.relations.push(relation.node());
         self.relations.push(relation);
+        self
+    }
+
+    pub(crate) fn with_extension_boxed(mut self, extension: AnyModelExtension<M>) -> Self {
+        self.model_extensions.push(extension);
         self
     }
 
@@ -1960,6 +2010,7 @@ where
             table: self.table,
             relations: self.relations.clone(),
             relation_aggregates: self.relation_aggregates.clone(),
+            model_extensions: self.model_extensions.clone(),
             stream_batch_size: self.stream_batch_size.max(1),
             buffered: VecDeque::new(),
             pending_error: None,
@@ -2153,6 +2204,7 @@ where
             executor,
             self.table,
             &self.relations,
+            &self.model_extensions,
             &self.relation_aggregates,
             &records,
             &self.options,
@@ -4222,6 +4274,7 @@ struct ModelStreamState<'a, M: Model> {
     root_stream: DbRecordStream<'a>,
     table: &'static TableMeta<M>,
     relations: Vec<AnyRelation<M>>,
+    model_extensions: Vec<AnyModelExtension<M>>,
     relation_aggregates: Vec<AnyRelationAggregate<M>>,
     stream_batch_size: usize,
     buffered: VecDeque<Result<M>>,
@@ -4293,6 +4346,7 @@ where
         state.executor,
         state.table,
         &state.relations,
+        &state.model_extensions,
         &state.relation_aggregates,
         &records,
         &state.options,
@@ -4307,6 +4361,7 @@ async fn hydrate_model_batch<M>(
     executor: &dyn QueryExecutor,
     table: &'static TableMeta<M>,
     relations: &[AnyRelation<M>],
+    model_extensions: &[AnyModelExtension<M>],
     relation_aggregates: &[AnyRelationAggregate<M>],
     records: &[DbRecord],
     options: &QueryExecutionOptions,
@@ -4319,6 +4374,14 @@ where
         .map(|record| table.hydrate_record(record))
         .collect::<Result<Vec<_>>>()
         .map_err(|error| wrap_model_query_batch_error(options, "hydrate root rows", error))?;
+
+    register_model_records(table, records);
+
+    for extension in model_extensions {
+        extension.load(executor, &models).await.map_err(|error| {
+            wrap_model_query_batch_error(options, "load model extensions", error)
+        })?;
+    }
 
     for relation in relations {
         relation

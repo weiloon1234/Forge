@@ -53,7 +53,7 @@ trait DatatableQuery: Clone
 ## forge::datatable::download
 
 ```rust
-fn async fn build_download_response<D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<Response>where D: Datatable + ?Sized, D::Row: Serialize,
+async fn build_download_response<D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<Response>
 ```
 
 ## forge::datatable::export
@@ -70,15 +70,15 @@ trait DatatableExportDelivery
 ```rust
 struct DatatableExportJob
 struct DatatableExportJobPayload
-fn async fn dispatch_export<D: Datatable + ?Sized>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, recipient: &str, ) -> Result<DatatableExportAccepted>
+async fn dispatch_export<D: Datatable + ?Sized>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, recipient: &str, ) -> Result<DatatableExportAccepted>
 ```
 
 ## forge::datatable::filter_engine
 
 ```rust
-fn apply_auto_filters<Row: 'static, Q>( query: Q, filters: &[DatatableFilterInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>where Q: DatatableQuery<Row>,
-fn apply_default_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSort<Row>], ) -> Result<Q>where Q: DatatableQuery<Row>,
-fn apply_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSortInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>where Q: DatatableQuery<Row>,
+fn apply_auto_filters<Row: 'static, Q>( query: Q, filters: &[DatatableFilterInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>
+fn apply_default_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSort<Row>], ) -> Result<Q>
+fn apply_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSortInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>
 ```
 
 ## forge::datatable::filter_meta
@@ -121,7 +121,7 @@ struct DatatableFilterRow
 ## forge::datatable::json
 
 ```rust
-fn async fn build_json_response<D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<DatatableJsonResponse>where D: Datatable + ?Sized, D::Row: Serialize,
+async fn build_json_response<D>( app: &AppContext, actor: Option<&Actor>, request: DatatableRequest, ) -> Result<DatatableJsonResponse>
 ```
 
 ## forge::datatable::mapping

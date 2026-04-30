@@ -73,6 +73,7 @@ struct CreateManyModel
   fn set_conflict<T, V>(self, column: Column<M, T>, value: V) -> Self
   fn set_conflict_expr( self, column: impl Into<ColumnRef>, expr: impl Into<Expr>, ) -> Self
   fn set_excluded<T>(self, column: Column<M, T>) -> Self
+  fn where_(self, condition: Condition) -> Self
   async fn execute<E>(&self, executor: &E) -> Result<u64>
   async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
   async fn first<E>(&self, executor: &E) -> Result<Option<M>>
@@ -91,6 +92,7 @@ struct CreateModel
   fn set_conflict<T, V>(self, column: Column<M, T>, value: V) -> Self
   fn set_conflict_expr( self, column: impl Into<ColumnRef>, expr: impl Into<Expr>, ) -> Self
   fn set_excluded<T>(self, column: Column<M, T>) -> Self
+  fn where_(self, condition: Condition) -> Self
   async fn execute<E>(&self, executor: &E) -> Result<u64>
   async fn save<E>(&self, executor: &E) -> Result<M>
   async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
@@ -151,6 +153,7 @@ struct DbRecord
 struct DeleteModel
   fn with_timeout(self, timeout: Duration) -> Self
   fn with_label(self, label: impl Into<String>) -> Self
+  fn where_(self, condition: Condition) -> Self
   fn using(self, source: impl Into<FromItem>) -> Self
   fn allow_all(self) -> Self
   fn without_lifecycle(self) -> Self
@@ -200,6 +203,7 @@ struct ModelQuery
   fn use_write_pool(self) -> Self
   fn with_stream_batch_size(self, batch_size: usize) -> Self
   fn with_cte(self, cte: Cte) -> Self
+  fn where_(self, condition: Condition) -> Self
   fn group_by(self, expr: impl Into<Expr>) -> Self
   fn having(self, condition: Condition) -> Self
   fn search<T>(self, columns: &[Column<M, T>], query: &str) -> Self
@@ -210,8 +214,14 @@ struct ModelQuery
   fn order_by(self, order: OrderBy) -> Self
   fn scope(self, f: impl FnOnce(Self) -> Self) -> Self
   fn with<To>(self, relation: RelationDef<M, To>) -> Self
+  fn with_attachments(self, collection: impl Into<String>) -> Self
+  fn with_translated_field(self, field: impl Into<String>) -> Self
+  fn with_translations_for(self, locale: impl Into<String>) -> Self
+  fn with_all_translations(self) -> Self
   fn with_many_to_many<To, Pivot>( self, relation: ManyToManyDef<M, To, Pivot>, ) -> Self
   fn with_aggregate<Value>( self, aggregate: RelationAggregateDef<M, Value>, ) -> Self
+  fn where_has<To, F>(self, relation: RelationDef<M, To>, scope: F) -> Self
+  fn where_has_many_to_many<To, Pivot, F>( self, relation: ManyToManyDef<M, To, Pivot>, scope: F, ) -> Self
   fn ast(&self) -> QueryAst
   fn to_compiled_sql(&self) -> Result<CompiledSql>
   fn for_update(self) -> Self
@@ -283,6 +293,7 @@ struct ProjectionQuery
   fn inner_join_lateral( self, table: impl Into<FromItem>, on: Condition, ) -> Self
   fn left_join_lateral( self, table: impl Into<FromItem>, on: Condition, ) -> Self
   fn cross_join_lateral(self, table: impl Into<FromItem>) -> Self
+  fn where_(self, condition: Condition) -> Self
   fn group_by(self, expr: impl Into<Expr>) -> Self
   fn having(self, condition: Condition) -> Self
   fn order_by(self, order: OrderBy) -> Self
@@ -337,6 +348,9 @@ struct Query
   fn left_join_lateral( self, table: impl Into<FromItem>, on: Condition, ) -> Self
   fn cross_join_lateral(self, table: impl Into<FromItem>) -> Self
   fn inner_join_lateral( self, table: impl Into<FromItem>, on: Condition, ) -> Self
+  fn where_(self, condition: Condition) -> Self
+  fn where_eq( self, column: impl Into<ColumnRef>, value: impl Into<DbValue>, ) -> Self
+  fn where_ieq( self, column: impl Into<ColumnRef>, value: impl Into<String>, ) -> Self
   fn group_by(self, expr: impl Into<Expr>) -> Self
   fn having(self, condition: Condition) -> Self
   fn limit(self, limit: u64) -> Self
@@ -438,6 +452,7 @@ struct UpdateModel
   fn set<T, V>(self, column: Column<M, T>, value: V) -> Self
   fn set_expr<T>(self, column: Column<M, T>, expr: impl Into<Expr>) -> Self
   fn set_null<T>(self, column: Column<M, T>) -> Self
+  fn where_(self, condition: Condition) -> Self
   fn from(self, source: impl Into<FromItem>) -> Self
   fn allow_all(self) -> Self
   fn without_lifecycle(self) -> Self
@@ -486,7 +501,7 @@ trait ModelInstanceWriteExt: PersistedModel
   fn delete(&self) -> DeleteModel<Self>
   fn force_delete(&self) -> DeleteModel<Self>
   fn restore(&self) -> RestoreModel<Self>
-trait ModelLifecycle: 'staticwhere
+trait ModelLifecycle
   fn creating<'life0, 'life1, 'life2, 'async_trait>(
   fn created<'life0, 'life1, 'life2, 'life3, 'async_trait>(
   fn updating<'life0, 'life1, 'life2, 'life3, 'async_trait>(
@@ -518,6 +533,7 @@ trait SeederFile
   fn run_in_transaction() -> bool
 trait ToDbValue
   fn to_db_value(self) -> DbValue
+async fn scope_model_extensions<F, T>(future: F) -> T
 ```
 
 ## forge::database::ast
@@ -651,7 +667,12 @@ struct ManyToManyDef
   fn named(self, name: impl Into<String>) -> Self
   fn with<Child>(self, child: RelationDef<To, Child>) -> Self
   fn with_many_to_many<Child, ChildPivot>( self, child: ManyToManyDef<To, Child, ChildPivot>, ) -> Self
+  fn with_attachments(self, collection: impl Into<String>) -> Self
+  fn with_translated_field(self, field: impl Into<String>) -> Self
+  fn with_translations_for(self, locale: impl Into<String>) -> Self
+  fn with_all_translations(self) -> Self
   fn with_aggregate<Value>( self, aggregate: RelationAggregateDef<To, Value>, ) -> Self
+  fn where_(self, condition: Condition) -> Self
   fn is_loaded( self, f: impl Fn(&From) -> bool + Send + Sync + 'static, ) -> Self
   fn with_pivot<NewPivot>( self, meta: &'static ProjectionMeta<NewPivot>, attach: fn(&mut To, NewPivot), ) -> ManyToManyDef<From, To, NewPivot>
   fn count( self, attach: fn(&mut From, i64), ) -> RelationAggregateDef<From, i64>
@@ -666,7 +687,12 @@ struct RelationDef
   fn named(self, name: impl Into<String>) -> Self
   fn with<Child>(self, child: RelationDef<To, Child>) -> Self
   fn with_many_to_many<Child, Pivot>( self, child: ManyToManyDef<To, Child, Pivot>, ) -> Self
+  fn with_attachments(self, collection: impl Into<String>) -> Self
+  fn with_translated_field(self, field: impl Into<String>) -> Self
+  fn with_translations_for(self, locale: impl Into<String>) -> Self
+  fn with_all_translations(self) -> Self
   fn with_aggregate<Value>( self, aggregate: RelationAggregateDef<To, Value>, ) -> Self
+  fn where_(self, condition: Condition) -> Self
   fn is_loaded( self, f: impl Fn(&From) -> bool + Send + Sync + 'static, ) -> Self
   fn count( self, attach: fn(&mut From, i64), ) -> RelationAggregateDef<From, i64>
   fn count_distinct<Value>( self, column: Column<To, Value>, attach: fn(&mut From, i64), ) -> RelationAggregateDef<From, i64>
@@ -679,9 +705,9 @@ trait RelationLoader: Send>
   fn node(&self) -> RelationNode
   fn load<'life0, 'life1, 'life2, 'async_trait>(
   fn load_missing<'life0, 'life1, 'life2, 'async_trait>(
-fn belongs_to<From, To, Key>( foreign_key: Column<From, Key>, owner_key: Column<To, Key>, parent_key: fn(&From) -> Option<Key>, attach: fn(&mut From, Option<To>), ) -> RelationDef<From, To>where From: Model, To: Model, Key: ToDbValue + 'static,
-fn has_many<From, To, Key>( local_key: Column<From, Key>, foreign_key: Column<To, Key>, parent_key: fn(&From) -> Key, attach: fn(&mut From, Vec<To>), ) -> RelationDef<From, To>where From: Model, To: Model, Key: ToDbValue + 'static,
-fn has_one<From, To, Key>( local_key: Column<From, Key>, foreign_key: Column<To, Key>, parent_key: fn(&From) -> Key, attach: fn(&mut From, Option<To>), ) -> RelationDef<From, To>where From: Model, To: Model, Key: ToDbValue + 'static,
-fn many_to_many<From, To, Pivot, LocalKey, TargetKey>( local_key: Column<From, LocalKey>, pivot_table: &'static str, pivot_local_key: &'static str, pivot_related_key: &'static str, target_key: Column<To, TargetKey>, parent_key: fn(&From) -> LocalKey, attach: fn(&mut From, Vec<To>), ) -> ManyToManyDef<From, To, Pivot>where From: Model, To: Model, LocalKey: ToDbValue + 'static, TargetKey: 'static, Pivot: Clone + Send + Sync + 'static,
+fn belongs_to<From, To, Key>( foreign_key: Column<From, Key>, owner_key: Column<To, Key>, parent_key: fn(&From) -> Option<Key>, attach: fn(&mut From, Option<To>), ) -> RelationDef<From, To>
+fn has_many<From, To, Key>( local_key: Column<From, Key>, foreign_key: Column<To, Key>, parent_key: fn(&From) -> Key, attach: fn(&mut From, Vec<To>), ) -> RelationDef<From, To>
+fn has_one<From, To, Key>( local_key: Column<From, Key>, foreign_key: Column<To, Key>, parent_key: fn(&From) -> Key, attach: fn(&mut From, Option<To>), ) -> RelationDef<From, To>
+fn many_to_many<From, To, Pivot, LocalKey, TargetKey>( local_key: Column<From, LocalKey>, pivot_table: &'static str, pivot_local_key: &'static str, pivot_related_key: &'static str, target_key: Column<To, TargetKey>, parent_key: fn(&From) -> LocalKey, attach: fn(&mut From, Vec<To>), ) -> ManyToManyDef<From, To, Pivot>
 ```
 

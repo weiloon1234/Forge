@@ -11,6 +11,7 @@ use super::ast::{
     RelationKind, RelationNode, SelectItem, SelectNode, TableRef,
 };
 use super::compiler::PostgresCompiler;
+use super::extensions::{register_model_records, AnyModelExtension};
 use super::model::{Column, FromDbValue, Model, ToDbValue};
 use super::projection::ProjectionMeta;
 use super::query::ModelQuery;
@@ -71,6 +72,7 @@ pub struct RelationDef<From, To: 'static> {
     is_loaded: Option<Arc<IsLoadedFn<From>>>,
     filter: Option<Condition>,
     children: Vec<AnyRelation<To>>,
+    child_extensions: Vec<AnyModelExtension<To>>,
     child_aggregates: Vec<AnyRelationAggregate<To>>,
 }
 
@@ -94,6 +96,7 @@ pub struct ManyToManyDef<From, To: 'static, Pivot: 'static = ()> {
     is_loaded: Option<Arc<IsLoadedFn<From>>>,
     filter: Option<Condition>,
     children: Vec<AnyRelation<To>>,
+    child_extensions: Vec<AnyModelExtension<To>>,
     child_aggregates: Vec<AnyRelationAggregate<To>>,
     pivot_attacher: Option<AnyPivotAttacher<To>>,
     _pivot: PhantomData<fn() -> Pivot>,
@@ -213,6 +216,48 @@ where
         Pivot: Clone + Send + Sync + 'static,
     {
         self.children.push(Arc::new(child));
+        self
+    }
+
+    pub fn with_attachments(mut self, collection: impl Into<String>) -> Self
+    where
+        To: crate::attachments::HasAttachments,
+    {
+        self.child_extensions
+            .push(crate::attachments::attachment_extension_loader(
+                collection.into(),
+            ));
+        self
+    }
+
+    pub fn with_translated_field(mut self, field: impl Into<String>) -> Self
+    where
+        To: crate::translations::HasTranslations,
+    {
+        self.child_extensions
+            .push(crate::translations::translated_field_extension_loader(
+                field.into(),
+            ));
+        self
+    }
+
+    pub fn with_translations_for(mut self, locale: impl Into<String>) -> Self
+    where
+        To: crate::translations::HasTranslations,
+    {
+        self.child_extensions
+            .push(crate::translations::translations_for_extension_loader(
+                locale.into(),
+            ));
+        self
+    }
+
+    pub fn with_all_translations(mut self) -> Self
+    where
+        To: crate::translations::HasTranslations,
+    {
+        self.child_extensions
+            .push(crate::translations::all_translations_extension_loader());
         self
     }
 
@@ -394,6 +439,48 @@ where
         self
     }
 
+    pub fn with_attachments(mut self, collection: impl Into<String>) -> Self
+    where
+        To: crate::attachments::HasAttachments,
+    {
+        self.child_extensions
+            .push(crate::attachments::attachment_extension_loader(
+                collection.into(),
+            ));
+        self
+    }
+
+    pub fn with_translated_field(mut self, field: impl Into<String>) -> Self
+    where
+        To: crate::translations::HasTranslations,
+    {
+        self.child_extensions
+            .push(crate::translations::translated_field_extension_loader(
+                field.into(),
+            ));
+        self
+    }
+
+    pub fn with_translations_for(mut self, locale: impl Into<String>) -> Self
+    where
+        To: crate::translations::HasTranslations,
+    {
+        self.child_extensions
+            .push(crate::translations::translations_for_extension_loader(
+                locale.into(),
+            ));
+        self
+    }
+
+    pub fn with_all_translations(mut self) -> Self
+    where
+        To: crate::translations::HasTranslations,
+    {
+        self.child_extensions
+            .push(crate::translations::all_translations_extension_loader());
+        self
+    }
+
     pub fn with_aggregate<Value>(mut self, aggregate: RelationAggregateDef<To, Value>) -> Self {
         self.child_aggregates.push(aggregate.into_loader());
         self
@@ -430,6 +517,7 @@ where
             is_loaded: self.is_loaded,
             filter: self.filter,
             children: self.children,
+            child_extensions: self.child_extensions,
             child_aggregates: self.child_aggregates,
             pivot_attacher: Some(Arc::new(TypedPivotAttacher {
                 meta,
@@ -607,6 +695,9 @@ where
             if let Some(filter) = self.filter.clone() {
                 query = query.where_(filter);
             }
+            for extension in &self.child_extensions {
+                query = query.with_extension_boxed(extension.clone());
+            }
             for child in &self.children {
                 query = query.with_boxed(child.clone());
             }
@@ -687,6 +778,9 @@ where
             });
             if let Some(filter) = self.filter.clone() {
                 query = query.where_(filter);
+            }
+            for extension in &self.child_extensions {
+                query = query.with_extension_boxed(extension.clone());
             }
             for child in &self.children {
                 query = query.with_boxed(child.clone());
@@ -794,6 +888,12 @@ where
             for (record, model) in records.iter().zip(models.iter_mut()) {
                 pivot_attacher.attach(record, model)?;
             }
+        }
+
+        register_model_records(self.target_table, &records);
+
+        for extension in &self.child_extensions {
+            extension.load(executor, &models).await?;
         }
 
         for child in &self.children {
@@ -906,6 +1006,12 @@ where
             for (record, model) in records.iter().zip(models.iter_mut()) {
                 pivot_attacher.attach(record, model)?;
             }
+        }
+
+        register_model_records(self.target_table, &records);
+
+        for extension in &self.child_extensions {
+            extension.load(executor, &models).await?;
         }
 
         for child in &self.children {
@@ -1100,6 +1206,7 @@ where
         is_loaded: None,
         filter: None,
         children: Vec::new(),
+        child_extensions: Vec::new(),
         child_aggregates: Vec::new(),
     }
 }
@@ -1126,6 +1233,7 @@ where
         is_loaded: None,
         filter: None,
         children: Vec::new(),
+        child_extensions: Vec::new(),
         child_aggregates: Vec::new(),
     }
 }
@@ -1152,6 +1260,7 @@ where
         is_loaded: None,
         filter: None,
         children: Vec::new(),
+        child_extensions: Vec::new(),
         child_aggregates: Vec::new(),
     }
 }
@@ -1188,6 +1297,7 @@ where
         is_loaded: None,
         filter: None,
         children: Vec::new(),
+        child_extensions: Vec::new(),
         child_aggregates: Vec::new(),
         pivot_attacher: None,
         _pivot: PhantomData,

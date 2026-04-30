@@ -1,4 +1,13 @@
-use crate::database::{DbType, DbValue};
+use std::collections::BTreeSet;
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::database::extensions::{
+    current_extension_scope, uuid_array_from_ids, AnyModelExtension, ModelExtensionLoader,
+};
+use crate::database::{DbType, DbValue, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
 use crate::storage::UploadedFile;
 use crate::support::DateTime;
@@ -133,6 +142,49 @@ pub struct AttachmentUploadBuilder {
     collection: String,
     disk: Option<String>,
     image_transforms: Vec<ImageTransform>,
+}
+
+pub(crate) fn attachment_extension_loader<M>(collection: String) -> AnyModelExtension<M>
+where
+    M: HasAttachments + Send + Sync + 'static,
+{
+    Arc::new(AttachmentExtensionLoader {
+        collection,
+        _model: PhantomData,
+    })
+}
+
+struct AttachmentExtensionLoader<M> {
+    collection: String,
+    _model: PhantomData<fn() -> M>,
+}
+
+#[async_trait]
+impl<M> ModelExtensionLoader<M> for AttachmentExtensionLoader<M>
+where
+    M: HasAttachments + Send + Sync + 'static,
+{
+    async fn load(&self, executor: &dyn QueryExecutor, models: &[M]) -> Result<()> {
+        let Some(scope) = current_extension_scope() else {
+            return Ok(());
+        };
+
+        let ids = collect_unique_ids(models.iter().map(|model| model.attachable_id()));
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let attachable_type = M::attachable_type();
+        let missing_ids = scope.missing_attachment_ids(attachable_type, &self.collection, &ids);
+        if missing_ids.is_empty() {
+            return Ok(());
+        }
+
+        let rows =
+            load_attachment_rows(executor, attachable_type, &self.collection, &missing_ids).await?;
+        scope.store_attachments(attachable_type, &self.collection, &missing_ids, rows);
+        Ok(())
+    }
 }
 
 impl AttachmentUploadBuilder {
@@ -316,13 +368,30 @@ pub trait HasAttachments: Send + Sync {
         collection: &str,
         file: UploadedFile,
     ) -> Result<Attachment> {
-        Attachment::upload(file)
+        let attachment = Attachment::upload(file)
             .collection(collection)
             .store(app, Self::attachable_type(), &self.attachable_id())
-            .await
+            .await?;
+        invalidate_attachment_cache(
+            Self::attachable_type(),
+            &self.attachable_id(),
+            Some(collection),
+        );
+        Ok(attachment)
     }
 
     async fn attachment(&self, app: &AppContext, collection: &str) -> Result<Option<Attachment>> {
+        if let Some(rows) = cached_attachments_for_id(
+            app,
+            Self::attachable_type(),
+            &self.attachable_id(),
+            collection,
+        )
+        .await?
+        {
+            return Ok(rows.into_iter().next());
+        }
+
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -342,6 +411,17 @@ pub trait HasAttachments: Send + Sync {
     }
 
     async fn attachments(&self, app: &AppContext, collection: &str) -> Result<Vec<Attachment>> {
+        if let Some(rows) = cached_attachments_for_id(
+            app,
+            Self::attachable_type(),
+            &self.attachable_id(),
+            collection,
+        )
+        .await?
+        {
+            return Ok(rows);
+        }
+
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -397,6 +477,7 @@ pub trait HasAttachments: Send + Sync {
             ],
         )
         .await?;
+        invalidate_attachment_cache(Self::attachable_type(), &self.attachable_id(), None);
         Ok(())
     }
 
@@ -413,6 +494,7 @@ pub trait HasAttachments: Send + Sync {
             ],
         )
         .await?;
+        invalidate_attachment_cache(Self::attachable_type(), &self.attachable_id(), None);
         Ok(())
     }
 
@@ -443,16 +525,23 @@ pub trait HasAttachments: Send + Sync {
             }
         }
 
-        db.raw_execute(
-            "DELETE FROM attachments \
+        let affected = db
+            .raw_execute(
+                "DELETE FROM attachments \
              WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3",
-            &[
-                DbValue::Text(Self::attachable_type().to_string()),
-                DbValue::Text(self.attachable_id()),
-                DbValue::Text(collection.to_string()),
-            ],
-        )
-        .await
+                &[
+                    DbValue::Text(Self::attachable_type().to_string()),
+                    DbValue::Text(self.attachable_id()),
+                    DbValue::Text(collection.to_string()),
+                ],
+            )
+            .await?;
+        invalidate_attachment_cache(
+            Self::attachable_type(),
+            &self.attachable_id(),
+            Some(collection),
+        );
+        Ok(affected)
     }
 }
 
@@ -467,7 +556,7 @@ fn opt_text(value: &Option<String>) -> DbValue {
     }
 }
 
-fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
+pub(crate) fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
     Attachment {
         id: row.text_or_uuid("id"),
         attachable_type: row.text("attachable_type"),
@@ -490,5 +579,189 @@ fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
             Some(DbValue::Json(v)) => v.clone(),
             _ => serde_json::json!({}),
         },
+    }
+}
+
+async fn cached_attachments_for_id(
+    executor: &dyn QueryExecutor,
+    attachable_type: &str,
+    attachable_id: &str,
+    collection: &str,
+) -> Result<Option<Vec<Attachment>>> {
+    let Some(scope) = current_extension_scope() else {
+        return Ok(None);
+    };
+
+    if let Some(rows) = scope.cached_attachments(attachable_type, collection, attachable_id) {
+        return Ok(Some(rows));
+    }
+
+    let missing_ids =
+        scope.missing_attachment_ids_for_known(attachable_type, collection, attachable_id);
+    if !missing_ids.is_empty() {
+        let rows =
+            load_attachment_rows(executor, attachable_type, collection, &missing_ids).await?;
+        scope.store_attachments(attachable_type, collection, &missing_ids, rows);
+    }
+
+    Ok(Some(
+        scope
+            .cached_attachments(attachable_type, collection, attachable_id)
+            .unwrap_or_default(),
+    ))
+}
+
+async fn load_attachment_rows(
+    executor: &dyn QueryExecutor,
+    attachable_type: &str,
+    collection: &str,
+    attachable_ids: &[String],
+) -> Result<Vec<Attachment>> {
+    if attachable_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = executor
+        .raw_query(
+            "SELECT id, attachable_type, attachable_id, collection, disk, path, name, \
+             original_name, mime_type, size, sort_order, custom_properties \
+             FROM attachments \
+             WHERE attachable_type = $1 AND attachable_id = ANY($2::uuid[]) AND collection = $3 \
+             ORDER BY attachable_id, sort_order, created_at",
+            &[
+                DbValue::Text(attachable_type.to_string()),
+                DbValue::UuidArray(uuid_array_from_ids(attachable_ids)?),
+                DbValue::Text(collection.to_string()),
+            ],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_attachment).collect())
+}
+
+fn invalidate_attachment_cache(
+    attachable_type: &str,
+    attachable_id: &str,
+    collection: Option<&str>,
+) {
+    if let Some(scope) = current_extension_scope() {
+        match collection {
+            Some(collection) => {
+                scope.invalidate_attachment_collection(attachable_type, attachable_id, collection)
+            }
+            None => scope.invalidate_attachments(attachable_type, attachable_id),
+        }
+    }
+}
+
+fn collect_unique_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    ids.into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use uuid::Uuid;
+
+    use crate::database::{
+        scope_model_extensions, DbRecord, DbValue, QueryExecutionOptions, QueryExecutor,
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CountingAttachmentExecutor {
+        query_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for CountingAttachmentExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            self.query_count.fetch_add(1, Ordering::SeqCst);
+            let attachable_type = match &bindings[0] {
+                DbValue::Text(value) => value.clone(),
+                _ => panic!("expected attachable_type binding"),
+            };
+            let ids = match &bindings[1] {
+                DbValue::UuidArray(values) => values.clone(),
+                _ => panic!("expected attachable_id uuid array binding"),
+            };
+            let collection = match &bindings[2] {
+                DbValue::Text(value) => value.clone(),
+                _ => panic!("expected collection binding"),
+            };
+
+            Ok(ids
+                .into_iter()
+                .map(|id| attachment_record(&attachable_type, id, &collection))
+                .collect())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_attachment_cache_batches_known_scope_ids() {
+        let executor = CountingAttachmentExecutor::default();
+        let first_id = Uuid::now_v7().to_string();
+        let second_id = Uuid::now_v7().to_string();
+
+        scope_model_extensions(async {
+            current_extension_scope()
+                .unwrap()
+                .register_model_ids("test_attachables", [first_id.clone(), second_id.clone()]);
+
+            let first = cached_attachments_for_id(&executor, "test_attachables", &first_id, "logo")
+                .await
+                .unwrap()
+                .unwrap();
+            let second =
+                cached_attachments_for_id(&executor, "test_attachables", &second_id, "logo")
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+            assert_eq!(executor.query_count.load(Ordering::SeqCst), 1);
+            assert_eq!(first[0].attachable_id, first_id);
+            assert_eq!(second[0].attachable_id, second_id);
+        })
+        .await;
+    }
+
+    fn attachment_record(attachable_type: &str, attachable_id: Uuid, collection: &str) -> DbRecord {
+        let mut record = DbRecord::new();
+        record.insert("id", DbValue::Uuid(Uuid::now_v7()));
+        record.insert(
+            "attachable_type",
+            DbValue::Text(attachable_type.to_string()),
+        );
+        record.insert("attachable_id", DbValue::Uuid(attachable_id));
+        record.insert("collection", DbValue::Text(collection.to_string()));
+        record.insert("disk", DbValue::Text("local".to_string()));
+        record.insert("path", DbValue::Text("attachments/test.png".to_string()));
+        record.insert("name", DbValue::Text("test.png".to_string()));
+        record.insert("original_name", DbValue::Text("test.png".to_string()));
+        record.insert("mime_type", DbValue::Text("image/png".to_string()));
+        record.insert("size", DbValue::Int64(128));
+        record.insert("sort_order", DbValue::Int32(0));
+        record.insert("custom_properties", DbValue::Json(serde_json::json!({})));
+        record
     }
 }

@@ -857,6 +857,19 @@ mod tests {
             }"#,
         )
         .unwrap();
+        fs::write(
+            locale_dir.join("admin.json"),
+            r#"{
+                "admin": {
+                    "credits": {
+                        "fields": {
+                            "amount": "Amount"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
 
         let ms_dir = dir.path().join("ms");
         fs::create_dir_all(&ms_dir).unwrap();
@@ -867,6 +880,19 @@ mod tests {
                     "required": "Medan {{attribute}} adalah wajib.",
                     "attributes": {
                         "email": "alamat e-mel"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            ms_dir.join("admin.json"),
+            r#"{
+                "admin": {
+                    "credits": {
+                        "fields": {
+                            "amount": "Jumlah"
+                        }
                     }
                 }
             }"#,
@@ -983,6 +1009,16 @@ mod tests {
             errors.errors[0].message,
             "The work email field is required."
         );
+    }
+
+    #[tokio::test]
+    async fn custom_attribute_can_use_translation_key() {
+        let (app, _dir) = test_app_with_i18n();
+        let mut v = Validator::new(app).locale("ms");
+        v.custom_attribute("amount", "admin.credits.fields.amount");
+        v.field("amount", "").required().apply().await.unwrap();
+        let errors = v.finish().unwrap_err();
+        assert_eq!(errors.errors[0].message, "Medan Jumlah adalah wajib.");
     }
 
     #[tokio::test]

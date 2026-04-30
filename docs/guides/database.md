@@ -458,7 +458,17 @@ let users = User::model_query()
 let users = User::model_query()
     .with(User::orders().where_(Order::TOTAL.gt(100)))
     .all(&*db).await?;
+
+// Eager-load model extensions only when the response needs them
+let users = User::model_query()
+    .with_attachments("avatar")
+    .with(User::orders()
+        .with_attachments("invoice")
+        .with_translated_field("summary"))
+    .all(&*db).await?;
 ```
+
+`with_attachments(...)`, `with_translated_field(...)`, `with_translations_for(...)`, and `with_all_translations()` preload Forge extension data into the active model-extension cache. HTTP requests are scoped automatically. In CLI jobs, workers, and tests, wrap the full load-and-access flow in `app.with_model_batching(...)` when you want eager extension data or lazy batch safety outside HTTP.
 
 ### Many-to-Many
 
@@ -474,6 +484,10 @@ impl User {
 
 let users = User::model_query()
     .with_many_to_many(User::roles())
+    .all(&*db).await?;
+
+let users = User::model_query()
+    .with_many_to_many(User::roles().with_translated_field("label"))
     .all(&*db).await?;
 ```
 

@@ -184,7 +184,7 @@ struct ValidationRuleId
   const fn new(value: &'static str) -> Self
   fn owned(value: impl Into<String>) -> Self
   fn as_str(&self) -> &str
-fn boxed<F, T>(future: F) -> BoxFuture<T>where F: Future<Output = T> + Send + 'static,
+fn boxed<F, T>(future: F) -> BoxFuture<T>
 fn sanitize_html(input: &str, allowed_tags: &[&str]) -> String
 fn sha256_hex(data: &[u8]) -> String
 fn sha256_hex_str(s: &str) -> String

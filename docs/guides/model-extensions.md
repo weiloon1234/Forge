@@ -152,6 +152,47 @@ for img in &images {
 }
 ```
 
+### Eager Loading Attachments
+
+Use explicit eager loading when a response needs attachment data for every model in a list:
+
+```rust
+let products = Product::model_query()
+    .with_attachments("images")
+    .get(&app)
+    .await?;
+
+for product in &products {
+    let images = product.attachments(&app, "images").await?;
+    // Served from the request cache; no per-product attachment query.
+}
+```
+
+Attachment eager loading also works on nested relations:
+
+```rust
+let users = User::model_query()
+    .with(User::products().with_attachments("thumbnail"))
+    .get(&app)
+    .await?;
+```
+
+Forge HTTP requests automatically run inside a model-extension cache scope. For CLI jobs, workers, or tests, wrap the full load-and-access flow when you want the same batching behavior:
+
+```rust
+app.with_model_batching(async {
+    let products = Product::model_query()
+        .with_attachments("images")
+        .get(&app)
+        .await?;
+
+    // Access attachment helpers inside this block.
+    Ok::<_, forge::Error>(products)
+}).await?;
+```
+
+If you forget to call `with_attachments(...)`, `attachment()` and `attachments()` still use a lazy batch safety net inside the active scope: the first access loads the requested collection for all known sibling models.
+
 ### Attachment Methods
 
 ```rust
@@ -307,6 +348,35 @@ translated.get("zh");           // Some("红色衬衫")
 // All translations for this model (all locales, all fields)
 let all: Vec<ModelTranslation> = product.all_translations(&app).await?;
 ```
+
+### Eager Loading Translations
+
+Use explicit eager loading for translated fields or locale maps that a response will read for every model:
+
+```rust
+let products = Product::model_query()
+    .with_translated_field("name")
+    .with_translations_for("ms")
+    .get(&app)
+    .await?;
+
+for product in &products {
+    let name = product.translated_field(&app, "name").await?;
+    let ms = product.translations_for(&app, "ms").await?;
+}
+```
+
+Nested relation and many-to-many builders support the same methods:
+
+```rust
+let merchants = Merchant::model_query()
+    .with_many_to_many(Merchant::natures().with_translated_field("name"))
+    .with(Merchant::products().with_all_translations())
+    .get(&app)
+    .await?;
+```
+
+Like attachments, translation helpers use the active model-extension cache. Forge HTTP requests are scoped automatically; non-HTTP code can use `app.with_model_batching(...)`. If a helper is accessed without explicit eager loading, Forge lazily batch-loads the same access shape for all known sibling models in the scope.
 
 ### Deleting Translations
 

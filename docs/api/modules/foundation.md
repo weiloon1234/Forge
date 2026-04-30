@@ -74,6 +74,7 @@ struct AppContext
   fn hash(&self) -> Result<Arc<HashManager>>
   fn crypt(&self) -> Result<Arc<CryptManager>>
   async fn begin_transaction(&self) -> Result<AppTransaction>
+  async fn with_model_batching<F, T>(&self, future: F) -> T
   fn diagnostics(&self) -> Result<Arc<RuntimeDiagnostics>>
   fn i18n(&self) -> Result<Arc<I18nManager>>
   fn plugins(&self) -> Result<Arc<PluginRegistry>>

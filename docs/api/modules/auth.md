@@ -137,11 +137,11 @@ trait MfaFactor
 ## forge::auth::mfa::routes
 
 ```rust
-fn async fn confirm( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<StatusCode>
-fn async fn disable( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<StatusCode>
-fn async fn enroll( __arg0: State<AppContext>, __arg1: CurrentActor, ) -> Result<Json<EnrollChallenge>>
-fn async fn recovery( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<RecoveryCodesRequest>, ) -> Result<Json<RecoveryCodesResponse>>
-fn async fn verify( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<Json<TokenResponse>>
+async fn confirm( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<StatusCode>
+async fn disable( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<StatusCode>
+async fn enroll( __arg0: State<AppContext>, __arg1: CurrentActor, ) -> Result<Json<EnrollChallenge>>
+async fn recovery( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<RecoveryCodesRequest>, ) -> Result<Json<RecoveryCodesResponse>>
+async fn verify( __arg0: State<AppContext>, __arg1: CurrentActor, __arg2: Json<CodeRequest>, ) -> Result<Json<TokenResponse>>
 ```
 
 ## forge::auth::password_reset

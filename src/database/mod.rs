@@ -2,6 +2,7 @@ mod aggregate;
 pub mod ast;
 mod collection_ext;
 pub mod compiler;
+pub(crate) mod extensions;
 pub(crate) mod lifecycle;
 mod model;
 mod projection;
@@ -22,6 +23,7 @@ pub use ast::{
 };
 pub use collection_ext::{IntoLoadableRelation, ModelCollectionExt};
 pub use compiler::{CompiledSql, PostgresCompiler};
+pub use extensions::scope_model_extensions;
 pub use lifecycle::{MigrationContext, MigrationFile, SeederContext, SeederFile};
 pub use model::{
     AfterCommitCallback, AfterCommitSink, Column, ColumnInfo, CreateDraft, FromDbValue,

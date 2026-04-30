@@ -1,6 +1,14 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
-use crate::database::DbValue;
+use async_trait::async_trait;
+
+use crate::database::extensions::{
+    current_extension_scope, uuid_array_from_ids, AnyModelExtension, ModelExtensionLoader,
+    TranslationCacheShape,
+};
+use crate::database::{DbValue, QueryExecutor};
 use crate::foundation::{AppContext, Result};
 
 tokio::task_local! {
@@ -42,6 +50,69 @@ pub struct TranslatedFields {
     pub values: HashMap<String, String>,
     /// The resolved translation for the current request locale (with fallback).
     pub translated: String,
+}
+
+pub(crate) fn translated_field_extension_loader<M>(field: String) -> AnyModelExtension<M>
+where
+    M: HasTranslations + Send + Sync + 'static,
+{
+    Arc::new(TranslationExtensionLoader {
+        shape: TranslationCacheShape::Field { field },
+        _model: PhantomData,
+    })
+}
+
+pub(crate) fn translations_for_extension_loader<M>(locale: String) -> AnyModelExtension<M>
+where
+    M: HasTranslations + Send + Sync + 'static,
+{
+    Arc::new(TranslationExtensionLoader {
+        shape: TranslationCacheShape::Locale { locale },
+        _model: PhantomData,
+    })
+}
+
+pub(crate) fn all_translations_extension_loader<M>() -> AnyModelExtension<M>
+where
+    M: HasTranslations + Send + Sync + 'static,
+{
+    Arc::new(TranslationExtensionLoader {
+        shape: TranslationCacheShape::All,
+        _model: PhantomData,
+    })
+}
+
+struct TranslationExtensionLoader<M> {
+    shape: TranslationCacheShape,
+    _model: PhantomData<fn() -> M>,
+}
+
+#[async_trait]
+impl<M> ModelExtensionLoader<M> for TranslationExtensionLoader<M>
+where
+    M: HasTranslations + Send + Sync + 'static,
+{
+    async fn load(&self, executor: &dyn QueryExecutor, models: &[M]) -> Result<()> {
+        let Some(scope) = current_extension_scope() else {
+            return Ok(());
+        };
+
+        let ids = collect_unique_ids(models.iter().map(|model| model.translatable_id()));
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let translatable_type = M::translatable_type();
+        let missing_ids = scope.missing_translation_ids(translatable_type, &self.shape, &ids);
+        if missing_ids.is_empty() {
+            return Ok(());
+        }
+
+        let rows =
+            load_translation_rows(executor, translatable_type, &self.shape, &missing_ids).await?;
+        scope.store_translations(translatable_type, self.shape.clone(), &missing_ids, rows);
+        Ok(())
+    }
 }
 
 impl TranslatedFields {
@@ -106,6 +177,7 @@ pub trait HasTranslations: Send + Sync {
             ],
         )
         .await?;
+        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
         Ok(())
     }
 
@@ -127,6 +199,21 @@ pub trait HasTranslations: Send + Sync {
         locale: &str,
         field: &str,
     ) -> Result<Option<String>> {
+        let shape = TranslationCacheShape::Single {
+            locale: locale.to_string(),
+            field: field.to_string(),
+        };
+        if let Some(rows) = cached_translations_for_id(
+            app,
+            Self::translatable_type(),
+            &self.translatable_id(),
+            &shape,
+        )
+        .await?
+        {
+            return Ok(rows.into_iter().next().map(|row| row.value));
+        }
+
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -155,6 +242,20 @@ pub trait HasTranslations: Send + Sync {
         app: &AppContext,
         locale: &str,
     ) -> Result<HashMap<String, String>> {
+        let shape = TranslationCacheShape::Locale {
+            locale: locale.to_string(),
+        };
+        if let Some(rows) = cached_translations_for_id(
+            app,
+            Self::translatable_type(),
+            &self.translatable_id(),
+            &shape,
+        )
+        .await?
+        {
+            return Ok(rows.into_iter().map(|row| (row.field, row.value)).collect());
+        }
+
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -183,6 +284,20 @@ pub trait HasTranslations: Send + Sync {
     /// The `translated` value is resolved using the current request locale
     /// (via `CURRENT_LOCALE` task_local), falling back to the i18n default locale.
     async fn translated_field(&self, app: &AppContext, field: &str) -> Result<TranslatedFields> {
+        let shape = TranslationCacheShape::Field {
+            field: field.to_string(),
+        };
+        if let Some(rows) = cached_translations_for_id(
+            app,
+            Self::translatable_type(),
+            &self.translatable_id(),
+            &shape,
+        )
+        .await?
+        {
+            return Ok(translated_fields_from_rows(app, rows));
+        }
+
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -213,6 +328,18 @@ pub trait HasTranslations: Send + Sync {
     }
 
     async fn all_translations(&self, app: &AppContext) -> Result<Vec<ModelTranslation>> {
+        let shape = TranslationCacheShape::All;
+        if let Some(rows) = cached_translations_for_id(
+            app,
+            Self::translatable_type(),
+            &self.translatable_id(),
+            &shape,
+        )
+        .await?
+        {
+            return Ok(rows);
+        }
+
         let db = app.database()?;
         let rows = db
             .raw_query(
@@ -226,30 +353,269 @@ pub trait HasTranslations: Send + Sync {
                 ],
             )
             .await?;
-        Ok(rows
-            .iter()
-            .map(|row| ModelTranslation {
-                id: row.text_or_uuid("id"),
-                translatable_type: row.text("translatable_type"),
-                translatable_id: row.text_or_uuid("translatable_id"),
-                locale: row.text("locale"),
-                field: row.text("field"),
-                value: row.text("value"),
-            })
-            .collect())
+        Ok(rows.iter().map(row_to_model_translation).collect())
     }
 
     async fn delete_translations(&self, app: &AppContext, locale: &str) -> Result<u64> {
         let db = app.database()?;
-        db.raw_execute(
-            "DELETE FROM model_translations \
+        let affected = db
+            .raw_execute(
+                "DELETE FROM model_translations \
              WHERE translatable_type = $1 AND translatable_id = $2::uuid AND locale = $3",
-            &[
-                DbValue::Text(Self::translatable_type().to_string()),
-                DbValue::Text(self.translatable_id()),
-                DbValue::Text(locale.to_string()),
-            ],
-        )
-        .await
+                &[
+                    DbValue::Text(Self::translatable_type().to_string()),
+                    DbValue::Text(self.translatable_id()),
+                    DbValue::Text(locale.to_string()),
+                ],
+            )
+            .await?;
+        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        Ok(affected)
+    }
+}
+
+async fn cached_translations_for_id(
+    executor: &dyn QueryExecutor,
+    translatable_type: &str,
+    translatable_id: &str,
+    shape: &TranslationCacheShape,
+) -> Result<Option<Vec<ModelTranslation>>> {
+    let Some(scope) = current_extension_scope() else {
+        return Ok(None);
+    };
+
+    if let Some(rows) = scope.cached_translations(translatable_type, shape, translatable_id) {
+        return Ok(Some(rows));
+    }
+
+    let missing_ids =
+        scope.missing_translation_ids_for_known(translatable_type, shape, translatable_id);
+    if !missing_ids.is_empty() {
+        let rows = load_translation_rows(executor, translatable_type, shape, &missing_ids).await?;
+        scope.store_translations(translatable_type, shape.clone(), &missing_ids, rows);
+    }
+
+    Ok(Some(
+        scope
+            .cached_translations(translatable_type, shape, translatable_id)
+            .unwrap_or_default(),
+    ))
+}
+
+async fn load_translation_rows(
+    executor: &dyn QueryExecutor,
+    translatable_type: &str,
+    shape: &TranslationCacheShape,
+    translatable_ids: &[String],
+) -> Result<Vec<ModelTranslation>> {
+    if translatable_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids = DbValue::UuidArray(uuid_array_from_ids(translatable_ids)?);
+    let rows = match shape {
+        TranslationCacheShape::Single { locale, field } => {
+            executor
+                .raw_query(
+                    "SELECT id, translatable_type, translatable_id, locale, field, value \
+                     FROM model_translations \
+                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
+                     AND locale = $3 AND field = $4 \
+                     ORDER BY translatable_id, field, locale",
+                    &[
+                        DbValue::Text(translatable_type.to_string()),
+                        ids,
+                        DbValue::Text(locale.clone()),
+                        DbValue::Text(field.clone()),
+                    ],
+                )
+                .await?
+        }
+        TranslationCacheShape::Locale { locale } => {
+            executor
+                .raw_query(
+                    "SELECT id, translatable_type, translatable_id, locale, field, value \
+                     FROM model_translations \
+                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
+                     AND locale = $3 \
+                     ORDER BY translatable_id, field, locale",
+                    &[
+                        DbValue::Text(translatable_type.to_string()),
+                        ids,
+                        DbValue::Text(locale.clone()),
+                    ],
+                )
+                .await?
+        }
+        TranslationCacheShape::Field { field } => {
+            executor
+                .raw_query(
+                    "SELECT id, translatable_type, translatable_id, locale, field, value \
+                     FROM model_translations \
+                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
+                     AND field = $3 \
+                     ORDER BY translatable_id, field, locale",
+                    &[
+                        DbValue::Text(translatable_type.to_string()),
+                        ids,
+                        DbValue::Text(field.clone()),
+                    ],
+                )
+                .await?
+        }
+        TranslationCacheShape::All => {
+            executor
+                .raw_query(
+                    "SELECT id, translatable_type, translatable_id, locale, field, value \
+                     FROM model_translations \
+                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
+                     ORDER BY translatable_id, field, locale",
+                    &[DbValue::Text(translatable_type.to_string()), ids],
+                )
+                .await?
+        }
+    };
+
+    Ok(rows.iter().map(row_to_model_translation).collect())
+}
+
+fn row_to_model_translation(row: &crate::database::DbRecord) -> ModelTranslation {
+    ModelTranslation {
+        id: row.text_or_uuid("id"),
+        translatable_type: row.text("translatable_type"),
+        translatable_id: row.text_or_uuid("translatable_id"),
+        locale: row.text("locale"),
+        field: row.text("field"),
+        value: row.text("value"),
+    }
+}
+
+fn translated_fields_from_rows(app: &AppContext, rows: Vec<ModelTranslation>) -> TranslatedFields {
+    let entries = rows
+        .into_iter()
+        .map(|row| (row.locale, row.value))
+        .collect();
+    let cur = current_locale(app);
+    let default = app
+        .i18n()
+        .map(|m| m.default_locale().to_string())
+        .unwrap_or_else(|_| "en".to_string());
+    TranslatedFields::from_entries(entries, &cur, &default)
+}
+
+fn invalidate_translation_cache(translatable_type: &str, translatable_id: &str) {
+    if let Some(scope) = current_extension_scope() {
+        scope.invalidate_translations(translatable_type, translatable_id);
+    }
+}
+
+fn collect_unique_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    ids.into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use uuid::Uuid;
+
+    use crate::database::{
+        scope_model_extensions, DbRecord, DbValue, QueryExecutionOptions, QueryExecutor,
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CountingTranslationExecutor {
+        query_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for CountingTranslationExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            self.query_count.fetch_add(1, Ordering::SeqCst);
+            let translatable_type = match &bindings[0] {
+                DbValue::Text(value) => value.clone(),
+                _ => panic!("expected translatable_type binding"),
+            };
+            let ids = match &bindings[1] {
+                DbValue::UuidArray(values) => values.clone(),
+                _ => panic!("expected translatable_id uuid array binding"),
+            };
+            let field = match &bindings[2] {
+                DbValue::Text(value) => value.clone(),
+                _ => panic!("expected field binding"),
+            };
+
+            Ok(ids
+                .into_iter()
+                .map(|id| translation_record(&translatable_type, id, &field))
+                .collect())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_translation_cache_batches_known_scope_ids() {
+        let executor = CountingTranslationExecutor::default();
+        let first_id = Uuid::now_v7().to_string();
+        let second_id = Uuid::now_v7().to_string();
+        let shape = TranslationCacheShape::Field {
+            field: "name".to_string(),
+        };
+
+        scope_model_extensions(async {
+            current_extension_scope()
+                .unwrap()
+                .register_model_ids("test_translatables", [first_id.clone(), second_id.clone()]);
+
+            let first =
+                cached_translations_for_id(&executor, "test_translatables", &first_id, &shape)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let second =
+                cached_translations_for_id(&executor, "test_translatables", &second_id, &shape)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+            assert_eq!(executor.query_count.load(Ordering::SeqCst), 1);
+            assert_eq!(first[0].translatable_id, first_id);
+            assert_eq!(second[0].translatable_id, second_id);
+        })
+        .await;
+    }
+
+    fn translation_record(translatable_type: &str, translatable_id: Uuid, field: &str) -> DbRecord {
+        let mut record = DbRecord::new();
+        record.insert("id", DbValue::Uuid(Uuid::now_v7()));
+        record.insert(
+            "translatable_type",
+            DbValue::Text(translatable_type.to_string()),
+        );
+        record.insert("translatable_id", DbValue::Uuid(translatable_id));
+        record.insert("locale", DbValue::Text("en".to_string()));
+        record.insert("field", DbValue::Text(field.to_string()));
+        record.insert("value", DbValue::Text("Translated".to_string()));
+        record
     }
 }

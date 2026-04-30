@@ -18,6 +18,7 @@
   - [database/projection](#databaseprojection)
   - [database/aggregate](#databaseaggregate)
   - [database/collection_ext](#databasecollection_ext)
+  - [database/extensions](#databaseextensions)
   - [database/runtime](#databaseruntime)
   - [database/compiler](#databasecompiler)
   - [database/lifecycle](#databaselifecycle)
@@ -184,6 +185,7 @@ fn lock(&self) -> Result<Arc<DistributedLock>>
 
 // Transactions
 async fn begin_transaction(&self) -> Result<AppTransaction>
+async fn with_model_batching<F, T>(&self, future: F) -> T
 
 // Notifications
 async fn notify(notifiable: &dyn Notifiable, notification: &dyn Notification) -> Result<()>
@@ -814,6 +816,18 @@ post-commit listener fails, Forge logs the failure and leaves the already commit
 type RestoreModel<M> = UpdateModel<M>;
 ```
 
+#### ModelQuery — relation and extension loading
+
+```rust
+fn with<To>(self, relation: RelationDef<M, To>) -> Self
+fn with_many_to_many<To, Pivot>(self, relation: ManyToManyDef<M, To, Pivot>) -> Self
+fn with_aggregate<Value>(self, aggregate: RelationAggregateDef<M, Value>) -> Self
+fn with_attachments(self, collection: impl Into<String>) -> Self
+fn with_translated_field(self, field: impl Into<String>) -> Self
+fn with_translations_for(self, locale: impl Into<String>) -> Self
+fn with_all_translations(self) -> Self
+```
+
 ---
 
 ### database/relation
@@ -843,6 +857,26 @@ fn has_many<From, To, Key>() -> RelationDef<From, To>
 fn has_one<From, To, Key>() -> RelationDef<From, To>
 fn belongs_to<From, To, Key>() -> RelationDef<From, To>
 fn many_to_many<From, To, Pivot, LocalKey, TargetKey>() -> ManyToManyDef<From, To, Pivot>
+```
+
+#### Nested eager loading
+
+```rust
+// RelationDef<From, To>
+fn with<Child>(self, child: RelationDef<To, Child>) -> Self
+fn with_many_to_many<Child, Pivot>(self, child: ManyToManyDef<To, Child, Pivot>) -> Self
+fn with_attachments(self, collection: impl Into<String>) -> Self
+fn with_translated_field(self, field: impl Into<String>) -> Self
+fn with_translations_for(self, locale: impl Into<String>) -> Self
+fn with_all_translations(self) -> Self
+
+// ManyToManyDef<From, To, Pivot>
+fn with<Child>(self, child: RelationDef<To, Child>) -> Self
+fn with_many_to_many<Child, ChildPivot>(self, child: ManyToManyDef<To, Child, ChildPivot>) -> Self
+fn with_attachments(self, collection: impl Into<String>) -> Self
+fn with_translated_field(self, field: impl Into<String>) -> Self
+fn with_translations_for(self, locale: impl Into<String>) -> Self
+fn with_all_translations(self) -> Self
 ```
 
 #### Type Aliases
@@ -898,6 +932,25 @@ trait ModelCollectionExt<T> {
     async fn load_missing<R>(&mut self, relation: R, executor: &dyn QueryExecutor) -> Result<()>;
 }
 ```
+
+---
+
+### database/extensions
+
+Task-local model extension cache used by eager and lazy batch loading for attachments and
+translations.
+
+#### Functions
+
+```rust
+async fn scope_model_extensions<F, T>(future: F) -> T
+where
+    F: Future<Output = T>;
+```
+
+HTTP requests are scoped automatically. CLI jobs, workers, and tests can use
+`AppContext::with_model_batching(...)` or `scope_model_extensions(...)` to enable explicit
+extension eager loading and lazy batch safety outside HTTP.
 
 ---
 
@@ -2315,6 +2368,11 @@ task_local! { pub static CURRENT_LOCALE: String; }
 fn current_locale(app: &AppContext) -> String
 ```
 
+Translation reads participate in the active model extension cache. Use
+`ModelQuery::with_translated_field(...)`, `with_translations_for(...)`, or
+`with_all_translations()` for explicit eager loading. If a helper is accessed without eager loading
+inside an active scope, Forge lazily batch-loads the same access shape for known sibling models.
+
 ---
 
 ## cli/
@@ -2603,6 +2661,11 @@ fn resize_to_fill(self, width: u32, height: u32) -> Self
 fn quality(self, quality: u8) -> Self
 async fn store(self, app: &AppContext, attachable_type: &str, attachable_id: &str) -> Result<Attachment>
 ```
+
+Attachment reads participate in the active model extension cache. Use
+`ModelQuery::with_attachments(...)` or nested relation builder `with_attachments(...)` for explicit
+eager loading. If a helper is accessed without eager loading inside an active scope, Forge lazily
+batch-loads that collection for known sibling models.
 
 ---
 

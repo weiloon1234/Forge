@@ -160,6 +160,18 @@ impl AppContext {
         })
     }
 
+    /// Run work inside a model extension cache scope.
+    ///
+    /// HTTP requests get this automatically. This helper is useful for CLI jobs
+    /// or tests that want attachment/translation eager loading and lazy batch
+    /// safety outside the HTTP middleware stack.
+    pub async fn with_model_batching<F, T>(&self, future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        crate::database::scope_model_extensions(future).await
+    }
+
     pub fn diagnostics(&self) -> Result<Arc<RuntimeDiagnostics>> {
         self.resolve::<RuntimeDiagnostics>()
     }

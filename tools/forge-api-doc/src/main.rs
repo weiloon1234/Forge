@@ -810,7 +810,7 @@ fn simplify_trait_decl(decl: &str, name: &str) -> String {
                 collecting = true;
                 if let Some(after) = t.split(':').nth(1) {
                     for p in after.split('+') {
-                        let p = p.trim().trim_end_matches('{').trim();
+                        let p = clean_supertrait_part(p);
                         if !p.is_empty() {
                             supers.push(p.to_string());
                         }
@@ -821,7 +821,7 @@ fn simplify_trait_decl(decl: &str, name: &str) -> String {
         }
         if collecting {
             if t.starts_with('+') {
-                let p = t.trim_start_matches('+').trim().trim_end_matches('{').trim();
+                let p = clean_supertrait_part(t.trim_start_matches('+'));
                 if !p.is_empty() {
                     supers.push(p.to_string());
                 }
@@ -841,10 +841,22 @@ fn simplify_trait_decl(decl: &str, name: &str) -> String {
     }
 }
 
+fn clean_supertrait_part(part: &str) -> &str {
+    part.split("where")
+        .next()
+        .unwrap_or(part)
+        .trim()
+        .trim_end_matches('{')
+        .trim()
+}
+
 fn simplify_fn_decl(decl: &str) -> String {
     let s = decl.trim().strip_prefix("pub ").unwrap_or(decl.trim());
     let clean = strip_where_clause(s).trim().trim_end_matches(';').trim().to_string();
     let collapsed = collapse_whitespace(&clean);
+    if collapsed.starts_with("async fn ") {
+        return collapsed;
+    }
     let fn_part = collapsed.strip_prefix("fn ").unwrap_or(&collapsed);
     format!("fn {fn_part}")
 }
@@ -852,16 +864,26 @@ fn simplify_fn_decl(decl: &str) -> String {
 fn strip_where_clause(sig: &str) -> String {
     let mut depth: usize = 0;
     let mut paren_depth: usize = 0;
+    let mut past_params = false;
     for (i, c) in sig.char_indices() {
         match c {
             '<' => depth += 1,
             '>' => depth = depth.saturating_sub(1),
             '(' => paren_depth += 1,
-            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 {
+                    past_params = true;
+                }
+            }
             'w' if depth == 0
                 && paren_depth == 0
+                && past_params
                 && sig[i..].starts_with("where")
-                && (i == 0 || matches!(sig.as_bytes()[i - 1], b' ' | b'\n')) =>
+                && sig[i + "where".len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace) =>
             {
                 return sig[..i].trim().to_string();
             }

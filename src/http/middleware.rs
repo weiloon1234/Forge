@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{self, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -990,7 +990,8 @@ pub(crate) struct ConnectInfoAddr(pub SocketAddr);
 
 /// Request body size limit middleware.
 ///
-/// Wraps `tower_http::limit::RequestBodyLimitLayer`.
+/// Wraps `tower_http::limit::RequestBodyLimitLayer` and keeps Axum's
+/// extractor body limit in sync.
 #[derive(Clone, Debug)]
 pub struct MaxBodySize(usize);
 
@@ -1016,7 +1017,9 @@ impl MaxBodySize {
     }
 
     fn apply(self, router: axum::Router<AppContext>) -> axum::Router<AppContext> {
-        router.layer(RequestBodyLimitLayer::new(self.0))
+        router
+            .layer(DefaultBodyLimit::max(self.0))
+            .layer(RequestBodyLimitLayer::new(self.0))
     }
 }
 
@@ -1443,11 +1446,28 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use tower::ServiceExt;
+
+    use crate::config::ConfigRepository;
+    use crate::foundation::Container;
+    use crate::validation::RuleRegistry;
 
     async fn ok_handler() -> &'static str {
         "ok"
+    }
+
+    fn test_app() -> AppContext {
+        AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap()
+    }
+
+    async fn json_handler(axum::Json(_payload): axum::Json<serde_json::Value>) -> StatusCode {
+        StatusCode::OK
     }
 
     // ---- Cors tests ----
@@ -1537,6 +1557,31 @@ mod tests {
             CorsHeaders::None => layer,
         };
         layer
+    }
+
+    // ---- MaxBodySize tests ----
+
+    #[tokio::test]
+    async fn max_body_size_updates_axum_default_body_limit() {
+        let body = serde_json::json!({
+            "payload": "x".repeat(2 * 1024 * 1024 + 1),
+        })
+        .to_string();
+
+        let router = MaxBodySize::mb(3)
+            .apply(axum::Router::new().route("/", post(json_handler)))
+            .with_state(test_app());
+
+        let request = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // ---- SecurityHeaders tests ----

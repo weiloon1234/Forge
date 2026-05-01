@@ -21,6 +21,7 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 
 - Crate metadata is now publish-ready for the `0.1.x` line.
 - Verification contract now explicitly includes both fixture families and packaging checks.
+- `MaxBodySize` now also updates Axum's default extractor body limit, so JSON/Form/String extractors honor the configured Forge limit instead of staying capped at Axum's 2 MiB default.
 - Framework model post-write events (`ModelCreatedEvent`, `ModelUpdatedEvent`, and `ModelDeletedEvent`) now dispatch after the active transaction commits, making event listeners safe for dependent writes and queued onboarding jobs that need the committed row to be visible.
 - `WebSocketRuntimeSnapshot` now includes a `channels: Vec<WebSocketChannelSnapshot>` field in addition to the existing global counters.
 - `WebSocketKernel::new` no longer takes a `Vec<WebSocketRouteRegistrar>`; registered channels are built once during `AppBuilder::bootstrap()` and resolved from the DI container. Direct callers of `WebSocketKernel::new` must drop the routes argument.

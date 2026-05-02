@@ -12,6 +12,8 @@ use crate::foundation::{AppContext, Error, Result};
 use crate::storage::UploadedFile;
 use crate::support::DateTime;
 
+const LOCALIZED_COLLECTION_SEPARATOR: &str = ":";
+
 /// A file attachment record from the `attachments` table.
 #[derive(Clone, Debug)]
 pub struct Attachment {
@@ -113,6 +115,40 @@ impl Attachment {
         let bytes = disk.get(&self.path).await?;
         crate::imaging::ImageProcessor::from_bytes(&bytes)
     }
+}
+
+/// Build the concrete attachment collection name for a locale-specific asset.
+///
+/// This keeps localized assets in the existing `attachments.collection` column
+/// without adding another table or duplicating locale configuration.
+pub fn localized_attachment_collection(collection: &str, locale: &str) -> String {
+    format!(
+        "{}{}{}",
+        collection.trim(),
+        LOCALIZED_COLLECTION_SEPARATOR,
+        locale.trim()
+    )
+}
+
+/// Return the loaded i18n locales used by localized attachment helpers.
+///
+/// Locale folders under the configured i18n resource path are the source of
+/// truth, matching `I18nManager::locale_list()`.
+pub fn available_attachment_locales(app: &AppContext) -> Result<Vec<String>> {
+    let manager = app.i18n().map_err(|_| {
+        Error::http_with_code(
+            400,
+            "localized attachments require i18n to be configured",
+            "i18n_not_configured",
+        )
+    })?;
+    let mut locales = manager
+        .locale_list()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    locales.sort();
+    Ok(locales)
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +416,108 @@ pub trait HasAttachments: Send + Sync {
         Ok(attachment)
     }
 
+    /// Attach a file to a locale-specific collection.
+    ///
+    /// The locale must exist in `app.i18n()?.locale_list()`.
+    async fn attach_localized(
+        &self,
+        app: &AppContext,
+        collection: &str,
+        locale: &str,
+        file: UploadedFile,
+    ) -> Result<Attachment> {
+        let collection = localized_collection_for(app, collection, locale)?;
+        self.attach(app, &collection, file).await
+    }
+
+    /// Replace the first-class localized asset for a collection and locale.
+    ///
+    /// The new file is stored before old files are removed, so a failed upload
+    /// does not leave the locale without its previous asset.
+    async fn replace_localized_attachment(
+        &self,
+        app: &AppContext,
+        collection: &str,
+        locale: &str,
+        file: UploadedFile,
+    ) -> Result<Attachment> {
+        let collection = localized_collection_for(app, collection, locale)?;
+        let existing = self.attachments(app, &collection).await?;
+        let attachment = self.attach(app, &collection, file).await?;
+
+        for old in existing {
+            if old.id != attachment.id {
+                self.detach(app, &old.id).await?;
+            }
+        }
+
+        Ok(attachment)
+    }
+
+    /// Read the first attachment for an exact locale.
+    async fn localized_attachment(
+        &self,
+        app: &AppContext,
+        collection: &str,
+        locale: &str,
+    ) -> Result<Option<Attachment>> {
+        let collection = localized_collection_for(app, collection, locale)?;
+        self.attachment(app, &collection).await
+    }
+
+    /// Read all attachments for an exact locale.
+    async fn localized_attachments(
+        &self,
+        app: &AppContext,
+        collection: &str,
+        locale: &str,
+    ) -> Result<Vec<Attachment>> {
+        let collection = localized_collection_for(app, collection, locale)?;
+        self.attachments(app, &collection).await
+    }
+
+    /// Read a localized attachment, falling back to the i18n default locale.
+    async fn localized_attachment_or_default(
+        &self,
+        app: &AppContext,
+        collection: &str,
+        locale: &str,
+    ) -> Result<Option<Attachment>> {
+        if let Some(attachment) = self.localized_attachment(app, collection, locale).await? {
+            return Ok(Some(attachment));
+        }
+
+        let default_locale = app
+            .i18n()
+            .map_err(|_| {
+                Error::http_with_code(
+                    400,
+                    "localized attachments require i18n to be configured",
+                    "i18n_not_configured",
+                )
+            })?
+            .default_locale()
+            .to_string();
+
+        if locale.trim() == default_locale {
+            return Ok(None);
+        }
+
+        self.localized_attachment(app, collection, &default_locale)
+            .await
+    }
+
+    /// Read a localized attachment for the current request locale, with default fallback.
+    async fn current_localized_attachment(
+        &self,
+        app: &AppContext,
+        collection: &str,
+    ) -> Result<Option<Attachment>> {
+        let locale = crate::translations::current_locale(app);
+        self.localized_attachment_or_default(app, collection, &locale)
+            .await
+    }
+
     async fn attachment(&self, app: &AppContext, collection: &str) -> Result<Option<Attachment>> {
         if let Some(rows) = cached_attachments_for_id(
             app,
@@ -554,6 +692,47 @@ fn opt_text(value: &Option<String>) -> DbValue {
         Some(s) => DbValue::Text(s.clone()),
         None => DbValue::Null(DbType::Text),
     }
+}
+
+fn localized_collection_for(app: &AppContext, collection: &str, locale: &str) -> Result<String> {
+    let collection = collection.trim();
+    if collection.is_empty() {
+        return Err(Error::http_with_code(
+            400,
+            "attachment collection is required",
+            "invalid_attachment_collection",
+        ));
+    }
+
+    let locale = validate_attachment_locale(app, locale)?;
+    Ok(localized_attachment_collection(collection, &locale))
+}
+
+fn validate_attachment_locale(app: &AppContext, locale: &str) -> Result<String> {
+    let locale = locale.trim();
+    if locale.is_empty() {
+        return Err(Error::http_with_code(
+            400,
+            "locale is required",
+            "invalid_locale",
+        ));
+    }
+
+    let available = available_attachment_locales(app)?;
+    if available.iter().any(|candidate| candidate == locale) {
+        return Ok(locale.to_string());
+    }
+
+    let message = if available.is_empty() {
+        format!("locale `{locale}` is not available because no i18n locales are loaded")
+    } else {
+        format!(
+            "locale `{locale}` is not available; available locales: {}",
+            available.join(", ")
+        )
+    };
+
+    Err(Error::http_with_code(400, message, "invalid_locale"))
 }
 
 pub(crate) fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
@@ -743,6 +922,14 @@ mod tests {
             assert_eq!(second[0].attachable_id, second_id);
         })
         .await;
+    }
+
+    #[test]
+    fn localized_attachment_collection_uses_stable_locale_suffix() {
+        assert_eq!(
+            localized_attachment_collection(" banner_image ", " ms "),
+            "banner_image:ms"
+        );
     }
 
     fn attachment_record(attachable_type: &str, attachable_id: Uuid, collection: &str) -> DbRecord {

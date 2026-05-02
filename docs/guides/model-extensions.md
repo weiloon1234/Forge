@@ -152,6 +152,29 @@ for img in &images {
 }
 ```
 
+### Localized Attachments
+
+Use localized attachment helpers when an asset needs one file per available locale, such as campaign banners:
+
+```rust
+const BANNER_IMAGE: &str = "banner_image";
+
+let locales = available_attachment_locales(&app)?;
+for locale in &locales {
+    if let Some(file) = files.remove(locale) {
+        banner
+            .replace_localized_attachment(&app, BANNER_IMAGE, locale, file)
+            .await?;
+    }
+}
+
+let image = banner
+    .current_localized_attachment(&app, BANNER_IMAGE)
+    .await?;
+```
+
+Localized helpers validate `locale` against `app.i18n()?.locale_list()`. Internally they store files in normal attachment collections using `localized_attachment_collection("banner_image", "ms")`, which resolves to `banner_image:ms`.
+
 ### Eager Loading Attachments
 
 Use explicit eager loading when a response needs attachment data for every model in a list:
@@ -173,6 +196,16 @@ Attachment eager loading also works on nested relations:
 ```rust
 let users = User::model_query()
     .with(User::products().with_attachments("thumbnail"))
+    .get(&app)
+    .await?;
+```
+
+For localized assets, eager-load the concrete locale collection:
+
+```rust
+let locale = current_locale(&app);
+let banners = Banner::model_query()
+    .with_attachments(localized_attachment_collection("banner_image", &locale))
     .get(&app)
     .await?;
 ```

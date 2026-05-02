@@ -93,7 +93,10 @@ pub use forge_macros::{ApiSchema, AppEnum, Model, Projection, Validate, TS};
 pub use inventory;
 pub use ts_rs;
 
-pub use attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
+pub use attachments::{
+    available_attachment_locales, localized_attachment_collection, Attachment,
+    AttachmentUploadBuilder, HasAttachments,
+};
 pub use audit::AuditLog;
 pub use auth::{
     email_verification::EmailVerificationManager,

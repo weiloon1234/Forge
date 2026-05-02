@@ -2645,12 +2645,25 @@ trait HasAttachments {
     fn attachable_type() -> &'static str;
     fn attachable_id(&self) -> String;
     async fn attach(&self, app: &AppContext, collection: &str, file: UploadedFile) -> Result<Attachment>;
+    async fn attach_localized(&self, app: &AppContext, collection: &str, locale: &str, file: UploadedFile) -> Result<Attachment>;
+    async fn replace_localized_attachment(&self, app: &AppContext, collection: &str, locale: &str, file: UploadedFile) -> Result<Attachment>;
+    async fn localized_attachment(&self, app: &AppContext, collection: &str, locale: &str) -> Result<Option<Attachment>>;
+    async fn localized_attachments(&self, app: &AppContext, collection: &str, locale: &str) -> Result<Vec<Attachment>>;
+    async fn localized_attachment_or_default(&self, app: &AppContext, collection: &str, locale: &str) -> Result<Option<Attachment>>;
+    async fn current_localized_attachment(&self, app: &AppContext, collection: &str) -> Result<Option<Attachment>>;
     async fn attachment(&self, app: &AppContext, collection: &str) -> Result<Option<Attachment>>;
     async fn attachments(&self, app: &AppContext, collection: &str) -> Result<Vec<Attachment>>;
     async fn detach(&self, app: &AppContext, attachment_id: &str) -> Result<()>;
     async fn detach_keep_file(&self, app: &AppContext, attachment_id: &str) -> Result<()>;
     async fn detach_all(&self, app: &AppContext, collection: &str) -> Result<u64>;
 }
+```
+
+### Functions
+
+```rust
+fn available_attachment_locales(app: &AppContext) -> Result<Vec<String>>
+fn localized_attachment_collection(collection: &str, locale: &str) -> String
 ```
 
 ### Attachment — methods

@@ -30,10 +30,18 @@ trait HasAttachments
   fn attachable_type() -> &'static str
   fn attachable_id(&self) -> String
   fn attach<'life0, 'life1, 'life2, 'async_trait>(
+  fn attach_localized<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+  fn replace_localized_attachment<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+  fn localized_attachment<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+  fn localized_attachments<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+  fn localized_attachment_or_default<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+  fn current_localized_attachment<'life0, 'life1, 'life2, 'async_trait>(
   fn attachment<'life0, 'life1, 'life2, 'async_trait>(
   fn attachments<'life0, 'life1, 'life2, 'async_trait>(
   fn detach<'life0, 'life1, 'life2, 'async_trait>(
   fn detach_keep_file<'life0, 'life1, 'life2, 'async_trait>(
   fn detach_all<'life0, 'life1, 'life2, 'async_trait>(
+fn available_attachment_locales(app: &AppContext) -> Result<Vec<String>>
+fn localized_attachment_collection(collection: &str, locale: &str) -> String
 ```
 

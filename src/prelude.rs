@@ -1,4 +1,7 @@
-pub use crate::attachments::{Attachment, AttachmentUploadBuilder, HasAttachments};
+pub use crate::attachments::{
+    available_attachment_locales, localized_attachment_collection, Attachment,
+    AttachmentUploadBuilder, HasAttachments,
+};
 pub use crate::audit::AuditLog;
 pub use crate::auth::{
     email_verification::EmailVerificationManager,

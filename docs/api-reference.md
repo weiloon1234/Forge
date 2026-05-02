@@ -2636,6 +2636,8 @@ File attachments with lifecycle.
 | Name | Summary |
 |------|---------|
 | `Attachment` | Attachment record with disk, path, name, mime, size, etc. |
+| `AttachmentSpec` | Model-level collection policy for attachment uploads. |
+| `AttachmentImagePolicy` | Image resize, format, quality, and upscale policy. |
 | `AttachmentUploadBuilder` | Upload pipeline builder |
 
 ### Traits
@@ -2644,7 +2646,9 @@ File attachments with lifecycle.
 trait HasAttachments {
     fn attachable_type() -> &'static str;
     fn attachable_id(&self) -> String;
+    fn attachment_specs() -> Vec<AttachmentSpec<Self>>;
     async fn attach(&self, app: &AppContext, collection: &str, file: UploadedFile) -> Result<Attachment>;
+    async fn replace_attachment(&self, app: &AppContext, collection: &str, file: UploadedFile) -> Result<Attachment>;
     async fn attach_localized(&self, app: &AppContext, collection: &str, locale: &str, file: UploadedFile) -> Result<Attachment>;
     async fn replace_localized_attachment(&self, app: &AppContext, collection: &str, locale: &str, file: UploadedFile) -> Result<Attachment>;
     async fn localized_attachment(&self, app: &AppContext, collection: &str, locale: &str) -> Result<Option<Attachment>>;
@@ -2656,6 +2660,13 @@ trait HasAttachments {
     async fn detach(&self, app: &AppContext, attachment_id: &str) -> Result<()>;
     async fn detach_keep_file(&self, app: &AppContext, attachment_id: &str) -> Result<()>;
     async fn detach_all(&self, app: &AppContext, collection: &str) -> Result<u64>;
+}
+```
+
+```rust
+trait AttachmentSpecHook<M> {
+    async fn before_store(&self, ctx: AttachmentBeforeStoreContext<'_, M>) -> Result<()>;
+    async fn after_store(&self, ctx: AttachmentAfterStoreContext<'_, M>) -> Result<()>;
 }
 ```
 
@@ -2689,8 +2700,25 @@ fn disk(self, disk: impl Into<String>) -> Self
 fn resize(self, width: u32, height: u32) -> Self
 fn resize_to_fit(self, max_width: u32, max_height: u32) -> Self
 fn resize_to_fill(self, width: u32, height: u32) -> Self
+fn format(self, format: ImageFormat) -> Self
 fn quality(self, quality: u8) -> Self
+fn upscale(self, upscale: bool) -> Self
 async fn store(self, app: &AppContext, attachable_type: &str, attachable_id: &str) -> Result<Attachment>
+```
+
+### AttachmentSpec — methods
+
+```rust
+fn file(collection: impl Into<String>) -> Self
+fn image(collection: impl Into<String>) -> Self
+fn single(self) -> Self
+fn resize_exact(self, width: u32, height: u32) -> Self
+fn resize_to_fit(self, max_width: u32, max_height: u32) -> Self
+fn resize_to_fill(self, width: u32, height: u32) -> Self
+fn format(self, format: ImageFormat) -> Self
+fn quality(self, quality: u8) -> Self
+fn upscale(self, upscale: bool) -> Self
+fn hook<H>(self, hook: H) -> Self
 ```
 
 Attachment reads participate in the active model extension cache. Use

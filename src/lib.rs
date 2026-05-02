@@ -95,6 +95,8 @@ pub use ts_rs;
 
 pub use attachments::{
     available_attachment_locales, localized_attachment_collection, Attachment,
+    AttachmentAfterStoreContext, AttachmentBeforeStoreContext, AttachmentImagePolicy,
+    AttachmentImageResize, AttachmentSpec, AttachmentSpecHook, AttachmentSpecKind,
     AttachmentUploadBuilder, HasAttachments,
 };
 pub use audit::AuditLog;

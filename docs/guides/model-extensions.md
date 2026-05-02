@@ -123,21 +123,71 @@ impl HasAttachments for Product {
 }
 ```
 
+### Collection Specs
+
+Define specs on the model when a collection should always follow the same rules:
+
+```rust
+impl HasAttachments for Voucher {
+    fn attachable_type() -> &'static str { "vouchers" }
+    fn attachable_id(&self) -> String { self.id.to_string() }
+
+    fn attachment_specs() -> Vec<AttachmentSpec<Self>> {
+        vec![
+            AttachmentSpec::image("main")
+                .single()
+                .resize_to_fill(1200, 630)
+                .format(ImageFormat::WebP)
+                .quality(85)
+                .upscale(true)
+                .hook(VoucherMainImageHook),
+        ]
+    }
+}
+```
+
+Specs are the SSOT for a collection. Any upload to `main` applies the declared policy. Localized collections such as `main:ms` reuse the base `main` spec.
+
+Specs can also attach lifecycle hooks:
+
+```rust
+struct VoucherMainImageHook;
+
+#[async_trait]
+impl AttachmentSpecHook<Voucher> for VoucherMainImageHook {
+    async fn before_store(&self, ctx: AttachmentBeforeStoreContext<'_, Voucher>) -> Result<()> {
+        // Validate or inspect ctx.file before storage.
+        Ok(())
+    }
+
+    async fn after_store(&self, ctx: AttachmentAfterStoreContext<'_, Voucher>) -> Result<()> {
+        // React to ctx.attachment after the DB row exists.
+        Ok(())
+    }
+}
+```
+
 ### Attaching Files
 
 ```rust
 // Simple attachment
 product.attach(&app, "images", uploaded_file).await?;
 
+// Replace a single-file collection
+voucher.replace_attachment(&app, "main", uploaded_file).await?;
+
 // With image processing
 Attachment::upload(uploaded_file)
     .collection("thumbnail")
     .disk("s3")
     .resize_to_fill(300, 300)
+    .format(ImageFormat::WebP)
     .quality(80)
     .store(&app, "products", &product.id.to_string())
     .await?;
 ```
+
+Image specs reject invalid image uploads with `invalid_attachment_image`. If `.upscale(false)` is set on a fixed resize and the uploaded image is too small, Forge returns `attachment_image_too_small`.
 
 ### Querying Attachments
 

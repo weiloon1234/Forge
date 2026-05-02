@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use crate::database::extensions::{
 };
 use crate::database::{DbType, DbValue, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
+use crate::imaging::ImageFormat;
 use crate::storage::UploadedFile;
 use crate::support::DateTime;
 
@@ -39,6 +41,10 @@ impl Attachment {
             collection: "default".to_string(),
             disk: None,
             image_transforms: Vec::new(),
+            output_format: None,
+            quality: None,
+            allow_upscale: true,
+            require_image: false,
         }
     }
 
@@ -151,15 +157,211 @@ pub fn available_attachment_locales(app: &AppContext) -> Result<Vec<String>> {
     Ok(locales)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentImageResize {
+    Exact { width: u32, height: u32 },
+    Fit { max_width: u32, max_height: u32 },
+    Fill { width: u32, height: u32 },
+}
+
+impl AttachmentImageResize {
+    fn target_dimensions(self) -> (u32, u32) {
+        match self {
+            Self::Exact { width, height } | Self::Fill { width, height } => (width, height),
+            Self::Fit {
+                max_width,
+                max_height,
+            } => (max_width, max_height),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachmentImagePolicy {
+    pub resize: Option<AttachmentImageResize>,
+    pub format: Option<ImageFormat>,
+    pub quality: Option<u8>,
+    pub upscale: bool,
+}
+
+impl Default for AttachmentImagePolicy {
+    fn default() -> Self {
+        Self {
+            resize: None,
+            format: None,
+            quality: None,
+            upscale: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentSpecKind {
+    File,
+    Image,
+}
+
+pub struct AttachmentSpec<M> {
+    collection: String,
+    kind: AttachmentSpecKind,
+    single: bool,
+    image_policy: Option<AttachmentImagePolicy>,
+    hooks: Vec<Arc<dyn AttachmentSpecHook<M>>>,
+    _model: PhantomData<fn() -> M>,
+}
+
+impl<M> Clone for AttachmentSpec<M> {
+    fn clone(&self) -> Self {
+        Self {
+            collection: self.collection.clone(),
+            kind: self.kind,
+            single: self.single,
+            image_policy: self.image_policy,
+            hooks: self.hooks.clone(),
+            _model: PhantomData,
+        }
+    }
+}
+
+impl<M> AttachmentSpec<M> {
+    pub fn file(collection: impl Into<String>) -> Self {
+        Self {
+            collection: collection.into(),
+            kind: AttachmentSpecKind::File,
+            single: false,
+            image_policy: None,
+            hooks: Vec::new(),
+            _model: PhantomData,
+        }
+    }
+
+    pub fn image(collection: impl Into<String>) -> Self {
+        Self {
+            collection: collection.into(),
+            kind: AttachmentSpecKind::Image,
+            single: false,
+            image_policy: Some(AttachmentImagePolicy::default()),
+            hooks: Vec::new(),
+            _model: PhantomData,
+        }
+    }
+
+    pub fn single(mut self) -> Self {
+        self.single = true;
+        self
+    }
+
+    pub fn resize_exact(mut self, width: u32, height: u32) -> Self {
+        self.image_policy_mut().resize = Some(AttachmentImageResize::Exact { width, height });
+        self
+    }
+
+    pub fn resize_to_fit(mut self, max_width: u32, max_height: u32) -> Self {
+        self.image_policy_mut().resize = Some(AttachmentImageResize::Fit {
+            max_width,
+            max_height,
+        });
+        self
+    }
+
+    pub fn resize_to_fill(mut self, width: u32, height: u32) -> Self {
+        self.image_policy_mut().resize = Some(AttachmentImageResize::Fill { width, height });
+        self
+    }
+
+    pub fn format(mut self, format: ImageFormat) -> Self {
+        self.image_policy_mut().format = Some(format);
+        self
+    }
+
+    pub fn quality(mut self, quality: u8) -> Self {
+        self.image_policy_mut().quality = Some(quality.clamp(1, 100));
+        self
+    }
+
+    pub fn upscale(mut self, upscale: bool) -> Self {
+        self.image_policy_mut().upscale = upscale;
+        self
+    }
+
+    pub fn hook<H>(mut self, hook: H) -> Self
+    where
+        M: Send + Sync,
+        H: AttachmentSpecHook<M> + 'static,
+    {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    pub fn collection(&self) -> &str {
+        &self.collection
+    }
+
+    pub fn kind(&self) -> AttachmentSpecKind {
+        self.kind
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.single
+    }
+
+    pub fn image_policy(&self) -> Option<AttachmentImagePolicy> {
+        self.image_policy
+    }
+
+    fn hooks(&self) -> &[Arc<dyn AttachmentSpecHook<M>>] {
+        &self.hooks
+    }
+
+    fn image_policy_mut(&mut self) -> &mut AttachmentImagePolicy {
+        self.kind = AttachmentSpecKind::Image;
+        self.image_policy
+            .get_or_insert_with(AttachmentImagePolicy::default)
+    }
+}
+
+pub struct AttachmentBeforeStoreContext<'a, M> {
+    pub app: &'a AppContext,
+    pub model: &'a M,
+    pub spec: &'a AttachmentSpec<M>,
+    pub collection: &'a str,
+    pub locale: Option<&'a str>,
+    pub file: &'a UploadedFile,
+}
+
+pub struct AttachmentAfterStoreContext<'a, M> {
+    pub app: &'a AppContext,
+    pub model: &'a M,
+    pub spec: &'a AttachmentSpec<M>,
+    pub collection: &'a str,
+    pub locale: Option<&'a str>,
+    pub file: &'a UploadedFile,
+    pub attachment: &'a Attachment,
+}
+
+#[async_trait]
+pub trait AttachmentSpecHook<M>: Send + Sync
+where
+    M: Send + Sync,
+{
+    async fn before_store(&self, _ctx: AttachmentBeforeStoreContext<'_, M>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn after_store(&self, _ctx: AttachmentAfterStoreContext<'_, M>) -> Result<()> {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Upload pipeline builder
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageTransform {
     Resize(u32, u32),
     ResizeToFit(u32, u32),
     ResizeToFill(u32, u32),
-    Quality(u8),
 }
 
 /// Chainable builder for uploading files as attachments.
@@ -178,6 +380,10 @@ pub struct AttachmentUploadBuilder {
     collection: String,
     disk: Option<String>,
     image_transforms: Vec<ImageTransform>,
+    output_format: Option<ImageFormat>,
+    quality: Option<u8>,
+    allow_upscale: bool,
+    require_image: bool,
 }
 
 pub(crate) fn attachment_extension_loader<M>(collection: String) -> AnyModelExtension<M>
@@ -253,8 +459,53 @@ impl AttachmentUploadBuilder {
     }
 
     pub fn quality(mut self, quality: u8) -> Self {
-        self.image_transforms.push(ImageTransform::Quality(quality));
+        self.quality = Some(quality.clamp(1, 100));
         self
+    }
+
+    pub fn format(mut self, format: ImageFormat) -> Self {
+        self.output_format = Some(format);
+        self
+    }
+
+    pub fn upscale(mut self, upscale: bool) -> Self {
+        self.allow_upscale = upscale;
+        self
+    }
+
+    fn apply_spec<M>(mut self, spec: &AttachmentSpec<M>) -> Self {
+        if let Some(policy) = spec.image_policy() {
+            self.require_image = true;
+            if let Some(resize) = policy.resize {
+                match resize {
+                    AttachmentImageResize::Exact { width, height } => {
+                        self = self.resize(width, height)
+                    }
+                    AttachmentImageResize::Fit {
+                        max_width,
+                        max_height,
+                    } => self = self.resize_to_fit(max_width, max_height),
+                    AttachmentImageResize::Fill { width, height } => {
+                        self = self.resize_to_fill(width, height)
+                    }
+                }
+            }
+            if let Some(format) = policy.format {
+                self = self.format(format);
+            }
+            if let Some(quality) = policy.quality {
+                self = self.quality(quality);
+            }
+            self = self.upscale(policy.upscale);
+        }
+        self
+    }
+
+    fn should_process_image(&self) -> bool {
+        self.require_image
+            || !self.image_transforms.is_empty()
+            || self.output_format.is_some()
+            || self.quality.is_some()
     }
 
     /// Store the file and create the attachment record.
@@ -267,7 +518,7 @@ impl AttachmentUploadBuilder {
         let storage = app.storage()?;
         let db = app.database()?;
 
-        let disk_name = self.disk.unwrap_or_else(|| {
+        let disk_name = self.disk.clone().unwrap_or_else(|| {
             app.config()
                 .storage()
                 .map(|c| c.default.clone())
@@ -276,45 +527,33 @@ impl AttachmentUploadBuilder {
 
         let dir = format!("attachments/{}/{}", attachable_type, self.collection);
 
-        // Process image transforms if any, otherwise store directly
-        let (path, name, size, content_type) = if !self.image_transforms.is_empty() {
+        let processed_image = if self.should_process_image() {
             let bytes = tokio::fs::read(&self.file.temp_path)
                 .await
                 .map_err(Error::other)?;
-            let mut processor = crate::imaging::ImageProcessor::from_bytes(&bytes)?;
-            let mut quality_val = 85u8;
+            process_image_bytes(
+                &bytes,
+                self.file.original_name.as_deref(),
+                &self.image_transforms,
+                self.output_format,
+                self.quality,
+                self.allow_upscale,
+                self.require_image,
+            )?
+        } else {
+            None
+        };
 
-            for transform in &self.image_transforms {
-                match transform {
-                    ImageTransform::Resize(w, h) => processor = processor.resize(*w, *h),
-                    ImageTransform::ResizeToFit(w, h) => {
-                        processor = processor.resize_to_fit(*w, *h)
-                    }
-                    ImageTransform::ResizeToFill(w, h) => {
-                        processor = processor.resize_to_fill(*w, *h)
-                    }
-                    ImageTransform::Quality(q) => quality_val = *q,
-                }
-            }
-            processor = processor.quality(quality_val);
-
-            let format = self
-                .file
-                .original_name
-                .as_deref()
-                .and_then(|n| n.rsplit('.').next())
-                .and_then(crate::imaging::ImageFormat::from_extension)
-                .unwrap_or(crate::imaging::ImageFormat::Jpeg);
-
-            let output_bytes = processor.to_bytes(format)?;
-            let size = output_bytes.len() as i64;
-            let ext = format.extension();
+        // Process image transforms if any, otherwise store directly.
+        let (path, name, size, content_type) = if let Some(processed) = processed_image {
+            let size = processed.bytes.len() as i64;
+            let ext = processed.format.extension();
             let storage_name = format!("{}.{}", uuid::Uuid::now_v7(), ext);
             let path = format!("{}/{}", dir, storage_name);
-            let ct = format!("image/{}", ext);
+            let ct = image_mime_type(processed.format).to_string();
 
             let disk = storage.disk(&disk_name)?;
-            disk.put(&path, &output_bytes).await?;
+            disk.put(&path, &processed.bytes).await?;
 
             (path, storage_name, size, Some(ct))
         } else {
@@ -397,23 +636,35 @@ impl AttachmentUploadBuilder {
 pub trait HasAttachments: Send + Sync {
     fn attachable_type() -> &'static str;
     fn attachable_id(&self) -> String;
+    fn attachment_specs() -> Vec<AttachmentSpec<Self>>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
 
     async fn attach(
         &self,
         app: &AppContext,
         collection: &str,
         file: UploadedFile,
-    ) -> Result<Attachment> {
-        let attachment = Attachment::upload(file)
-            .collection(collection)
-            .store(app, Self::attachable_type(), &self.attachable_id())
-            .await?;
-        invalidate_attachment_cache(
-            Self::attachable_type(),
-            &self.attachable_id(),
-            Some(collection),
-        );
-        Ok(attachment)
+    ) -> Result<Attachment>
+    where
+        Self: Sized,
+    {
+        store_model_attachment(self, app, collection, file, false).await
+    }
+
+    async fn replace_attachment(
+        &self,
+        app: &AppContext,
+        collection: &str,
+        file: UploadedFile,
+    ) -> Result<Attachment>
+    where
+        Self: Sized,
+    {
+        store_model_attachment(self, app, collection, file, true).await
     }
 
     /// Attach a file to a locale-specific collection.
@@ -425,7 +676,10 @@ pub trait HasAttachments: Send + Sync {
         collection: &str,
         locale: &str,
         file: UploadedFile,
-    ) -> Result<Attachment> {
+    ) -> Result<Attachment>
+    where
+        Self: Sized,
+    {
         let collection = localized_collection_for(app, collection, locale)?;
         self.attach(app, &collection, file).await
     }
@@ -440,18 +694,12 @@ pub trait HasAttachments: Send + Sync {
         collection: &str,
         locale: &str,
         file: UploadedFile,
-    ) -> Result<Attachment> {
+    ) -> Result<Attachment>
+    where
+        Self: Sized,
+    {
         let collection = localized_collection_for(app, collection, locale)?;
-        let existing = self.attachments(app, &collection).await?;
-        let attachment = self.attach(app, &collection, file).await?;
-
-        for old in existing {
-            if old.id != attachment.id {
-                self.detach(app, &old.id).await?;
-            }
-        }
-
-        Ok(attachment)
+        self.replace_attachment(app, &collection, file).await
     }
 
     /// Read the first attachment for an exact locale.
@@ -694,6 +942,308 @@ fn opt_text(value: &Option<String>) -> DbValue {
     }
 }
 
+struct ResolvedAttachmentSpec<M> {
+    spec: AttachmentSpec<M>,
+    locale: Option<String>,
+}
+
+#[derive(Debug)]
+struct ProcessedImage {
+    bytes: Vec<u8>,
+    format: ImageFormat,
+}
+
+async fn store_model_attachment<M>(
+    model: &M,
+    app: &AppContext,
+    collection: &str,
+    file: UploadedFile,
+    replace_existing: bool,
+) -> Result<Attachment>
+where
+    M: HasAttachments,
+{
+    let resolved = resolve_attachment_spec::<M>(collection);
+
+    if let Some(resolved) = &resolved {
+        run_before_store_hooks(resolved, app, model, collection, &file).await?;
+    }
+
+    let should_replace = replace_existing
+        || resolved
+            .as_ref()
+            .map(|resolved| resolved.spec.is_single())
+            .unwrap_or(false);
+    let existing = if should_replace {
+        model.attachments(app, collection).await?
+    } else {
+        Vec::new()
+    };
+
+    let file_for_hooks = file.clone();
+    let mut builder = Attachment::upload(file).collection(collection);
+    if let Some(resolved) = &resolved {
+        builder = builder.apply_spec(&resolved.spec);
+    }
+
+    let attachment = builder
+        .store(app, M::attachable_type(), &model.attachable_id())
+        .await?;
+
+    if let Some(resolved) = &resolved {
+        if let Err(error) = run_after_store_hooks(
+            resolved,
+            app,
+            model,
+            collection,
+            &file_for_hooks,
+            &attachment,
+        )
+        .await
+        {
+            return cleanup_after_store_failure(error, || async {
+                model.detach(app, &attachment.id).await
+            })
+            .await;
+        }
+    }
+
+    for old in existing {
+        if old.id != attachment.id {
+            model.detach(app, &old.id).await?;
+        }
+    }
+
+    invalidate_attachment_cache(
+        M::attachable_type(),
+        &model.attachable_id(),
+        Some(collection),
+    );
+
+    Ok(attachment)
+}
+
+async fn run_before_store_hooks<M>(
+    resolved: &ResolvedAttachmentSpec<M>,
+    app: &AppContext,
+    model: &M,
+    collection: &str,
+    file: &UploadedFile,
+) -> Result<()>
+where
+    M: Send + Sync,
+{
+    for hook in resolved.spec.hooks() {
+        hook.before_store(AttachmentBeforeStoreContext {
+            app,
+            model,
+            spec: &resolved.spec,
+            collection,
+            locale: resolved.locale.as_deref(),
+            file,
+        })
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn run_after_store_hooks<M>(
+    resolved: &ResolvedAttachmentSpec<M>,
+    app: &AppContext,
+    model: &M,
+    collection: &str,
+    file: &UploadedFile,
+    attachment: &Attachment,
+) -> Result<()>
+where
+    M: Send + Sync,
+{
+    for hook in resolved.spec.hooks() {
+        hook.after_store(AttachmentAfterStoreContext {
+            app,
+            model,
+            spec: &resolved.spec,
+            collection,
+            locale: resolved.locale.as_deref(),
+            file,
+            attachment,
+        })
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn cleanup_after_store_failure<T, C, Fut>(error: Error, cleanup: C) -> Result<T>
+where
+    C: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    if let Err(cleanup_error) = cleanup().await {
+        return Err(Error::message(format!(
+            "attachment after_store hook failed: {error}; cleanup failed: {cleanup_error}"
+        )));
+    }
+
+    Err(error)
+}
+
+fn resolve_attachment_spec<M>(collection: &str) -> Option<ResolvedAttachmentSpec<M>>
+where
+    M: HasAttachments,
+{
+    let specs = M::attachment_specs();
+    if let Some(spec) = specs
+        .iter()
+        .find(|spec| spec.collection().trim() == collection.trim())
+        .cloned()
+    {
+        return Some(ResolvedAttachmentSpec { spec, locale: None });
+    }
+
+    let (base_collection, locale) = split_localized_collection(collection)?;
+    specs
+        .into_iter()
+        .find(|spec| spec.collection().trim() == base_collection)
+        .map(|spec| ResolvedAttachmentSpec {
+            spec,
+            locale: Some(locale.to_string()),
+        })
+}
+
+fn split_localized_collection(collection: &str) -> Option<(&str, &str)> {
+    let (base, locale) = collection.split_once(LOCALIZED_COLLECTION_SEPARATOR)?;
+    let base = base.trim();
+    let locale = locale.trim();
+    if base.is_empty() || locale.is_empty() {
+        return None;
+    }
+    Some((base, locale))
+}
+
+fn process_image_bytes(
+    bytes: &[u8],
+    original_name: Option<&str>,
+    transforms: &[ImageTransform],
+    output_format: Option<ImageFormat>,
+    quality: Option<u8>,
+    allow_upscale: bool,
+    require_image: bool,
+) -> Result<Option<ProcessedImage>> {
+    let should_process =
+        require_image || !transforms.is_empty() || output_format.is_some() || quality.is_some();
+    if !should_process {
+        return Ok(None);
+    }
+
+    let mut processor = crate::imaging::ImageProcessor::from_bytes(bytes)
+        .map_err(|_| invalid_attachment_image_error())?;
+    let detected_format = processor.format();
+    let needs_reencode = !transforms.is_empty() || output_format.is_some() || quality.is_some();
+
+    if !needs_reencode {
+        return Ok(None);
+    }
+
+    for transform in transforms {
+        processor = apply_image_transform(processor, *transform, allow_upscale)?;
+    }
+
+    if let Some(quality) = quality {
+        processor = processor.quality(quality);
+    }
+
+    let format = output_format
+        .or_else(|| image_format_from_name(original_name))
+        .or(detected_format)
+        .unwrap_or(ImageFormat::Jpeg);
+    let bytes = processor.to_bytes(format)?;
+
+    Ok(Some(ProcessedImage { bytes, format }))
+}
+
+fn apply_image_transform(
+    processor: crate::imaging::ImageProcessor,
+    transform: ImageTransform,
+    allow_upscale: bool,
+) -> Result<crate::imaging::ImageProcessor> {
+    if !allow_upscale {
+        ensure_transform_without_upscale(&processor, transform)?;
+    }
+
+    let processor = match transform {
+        ImageTransform::Resize(width, height) => processor.resize(width, height),
+        ImageTransform::ResizeToFit(max_width, max_height) => {
+            if !allow_upscale && processor.width() <= max_width && processor.height() <= max_height
+            {
+                processor
+            } else {
+                processor.resize_to_fit(max_width, max_height)
+            }
+        }
+        ImageTransform::ResizeToFill(width, height) => processor.resize_to_fill(width, height),
+    };
+
+    Ok(processor)
+}
+
+fn ensure_transform_without_upscale(
+    processor: &crate::imaging::ImageProcessor,
+    transform: ImageTransform,
+) -> Result<()> {
+    let resize = match transform {
+        ImageTransform::Resize(width, height) => AttachmentImageResize::Exact { width, height },
+        ImageTransform::ResizeToFill(width, height) => {
+            AttachmentImageResize::Fill { width, height }
+        }
+        ImageTransform::ResizeToFit(_, _) => {
+            return Ok(());
+        }
+    };
+    let (width, height) = resize.target_dimensions();
+
+    if processor.width() < width || processor.height() < height {
+        return Err(attachment_image_too_small_error(width, height));
+    }
+
+    Ok(())
+}
+
+fn image_format_from_name(name: Option<&str>) -> Option<ImageFormat> {
+    name.and_then(|name| name.rsplit('.').next())
+        .and_then(ImageFormat::from_extension)
+}
+
+fn image_mime_type(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Png => "image/png",
+        ImageFormat::WebP => "image/webp",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::Bmp => "image/bmp",
+        ImageFormat::Tiff => "image/tiff",
+        ImageFormat::Avif => "image/avif",
+        ImageFormat::Ico => "image/vnd.microsoft.icon",
+    }
+}
+
+fn invalid_attachment_image_error() -> Error {
+    Error::http_with_code(
+        422,
+        "attachment must be a valid image",
+        "invalid_attachment_image",
+    )
+}
+
+fn attachment_image_too_small_error(width: u32, height: u32) -> Error {
+    Error::http_with_code(
+        422,
+        format!("attachment image must be at least {width}x{height}"),
+        "attachment_image_too_small",
+    )
+}
+
 fn localized_collection_for(app: &AppContext, collection: &str, locale: &str) -> Result<String> {
     let collection = collection.trim();
     if collection.is_empty() {
@@ -842,16 +1392,81 @@ fn collect_unique_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use image::DynamicImage;
     use uuid::Uuid;
 
+    use crate::config::ConfigRepository;
     use crate::database::{
         scope_model_extensions, DbRecord, DbValue, QueryExecutionOptions, QueryExecutor,
     };
+    use crate::foundation::Container;
+    use crate::validation::RuleRegistry;
 
     use super::*;
+
+    struct SpecAttachable {
+        id: String,
+    }
+
+    impl HasAttachments for SpecAttachable {
+        fn attachable_type() -> &'static str {
+            "spec_attachables"
+        }
+
+        fn attachable_id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn attachment_specs() -> Vec<AttachmentSpec<Self>> {
+            vec![AttachmentSpec::image("main")
+                .single()
+                .resize_to_fill(1200, 630)
+                .format(ImageFormat::WebP)
+                .quality(85)
+                .upscale(true)]
+        }
+    }
+
+    struct NoopAttachmentHook;
+
+    #[async_trait]
+    impl AttachmentSpecHook<SpecAttachable> for NoopAttachmentHook {}
+
+    struct RecordingAttachmentHook {
+        label: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl AttachmentSpecHook<SpecAttachable> for RecordingAttachmentHook {
+        async fn before_store(
+            &self,
+            _ctx: AttachmentBeforeStoreContext<'_, SpecAttachable>,
+        ) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("before:{}", self.label));
+            Ok(())
+        }
+
+        async fn after_store(
+            &self,
+            _ctx: AttachmentAfterStoreContext<'_, SpecAttachable>,
+        ) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("after:{}", self.label));
+            Ok(())
+        }
+    }
 
     #[derive(Default)]
     struct CountingAttachmentExecutor {
@@ -930,6 +1545,203 @@ mod tests {
             localized_attachment_collection(" banner_image ", " ms "),
             "banner_image:ms"
         );
+    }
+
+    #[test]
+    fn attachment_spec_resolves_exact_and_localized_collections() {
+        let exact = resolve_attachment_spec::<SpecAttachable>("main").unwrap();
+        assert!(exact.locale.is_none());
+        assert!(exact.spec.is_single());
+
+        let localized = resolve_attachment_spec::<SpecAttachable>("main:ms").unwrap();
+        assert_eq!(localized.locale.as_deref(), Some("ms"));
+        assert_eq!(localized.spec.collection(), "main");
+        assert_eq!(
+            localized.spec.image_policy().unwrap().format,
+            Some(ImageFormat::WebP)
+        );
+    }
+
+    #[test]
+    fn image_policy_clamps_quality() {
+        let low = AttachmentSpec::<SpecAttachable>::image("main").quality(0);
+        assert_eq!(low.image_policy().unwrap().quality, Some(1));
+
+        let high = AttachmentSpec::<SpecAttachable>::image("main").quality(250);
+        assert_eq!(high.image_policy().unwrap().quality, Some(100));
+    }
+
+    #[test]
+    fn attachment_spec_registers_hooks() {
+        let spec = AttachmentSpec::<SpecAttachable>::image("main").hook(NoopAttachmentHook);
+        assert_eq!(spec.hooks().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_spec_hooks_run_in_registration_order() {
+        let app = test_app_context();
+        let model = SpecAttachable {
+            id: Uuid::now_v7().to_string(),
+        };
+        let file = test_uploaded_file("voucher.png");
+        let attachment = test_attachment(&model, "main");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let resolved = ResolvedAttachmentSpec {
+            spec: AttachmentSpec::<SpecAttachable>::image("main")
+                .hook(RecordingAttachmentHook {
+                    label: "one",
+                    events: events.clone(),
+                })
+                .hook(RecordingAttachmentHook {
+                    label: "two",
+                    events: events.clone(),
+                }),
+            locale: None,
+        };
+
+        run_before_store_hooks(&resolved, &app, &model, "main", &file)
+            .await
+            .unwrap();
+        run_after_store_hooks(&resolved, &app, &model, "main", &file, &attachment)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["before:one", "before:two", "after:one", "after:two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn after_store_failure_runs_cleanup_and_returns_hook_error() {
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let result: Result<()> =
+            cleanup_after_store_failure(Error::message("after hook failed"), || {
+                let cleanup_count = cleanup_count.clone();
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .await;
+
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("after hook failed"));
+    }
+
+    #[tokio::test]
+    async fn after_store_failure_reports_cleanup_error() {
+        let result: Result<()> =
+            cleanup_after_store_failure(Error::message("after hook failed"), || async {
+                Err(Error::message("cleanup failed"))
+            })
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("after hook failed"));
+        assert!(error.contains("cleanup failed"));
+    }
+
+    #[test]
+    fn image_policy_resizes_and_converts_output_format() {
+        let input = test_image_bytes(640, 360, ImageFormat::Png);
+        let processed = process_image_bytes(
+            &input,
+            Some("voucher.png"),
+            &[ImageTransform::ResizeToFill(1200, 630)],
+            Some(ImageFormat::WebP),
+            Some(85),
+            true,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(processed.format, ImageFormat::WebP);
+        let image = crate::imaging::ImageProcessor::from_bytes(&processed.bytes).unwrap();
+        assert_eq!((image.width(), image.height()), (1200, 630));
+    }
+
+    #[test]
+    fn image_policy_rejects_invalid_images() {
+        let error =
+            process_image_bytes(b"not an image", None, &[], None, None, true, true).unwrap_err();
+
+        assert_error_code(error, "invalid_attachment_image");
+    }
+
+    #[test]
+    fn image_policy_rejects_too_small_fixed_resize_without_upscale() {
+        let input = test_image_bytes(100, 100, ImageFormat::Png);
+        let error = process_image_bytes(
+            &input,
+            Some("small.png"),
+            &[ImageTransform::ResizeToFill(200, 200)],
+            Some(ImageFormat::Png),
+            None,
+            false,
+            true,
+        )
+        .unwrap_err();
+
+        assert_error_code(error, "attachment_image_too_small");
+    }
+
+    fn test_app_context() -> AppContext {
+        AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap()
+    }
+
+    fn test_uploaded_file(original_name: &str) -> UploadedFile {
+        UploadedFile {
+            field_name: "file".to_string(),
+            original_name: Some(original_name.to_string()),
+            content_type: Some("image/png".to_string()),
+            size: 0,
+            temp_path: PathBuf::from("/tmp/forge-attachment-test-upload"),
+        }
+    }
+
+    fn test_attachment(model: &SpecAttachable, collection: &str) -> Attachment {
+        Attachment {
+            id: Uuid::now_v7().to_string(),
+            attachable_type: SpecAttachable::attachable_type().to_string(),
+            attachable_id: model.attachable_id(),
+            collection: collection.to_string(),
+            disk: "local".to_string(),
+            path: "attachments/spec_attachables/main/test.png".to_string(),
+            name: "test.png".to_string(),
+            original_name: Some("test.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            size: 0,
+            sort_order: 0,
+            custom_properties: serde_json::json!({}),
+        }
+    }
+
+    fn test_image_bytes(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
+        let image = DynamicImage::new_rgba8(width, height);
+        let mut cursor = Cursor::new(Vec::new());
+        let format: image::ImageFormat = format.into();
+        image.write_to(&mut cursor, format).unwrap();
+        cursor.into_inner()
+    }
+
+    fn assert_error_code(error: Error, expected: &str) {
+        match error {
+            Error::Http {
+                error_code: Some(code),
+                ..
+            } => assert_eq!(code, expected),
+            other => panic!("expected HTTP error code {expected}, got {other:?}"),
+        }
     }
 
     fn attachment_record(attachable_type: &str, attachable_id: Uuid, collection: &str) -> DbRecord {

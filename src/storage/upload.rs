@@ -16,7 +16,7 @@ use super::StorageManager;
 /// and the temporary path where the file body was written by the HTTP layer.
 ///
 /// Helper methods generate safe storage names and paths.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UploadedFile {
     pub field_name: String,
     pub original_name: Option<String>,

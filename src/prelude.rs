@@ -1,5 +1,7 @@
 pub use crate::attachments::{
     available_attachment_locales, localized_attachment_collection, Attachment,
+    AttachmentAfterStoreContext, AttachmentBeforeStoreContext, AttachmentImagePolicy,
+    AttachmentImageResize, AttachmentSpec, AttachmentSpecHook, AttachmentSpecKind,
     AttachmentUploadBuilder, HasAttachments,
 };
 pub use crate::audit::AuditLog;

@@ -606,6 +606,26 @@ impl User {
 ```
 
 Now `User::model_create().set(User::PASSWORD, "plaintext")` automatically hashes before insert.
+Optional fields work the same way because Forge preserves the column type for `NULL` values:
+
+```rust
+#[derive(Model)]
+#[forge(table = "users")]
+struct User {
+    id: ModelId<Self>,
+    #[forge(write_mutator = "normalize_username")]
+    username: Option<String>,
+}
+
+impl User {
+    async fn normalize_username(
+        _ctx: &ModelHookContext<'_>,
+        value: Option<String>,
+    ) -> Result<Option<String>> {
+        Ok(value.map(|username| username.trim().to_lowercase()))
+    }
+}
+```
 
 ### Lifecycle Trait
 

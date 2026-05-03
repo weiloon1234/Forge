@@ -153,7 +153,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                             <#field_ty as ::forge::FromDbValue>::from_db_value(&value)?;
                         let transformed: #field_ty =
                             #ident::#write_mutator_ident(context, typed_value).await?;
-                        Ok(<#field_ty as ::forge::ToDbValue>::to_db_value(transformed))
+                        Ok(<#field_ty as ::forge::IntoFieldValue<#field_ty>>::into_field_value(
+                            transformed,
+                            #db_type_tokens,
+                        ))
                     })
                 }
             });

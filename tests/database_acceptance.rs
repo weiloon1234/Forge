@@ -204,9 +204,19 @@ struct User {
     id: i64,
     email: String,
     active: bool,
+    #[forge(write_mutator = "normalize_nickname")]
     nickname: Option<String>,
     merchants: Loaded<Vec<Merchant>>,
     merchant_count: Loaded<i64>,
+}
+
+impl User {
+    async fn normalize_nickname(
+        _context: &ModelHookContext<'_>,
+        value: Option<String>,
+    ) -> Result<Option<String>> {
+        Ok(value.map(|nickname| nickname.trim().to_lowercase()))
+    }
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
@@ -925,7 +935,7 @@ async fn generic_builder_and_model_first_queries_are_typed_and_short() {
         .set(User::ID, 2_i64)
         .set(User::EMAIL, "model@example.com")
         .set(User::ACTIVE, false)
-        .set(User::NICKNAME, "captain")
+        .set(User::NICKNAME, " Captain ")
         .save(app)
         .await
         .unwrap();
@@ -941,7 +951,7 @@ async fn generic_builder_and_model_first_queries_are_typed_and_short() {
             row.set(User::ID, 5_i64)
                 .set(User::EMAIL, "bulk-two@example.com")
                 .set(User::ACTIVE, true)
-                .set(User::NICKNAME, "ally")
+                .set(User::NICKNAME, " Ally ")
         })
         .get(app)
         .await
@@ -1152,7 +1162,7 @@ async fn generic_builder_and_model_first_queries_are_typed_and_short() {
 
     let updated = User::update()
         .set(User::ACTIVE, true)
-        .set(User::NICKNAME, "vip")
+        .set(User::NICKNAME, " VIP ")
         .where_(User::EMAIL.eq("bulk-two@example.com"))
         .save(app)
         .await
@@ -1187,7 +1197,7 @@ async fn generic_builder_and_model_first_queries_are_typed_and_short() {
     let updated_from_instance = fetched
         .update()
         .set(User::ACTIVE, true)
-        .set(User::NICKNAME, "instance-write")
+        .set(User::NICKNAME, " Instance-Write ")
         .save(app)
         .await
         .unwrap();

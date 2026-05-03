@@ -12,6 +12,7 @@ struct User {
     active: bool,
     metadata: serde_json::Value,
     created_at: DateTime,
+    #[forge(write_mutator = "normalize_nickname")]
     nickname: Option<String>,
     merchants: Loaded<Vec<Merchant>>,
 }
@@ -56,6 +57,13 @@ impl User {
 
     fn normalized_email(&self) -> String {
         self.email.trim().to_lowercase()
+    }
+
+    async fn normalize_nickname(
+        _ctx: &ModelHookContext<'_>,
+        value: Option<String>,
+    ) -> Result<Option<String>> {
+        Ok(value.map(|nickname| nickname.trim().to_lowercase()))
     }
 }
 

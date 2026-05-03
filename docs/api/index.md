@@ -14,7 +14,7 @@ Load only the file you need — don't read them all at once.
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 206L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 26L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
-| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 65L |
+| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 69L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
 | [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 726L |
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 196L |
@@ -42,4 +42,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 34 modules, 3196 lines across all files.**
+**Total: 34 modules, 3200 lines across all files.**

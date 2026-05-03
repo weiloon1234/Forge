@@ -103,7 +103,7 @@ const APP_FIELDS: &[PublishedField] = &[
         "development",
         true,
         true,
-        Some("\"development\", \"production\", or \"testing\""),
+        Some("\"development\", \"production\", \"staging\", \"testing\", or custom label"),
     ),
     field("timezone", "\"UTC\"", "UTC", true, false, None),
     field(

@@ -8,10 +8,14 @@ TOML-based configuration (ConfigRepository, AppConfig, etc.)
 
 ```rust
 enum CacheDriver { Redis, Memory }
-enum Environment { Development, Production, Testing }
-  fn is_production(self) -> bool
-  fn is_development(self) -> bool
-  fn is_testing(self) -> bool
+enum Environment { Development, Production, Staging, Testing, Custom }
+  fn from_label(label: impl Into<String>) -> Self
+  fn as_str(&self) -> &str
+  fn is_production(&self) -> bool
+  fn is_production_like(&self) -> bool
+  fn is_development(&self) -> bool
+  fn is_staging(&self) -> bool
+  fn is_testing(&self) -> bool
 enum GuardDriver { Token, Session, Custom }
 struct AppConfig
   fn signing_key_bytes(&self) -> Result<Vec<u8>>

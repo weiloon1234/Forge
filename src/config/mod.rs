@@ -21,36 +21,73 @@ pub struct ConfigRepository {
     root: Arc<Value>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Environment {
     #[default]
     Development,
     Production,
+    Staging,
     Testing,
+    Custom(String),
 }
 
 impl Environment {
-    pub fn is_production(self) -> bool {
+    pub fn from_label(label: impl Into<String>) -> Self {
+        let label = label.into();
+        let label = label.trim();
+        match label.to_ascii_lowercase().as_str() {
+            "development" => Self::Development,
+            "production" => Self::Production,
+            "staging" => Self::Staging,
+            "testing" => Self::Testing,
+            _ => Self::Custom(label.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Development => "development",
+            Self::Production => "production",
+            Self::Staging => "staging",
+            Self::Testing => "testing",
+            Self::Custom(label) => label.as_str(),
+        }
+    }
+
+    pub fn is_production(&self) -> bool {
         matches!(self, Self::Production)
     }
 
-    pub fn is_development(self) -> bool {
+    pub fn is_production_like(&self) -> bool {
+        matches!(self, Self::Production | Self::Staging)
+    }
+
+    pub fn is_development(&self) -> bool {
         matches!(self, Self::Development)
     }
 
-    pub fn is_testing(self) -> bool {
+    pub fn is_staging(&self) -> bool {
+        matches!(self, Self::Staging)
+    }
+
+    pub fn is_testing(&self) -> bool {
         matches!(self, Self::Testing)
+    }
+}
+
+impl<'de> Deserialize<'de> for Environment {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        Ok(Self::from_label(label))
     }
 }
 
 impl std::fmt::Display for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Development => write!(f, "development"),
-            Self::Production => write!(f, "production"),
-            Self::Testing => write!(f, "testing"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -803,8 +840,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, JobsConfig, LoggingConfig,
-        ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
+        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, Environment, JobsConfig,
+        LoggingConfig, ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig,
+        WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -874,6 +912,45 @@ mod tests {
         std::env::remove_var("APP__TIMEZONE");
 
         assert_eq!(app.timezone.to_string(), "Asia/Tokyo");
+    }
+
+    #[test]
+    fn parses_staging_environment_as_production_like() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("APP__ENVIRONMENT");
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-app.toml"),
+            r#"
+                [app]
+                environment = "staging"
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let app = config.app().unwrap();
+
+        assert_eq!(app.environment, Environment::Staging);
+        assert_eq!(app.environment.to_string(), "staging");
+        assert!(app.environment.is_staging());
+        assert!(app.environment.is_production_like());
+        assert!(!app.environment.is_production());
+    }
+
+    #[test]
+    fn accepts_custom_environment_labels_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("APP__ENVIRONMENT", "eu-prod");
+
+        let config = ConfigRepository::with_env_overlay_only().unwrap();
+        let app = config.app().unwrap();
+
+        std::env::remove_var("APP__ENVIRONMENT");
+
+        assert_eq!(app.environment, Environment::Custom("eu-prod".to_string()));
+        assert_eq!(app.environment.to_string(), "eu-prod");
+        assert!(!app.environment.is_production_like());
     }
 
     #[test]

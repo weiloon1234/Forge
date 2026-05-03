@@ -386,10 +386,16 @@ fn crypt(&self) -> Result<CryptConfig>
 ### Environment — methods
 
 ```rust
-fn is_production(self) -> bool
-fn is_development(self) -> bool
-fn is_testing(self) -> bool
+fn from_label(label: impl Into<String>) -> Self
+fn as_str(&self) -> &str
+fn is_production(&self) -> bool
+fn is_production_like(&self) -> bool
+fn is_development(&self) -> bool
+fn is_staging(&self) -> bool
+fn is_testing(&self) -> bool
 ```
+
+`Environment` accepts `development`, `production`, `staging`, `testing`, and custom labels. Use `is_production_like` for checks where staging should follow production behavior.
 
 ### Constants
 

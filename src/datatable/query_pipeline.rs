@@ -3,7 +3,9 @@ use crate::foundation::Result;
 use super::column::DatatableColumn;
 use super::context::DatatableContext;
 use super::datatable_trait::Datatable;
-use super::filter_engine::{apply_auto_filters, apply_default_sorts, apply_sorts};
+use super::filter_engine::{
+    apply_auto_filters_with_relation_filters, apply_default_sorts, apply_sorts,
+};
 
 /// Shared query-build pipeline used by both JSON and download modes.
 ///
@@ -16,7 +18,13 @@ where
     D: Datatable + ?Sized,
 {
     let query = D::query(ctx);
-    let query = apply_auto_filters(query, &ctx.request.filters, columns)?;
+    let relation_filters = D::relation_filters();
+    let query = apply_auto_filters_with_relation_filters(
+        query,
+        &ctx.request.filters,
+        columns,
+        &relation_filters,
+    )?;
     let query = D::filters(ctx, query).await?;
 
     if ctx.request.sort.is_empty() {

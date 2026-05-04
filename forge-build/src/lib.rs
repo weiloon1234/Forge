@@ -373,8 +373,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_migration_file_stem() {
+    fn rejects_migration_file_without_timestamp() {
         let error = parse_migration_file_stem("create_users.rs").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must start with a 12-digit timestamp"));
+    }
+
+    #[test]
+    fn rejects_migration_file_without_slug() {
+        let error = parse_migration_file_stem("202604101200.rs").unwrap_err();
         assert!(error.to_string().contains("YYYYMMDDHHMM_slug.rs"));
     }
 

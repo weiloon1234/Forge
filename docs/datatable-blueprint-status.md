@@ -8,7 +8,7 @@ This status note maps the blueprint's goals to the concrete surfaces already in 
 
 - Blueprint scope: core implementation complete
 - First-class target: model-backed datatables with JSON, download, and email export modes
-- Pending items: acceptance tests, relation-based auto-filters
+- Deferred items: none
 
 ## Module Structure
 
@@ -24,6 +24,7 @@ All datatable modules live under `src/datatable/`:
 | `request.rs` | `DatatableRequest`, `DatatableFilterInput`, `DatatableSortInput` |
 | `filter_meta.rs` | `DatatableFilterField`, `DatatableFilterRow`, `DatatableFilterOption` |
 | `filter_engine.rs` | Auto-filter application + legacy param normalization |
+| `relation_filter.rs` | Typed relation-backed auto-filter declarations |
 | `context.rs` | `DatatableContext` (scoped execution context) |
 | `datatable_trait.rs` | Unified `Datatable` + sealed `DatatableQuery` traits |
 | `response.rs` | `DatatableJsonResponse`, column/pagination meta |
@@ -41,6 +42,7 @@ All datatable modules live under `src/datatable/`:
 - `DatatableColumn<Row>` with `::field(column_or_projection_field)` constructor
 - Builder methods: `.sortable()`, `.sort_by()`, `.filterable()`, `.filter_by()`, `.filter_having()`, `.exportable()`, `.label()`, `.relation()`
 - `DatatableMapping<M>` with `::new(name, |row, ctx| ...)` for computed/override fields
+- `DatatableRelationFilter<Row, Query>` and `DatatableRelationColumn<Row>` for opt-in relation filters
 - `DatatableValue` enum with constructors and `Into<serde_json::Value>` conversion
 - `DatatableSort<Row>` with typed `::asc(field)` / `::desc(field)` constructors
 
@@ -63,15 +65,15 @@ All datatable modules live under `src/datatable/`:
 
 ### Auto-Filter Engine (Blueprint: Filter System)
 
-- Legacy param normalization: `normalize_legacy_params()` supporting f-like-, f-date-, f-gte-, etc.
-- `DatatableRequest::from_query_params()` for legacy input
+- Legacy param normalization via `DatatableRequest::from_query_params()` supporting f-like-, f-date-, f-gte-, etc.
 - `apply_auto_filters()` building `Condition` from declared filter expressions + `DbType`
+- `DatatableRelationFilter` applies typed `where_has(...)` / `where_has_many_to_many(...)` filters for declared relation fields and legacy hyphen aliases
 - `apply_sorts()` with column validation against declared sort expressions
 - Supports all filter ops: Eq, Like, Gt/Gte/Lt/Lte, Date/DateFrom/DateTo, DateTime ranges, In, Has, HasLike, LikeAny
 
 ### Traits (Blueprint: Core Datatable Shape)
 
-- Unified `Datatable` trait with associated `Row` and `Query`, plus `query()`, `columns()`, `mappings()`, `filters()`, `available_filters()`, `default_sort()`
+- Unified `Datatable` trait with associated `Row` and `Query`, plus `query()`, `columns()`, `mappings()`, `filters()`, `available_filters()`, `relation_filters()`, `default_sort()`
 - Provided methods: `json()`, `download()`, `queue_email()` delegating to output modules
 - `DatatableQuery<Row>` sealed adapter implemented for `ModelQuery<Row>` and `ProjectionQuery<Row>`
 - `DatatableContext` with `app`, `actor`, `request`, `locale`, `timezone` + `t()` helper
@@ -113,5 +115,10 @@ All datatable modules live under `src/datatable/`:
 
 ## Remaining Work
 
-- [ ] Acceptance tests for JSON response, filter engine, legacy params, XLSX, registry
-- [ ] Relation-based auto-filters (column metadata has `relation: Option<String>` but filter engine does not use it yet)
+- No open items from the datatable blueprint are currently tracked here.
+
+## Verification Coverage
+
+- JSON, model/projection registry resolution, WHERE/HAVING filters, relation filters, sorting, decimal filters, XLSX download, and queued export delivery are covered by `tests/datatable_acceptance.rs`.
+- Filter engine edge cases and filter metadata bindings are covered by unit tests under `src/datatable/`.
+- Legacy query-param normalization is covered by unit tests in `src/datatable/request.rs`.

@@ -337,83 +337,135 @@ my-app/
 │   └── dist/
 ├── src/
 │   ├── main.rs                     # entry point
-│   ├── bootstrap.rs                # AppBuilder factories
-│   ├── providers.rs                # ServiceProviders
-│   ├── routes.rs                   # HTTP routes
-│   ├── commands.rs                 # CLI commands
-│   ├── schedules.rs                # scheduled tasks
-│   ├── ws.rs                       # WebSocket channels
-│   └── domain/                     # business logic
-│       ├── models/                 # Model structs
-│       ├── jobs/                   # Background jobs
-│       ├── events/                 # Domain events + listeners
-│       ├── notifications/          # Notification definitions
-│       └── enums/                  # AppEnum types
+│   ├── app/
+│   │   ├── mod.rs
+│   │   ├── providers/              # ServiceProviders
+│   │   ├── portals/                # HTTP routes
+│   │   ├── commands/               # CLI commands
+│   │   ├── schedules/              # scheduled tasks
+│   │   ├── realtime/               # WebSocket channels
+│   │   └── domain/                 # business logic
+│   │       ├── models/             # Model structs
+│   │       ├── jobs/               # Background jobs
+│   │       ├── events/             # Domain events + listeners
+│   │       ├── notifications/      # Notification definitions
+│   │       └── enums/              # AppEnum types
+│   └── bootstrap/
+│       ├── mod.rs
+│       ├── app.rs                  # shared AppBuilder setup
+│       ├── http.rs                 # HTTP runtime builder
+│       ├── cli.rs                  # CLI runtime builder
+│       ├── scheduler.rs            # scheduler runtime builder
+│       ├── worker.rs               # worker runtime builder
+│       └── websocket.rs            # WebSocket runtime builder
 └── tests/
 ```
 
 ### The Bootstrap Pattern
 
-Keep `main.rs` clean by extracting builder setup:
+Keep `main.rs` clean by sharing one base builder and adding runtime-specific registrations in separate files. This is the same shape used by Forge's consumer fixture.
 
-**src/bootstrap.rs:**
+**src/bootstrap/app.rs:**
 
 ```rust
 use forge::prelude::*;
-use crate::{providers, routes, commands, schedules, ws};
 
-fn base() -> AppBuilder {
+use crate::app;
+
+pub fn builder() -> AppBuilder {
     App::builder()
         .load_env()
         .load_config_dir("config")
-        .register_provider(providers::AppServiceProvider)
+        .register_provider(app::providers::AppServiceProvider)
 }
+```
 
-pub fn http() -> AppBuilder {
-    base()
-        .register_routes(routes::register)
+**src/bootstrap/http.rs:**
+
+```rust
+use forge::prelude::*;
+
+use crate::app;
+
+pub fn builder() -> AppBuilder {
+    super::app::builder()
+        .register_routes(app::portals::router)
         .register_middleware(MiddlewareConfig::from(Compression))
         .enable_observability()
 }
+```
 
-pub fn cli() -> AppBuilder {
-    base()
-        .register_commands(commands::register)
-}
+**src/bootstrap/cli.rs:**
 
-pub fn scheduler() -> AppBuilder {
-    base()
-        .register_schedule(schedules::register)
-}
+```rust
+use forge::prelude::*;
 
-pub fn worker() -> AppBuilder {
-    base()
-}
+use crate::app;
 
-pub fn websocket() -> AppBuilder {
-    base()
-        .register_websocket_routes(ws::register)
+pub fn builder() -> AppBuilder {
+    super::app::builder().register_commands(app::commands::register)
 }
+```
+
+**src/bootstrap/scheduler.rs:**
+
+```rust
+use forge::prelude::*;
+
+use crate::app;
+
+pub fn builder() -> AppBuilder {
+    super::app::builder().register_schedule(app::schedules::register)
+}
+```
+
+**src/bootstrap/worker.rs:**
+
+```rust
+use forge::prelude::*;
+
+pub fn builder() -> AppBuilder {
+    super::app::builder()
+}
+```
+
+**src/bootstrap/websocket.rs:**
+
+```rust
+use forge::prelude::*;
+
+use crate::app;
+
+pub fn builder() -> AppBuilder {
+    super::app::builder().register_websocket_routes(app::realtime::register)
+}
+```
+
+**src/bootstrap/mod.rs:**
+
+```rust
+pub mod app;
+pub mod cli;
+pub mod http;
+pub mod scheduler;
+pub mod websocket;
+pub mod worker;
 ```
 
 **src/main.rs:**
 
 ```rust
+mod app;
 mod bootstrap;
-mod providers;
-mod routes;
-mod commands;
-mod schedules;
-mod ws;
-mod domain;
 
 fn main() -> forge::foundation::Result<()> {
     match std::env::var("PROCESS").unwrap_or_default().as_str() {
-        "worker" => bootstrap::worker().run_worker(),
-        "scheduler" => bootstrap::scheduler().run_scheduler(),
-        "websocket" => bootstrap::websocket().run_websocket(),
-        "cli" => bootstrap::cli().run_cli(),
-        _ => bootstrap::http().run_http(),
+        "worker" => bootstrap::worker::builder().run_worker(),
+        "scheduler" => bootstrap::scheduler::builder().run_scheduler(),
+        "websocket" => bootstrap::websocket::builder().run_websocket(),
+        "cli" => bootstrap::cli::builder().run_cli(),
+        "http" | "" => bootstrap::http::builder().run_http(),
+        _ => bootstrap::http::builder().run_http(),
     }
 }
 ```
@@ -425,7 +477,7 @@ PROCESS=http     cargo run          # API server
 PROCESS=worker   cargo run          # job processor
 PROCESS=scheduler cargo run         # cron runner (one instance)
 PROCESS=websocket cargo run         # WebSocket server
-cargo run -- db:migrate             # CLI (auto-detected)
+PROCESS=cli cargo run -- db:migrate # CLI command
 ```
 
 ---

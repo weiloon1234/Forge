@@ -12,6 +12,7 @@ use super::column::DatatableColumn;
 use super::context::DatatableContext;
 use super::filter_meta::DatatableFilterRow;
 use super::mapping::DatatableMapping;
+use super::relation_filter::DatatableRelationFilter;
 use super::request::DatatableRequest;
 use super::response::{DatatableExportAccepted, DatatableJsonResponse};
 use super::sort::DatatableSort;
@@ -133,6 +134,12 @@ pub trait Datatable: Send + Sync + 'static {
     /// Frontend filter metadata (controls, labels, options).
     async fn available_filters(_ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> {
         Ok(Vec::new())
+    }
+
+    /// Relation-backed auto filters. These are opt-in and typed so relation
+    /// filter inputs never resolve from arbitrary string paths.
+    fn relation_filters() -> Vec<DatatableRelationFilter<Self::Row, Self::Query>> {
+        Vec::new()
     }
 
     /// Default sort when no sort is specified in the request.

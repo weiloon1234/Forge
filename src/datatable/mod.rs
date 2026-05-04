@@ -10,6 +10,7 @@ pub mod json;
 pub mod mapping;
 pub(crate) mod query_pipeline;
 pub mod registry;
+pub mod relation_filter;
 pub mod request;
 pub mod response;
 pub mod sort;
@@ -25,6 +26,7 @@ pub use filter_meta::{
 };
 pub use mapping::DatatableMapping;
 pub use registry::DatatableRegistry;
+pub use relation_filter::{DatatableRelationColumn, DatatableRelationFilter};
 pub use request::{
     DatatableFilterInput, DatatableFilterOp, DatatableFilterValue, DatatableRequest,
     DatatableSortInput,

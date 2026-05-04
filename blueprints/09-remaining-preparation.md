@@ -1,12 +1,12 @@
 # Forge Framework Remaining Preparation Blueprint
 
-> **Status:** Reviewed 2026-04-11. Most items are now done. See status per section.
+> **Status:** Reviewed 2026-05-04. Core framework preparation is complete enough for consumer scaffold stabilization. See status per section.
 >
-> Defines what still belongs to the **framework stage** before building or stabilizing consumer app scaffolds.
+> Defines the framework-stage contracts that consumer app scaffolds rely on.
 
 ---
 
-# Preparation Status Summary (2026-04-11)
+# Preparation Status Summary (2026-05-04)
 
 | # | Area | Status | Notes |
 |---|------|--------|-------|
@@ -16,7 +16,7 @@
 | 4 | Runtime Kernel Contracts | ✅ Done | Covered by lifecycle blueprint |
 | 5 | Error Model | ✅ Done | Structured `Error` enum with conversions |
 | 6 | Database / ORM Core AST | ✅ Done | Full AST query builder, Model trait, relations, migrations |
-| 7 | Auth Contract | 🔄 Partial | Actor/role/permission/policy done, custom authenticator TODO |
+| 7 | Auth Contract | ✅ Done | Token/session guards, non-JWT bearer auth, policies, extractors, MFA support |
 | 8 | Plugin System Contract | ✅ Done | Lifecycle, dependencies, assets, scaffolding |
 | 10 | Crate Split / Workspace | Deferred | Single crate works, split when publish-ready |
 
@@ -36,17 +36,17 @@ So if you want to start a separate codebase for a future consumer app scaffold/t
 
 # Current Stage Clarification
 
-You are still in the **framework preparation stage**.
+The core framework preparation stage is **largely complete**.
 
-That means the most important work now is not the final consumer app layout.
+That means consumer scaffold stabilization can proceed without waiting on new framework behavior.
 
-The most important work now is to finish the framework-side contracts that consumer apps will rely on.
+The remaining framework architecture decision is crate splitting, which is deferred until publish-readiness.
 
 ---
 
-# What Still Needs Framework-Level Preparation
+# Framework-Level Preparation Status
 
-These are the major remaining blueprint areas that should be settled at framework level.
+These were the major framework-level areas that needed to be settled before consumer apps relied on Forge.
 
 ---
 
@@ -229,15 +229,13 @@ This is still framework-level, not app-level.
 
 # 7. Auth Contract Blueprint
 
-> **Status: 🔄 Partially done**
+> **Status: ✅ Done**
 >
-> **Done:** Actor, AuthError, BearerAuthenticator trait, Policy trait, AuthManager, Authorizer, StaticBearerAuthenticator, CurrentActor/OptionalActor extractors, route-level auth via AccessScope.
->
-> **TODO:** Custom authenticator — user will implement own auth method (not JWT). Database-backed authenticator is the main remaining gap.
+> **Done:** Actor, AuthError, BearerAuthenticator trait, TokenAuthenticator, SessionManager, AuthManager, Authorizer, StaticBearerAuthenticator, CurrentActor/OptionalActor/Auth extractors, route-level auth via AccessScope, guard config for token/session drivers, token abilities, refresh rotation, password reset, email verification, and MFA support.
 
 ## Why this matters
 
-Auth is still partial.
+Auth is now stable enough for consumer apps.
 
 Before consumer scaffolds are considered stable, framework should define:
 
@@ -249,7 +247,7 @@ Before consumer scaffolds are considered stable, framework should define:
 - optional actor extractor behavior
 - route option integration
 
-Especially because you do **not** want JWT assumptions forced into the framework.
+The framework keeps auth non-JWT by default while still allowing project-specific authenticators through the existing guard/authenticator contracts.
 
 ---
 
@@ -274,7 +272,7 @@ This needs a stable contract before consumer apps rely heavily on it.
 
 ---
 
-# 9. Framework Crate Split / Workspace Blueprint
+# 10. Framework Crate Split / Workspace Blueprint
 
 ## Why this matters
 
@@ -298,7 +296,7 @@ This is a framework architecture issue, not a consumer app issue.
 
 ---
 
-# Priority Recommendation (Updated 2026-04-11)
+# Priority Recommendation (Updated 2026-05-04)
 
 ## ✅ Done — No further work needed
 1. App Builder Final Contract
@@ -308,10 +306,10 @@ This is a framework architecture issue, not a consumer app issue.
 5. Runtime Kernel Contracts
 6. Error Model Blueprint
 7. Plugin Contract Blueprint
+8. Auth Contract
 
-## 🔄 Remaining
-8. **Auth Contract** — Custom/database-backed authenticator (user will implement own)
-9. **Crate Split / Workspace** — Deferred until publish-ready
+## Deferred
+10. **Crate Split / Workspace** — Deferred until publish-ready
 
 ---
 
@@ -345,9 +343,7 @@ That would be a **consumer scaffold / starter template repo**, not the main fram
 # Final Decision Guidance
 
 ## If your goal is framework stabilization
-Do **not** switch focus fully to consumer scaffold yet.
-
-You still have several framework-level contracts that should be locked first.
+Focus on small correctness, docs, and verification fixes unless a consumer app exposes a concrete framework gap.
 
 ## If your goal is template experimentation
 Then yes, create a separate scaffold codebase and keep it loosely coupled for now.
@@ -356,9 +352,9 @@ Then yes, create a separate scaffold codebase and keep it loosely coupled for no
 
 # Strong Recommendation
 
-The framework preparation stage is **largely complete**. 8 out of 9 original items are done.
+The framework preparation stage is **largely complete**. The original framework contract items are done.
 
-The remaining item (Auth custom authenticator) is dependent on the user's specific project requirements — the framework provides the trait and infrastructure (`BearerAuthenticator`, `AuthManager`, `CurrentActor` extractor). The user will implement their own authentication method.
+Crate splitting remains a packaging/publish-readiness decision, not a blocker for consumer app scaffolds.
 
 ---
 
@@ -366,7 +362,6 @@ The remaining item (Auth custom authenticator) is dependent on the user's specif
 
 > Entry-point blueprint = mostly consumer app scaffold territory.
 >
-> Framework stage is not finished yet.
+> Core framework contracts are stable enough for consumer scaffolds.
 >
-> Lock the core contracts first, then freeze the scaffold shape.
-
+> Keep crate splitting deferred until publish-readiness, then freeze the scaffold shape around real consumer usage.

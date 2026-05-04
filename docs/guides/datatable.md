@@ -35,6 +35,7 @@ trait Datatable: Send + Sync + 'static {
     fn mappings() -> Vec<DatatableMapping<Self::Row>> { vec![] }
     async fn filters(ctx: &DatatableContext, query: Self::Query) -> Result<Self::Query> { Ok(query) }
     async fn available_filters(ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> { Ok(vec![]) }
+    fn relation_filters() -> Vec<DatatableRelationFilter<Self::Row, Self::Query>> { vec![] }
     fn default_sort() -> Vec<DatatableSort<Self::Row>> { vec![] }
 
     async fn json(app, actor, request) -> Result<DatatableJsonResponse>;
@@ -70,6 +71,7 @@ Rules:
 - model fields get implicit sort/filter targets
 - projection fields get implicit sort-by-alias support
 - projection auto-filtering is explicit: use `filter_by(...)` for `WHERE` and `filter_having(...)` for `HAVING`
+- relation auto-filtering is explicit: use `relation_filters()` for typed `where_has(...)` filters
 
 ## Model Datatable Example
 
@@ -118,6 +120,65 @@ impl Datatable for OrdersDatatable {
     }
 }
 ```
+
+## Relation Filters
+
+Model datatables can opt in to relation-backed filters without accepting arbitrary string paths. Declare the relation and target column in `relation_filters()`:
+
+```rust
+fn order_merchant() -> RelationDef<Order, Merchant> {
+    belongs_to(
+        Order::MERCHANT_ID,
+        Merchant::ID,
+        |order| Some(order.merchant_id),
+        |_order, _merchant| {},
+    )
+}
+
+fn order_tags() -> ManyToManyDef<Order, Tag> {
+    many_to_many(
+        Order::ID,
+        "order_tags",
+        "order_id",
+        "tag_id",
+        Tag::ID,
+        |order| order.id,
+        |_order, _tags| {},
+    )
+}
+
+fn relation_filters() -> Vec<DatatableRelationFilter<Self::Row, Self::Query>> {
+    vec![
+        DatatableRelationFilter::relation(
+            "merchant.name",
+            order_merchant(),
+            Merchant::NAME,
+        ),
+        DatatableRelationFilter::many_to_many(
+            "tags.name",
+            order_tags(),
+            Tag::NAME,
+        ),
+        DatatableRelationFilter::relation_columns(
+            "merchant.name|merchant.slug",
+            order_merchant(),
+            [
+                DatatableRelationColumn::field(Merchant::NAME),
+                DatatableRelationColumn::field(Merchant::SLUG),
+            ],
+        ),
+    ]
+}
+```
+
+Supported relation filter input:
+
+- structured fields such as `merchant.name`
+- legacy hyphen aliases such as `merchant-name`
+- `LikeAny` over declared relation columns, such as `merchant.name|merchant.slug`
+- normal filter ops like `Eq`, `Like`, `Has`, `HasLike`, date, datetime, and numeric comparisons when the target column type supports them
+
+Projection datatables should keep relation-like behavior explicit with `filter_by(...)`, `filter_having(...)`, or a custom `filters()` hook.
 
 ## Projection / Report Example
 

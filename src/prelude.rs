@@ -134,8 +134,9 @@ pub use crate::datatable::{
     Datatable, DatatableColumn, DatatableContext, DatatableExportDelivery, DatatableFilterBinding,
     DatatableFilterField, DatatableFilterInput, DatatableFilterKind, DatatableFilterOp,
     DatatableFilterOption, DatatableFilterRow, DatatableFilterValue, DatatableFilterValueKind,
-    DatatableJsonResponse, DatatableMapping, DatatableRegistry, DatatableRequest, DatatableSort,
-    DatatableSortInput, DatatableValue, GeneratedDatatableExport,
+    DatatableJsonResponse, DatatableMapping, DatatableRegistry, DatatableRelationColumn,
+    DatatableRelationFilter, DatatableRequest, DatatableSort, DatatableSortInput, DatatableValue,
+    GeneratedDatatableExport,
 };
 
 pub use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption, ForgeAppEnum};

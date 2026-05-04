@@ -38,6 +38,7 @@ trait Datatable
   fn mappings() -> Vec<DatatableMapping<Self::Row>>
   fn filters<'life0, 'async_trait>(
   fn available_filters<'life0, 'async_trait>(
+  fn relation_filters( ) -> Vec<DatatableRelationFilter<Self::Row, Self::Query>>
   fn default_sort() -> Vec<DatatableSort<Self::Row>>
   fn json<'life0, 'life1, 'async_trait>(
   fn download<'life0, 'life1, 'async_trait>(
@@ -77,6 +78,7 @@ async fn dispatch_export<D: Datatable + ?Sized>( app: &AppContext, actor: Option
 
 ```rust
 fn apply_auto_filters<Row: 'static, Q>( query: Q, filters: &[DatatableFilterInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>
+fn apply_auto_filters_with_relation_filters<Row: 'static, Q>( query: Q, filters: &[DatatableFilterInput], columns: &[DatatableColumn<Row>], relation_filters: &[DatatableRelationFilter<Row, Q>], ) -> Result<Q>
 fn apply_default_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSort<Row>], ) -> Result<Q>
 fn apply_sorts<Row: 'static, Q>( query: Q, sorts: &[DatatableSortInput], columns: &[DatatableColumn<Row>], ) -> Result<Q>
 ```
@@ -145,6 +147,19 @@ trait DynDatatable
   fn json<'life0, 'life1, 'life2, 'async_trait>(
   fn download<'life0, 'life1, 'life2, 'async_trait>(
   fn queue_email<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+```
+
+## forge::datatable::relation_filter
+
+```rust
+struct DatatableRelationColumn
+  fn field<T>(column: Column<Row, T>) -> Self
+struct DatatableRelationFilter
+  fn alias(self, alias: impl Into<String>) -> Self
+  fn relation<To, T>( field: impl Into<String>, relation: RelationDef<From, To>, column: Column<To, T>, ) -> Self
+  fn relation_columns<To>( field: impl Into<String>, relation: RelationDef<From, To>, columns: impl IntoIterator<Item = DatatableRelationColumn<To>>, ) -> Self
+  fn many_to_many<To, Pivot, T>( field: impl Into<String>, relation: ManyToManyDef<From, To, Pivot>, column: Column<To, T>, ) -> Self
+  fn many_to_many_columns<To, Pivot>( field: impl Into<String>, relation: ManyToManyDef<From, To, Pivot>, columns: impl IntoIterator<Item = DatatableRelationColumn<To>>, ) -> Self
 ```
 
 ## forge::datatable::request

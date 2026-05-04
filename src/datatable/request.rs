@@ -285,3 +285,116 @@ impl DatatableRequest {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DatatableFilterInput, DatatableFilterOp, DatatableFilterValue, DatatableRequest};
+    use std::collections::HashMap;
+
+    fn query_params(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn from_query_params_uses_defaults_and_ignores_non_filter_params() {
+        let params = query_params(&[("sort", "name"), ("direction", "asc")]);
+
+        let request = DatatableRequest::from_query_params(&params);
+
+        assert_eq!(request.page, 1);
+        assert_eq!(request.per_page, 20);
+        assert!(request.filters.is_empty());
+        assert_eq!(request.search, None);
+    }
+
+    #[test]
+    fn from_query_params_normalizes_legacy_filter_prefixes() {
+        let params = query_params(&[
+            ("page", "3"),
+            ("per_page", "50"),
+            ("search", "orders"),
+            ("f-status", "active"),
+            ("f-like-name", "ali"),
+            ("f-like-any-name|email", "bob"),
+            ("f-gte-total", "100"),
+            ("f-lte-total", "200"),
+            ("f-date-from-created_at", "2026-01-01"),
+            ("f-date-to-created_at", "2026-01-31"),
+            ("f-datetime-to-published_at", "2026-01-31T23:59:59Z"),
+            ("f-has-profile_id", "1"),
+            ("f-has-like-author_name", "sam"),
+        ]);
+
+        let request = DatatableRequest::from_query_params(&params);
+
+        assert_eq!(request.page, 3);
+        assert_eq!(request.per_page, 50);
+        assert_eq!(request.search.as_deref(), Some("orders"));
+        assert_eq!(request.filters.len(), 10);
+        assert!(request.filters.contains(&filter(
+            "status",
+            DatatableFilterOp::Eq,
+            DatatableFilterValue::Text("active".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "name",
+            DatatableFilterOp::Like,
+            DatatableFilterValue::Text("ali".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "name|email",
+            DatatableFilterOp::LikeAny,
+            DatatableFilterValue::Text("bob".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "total",
+            DatatableFilterOp::Gte,
+            DatatableFilterValue::Text("100".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "total",
+            DatatableFilterOp::Lte,
+            DatatableFilterValue::Text("200".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "created_at",
+            DatatableFilterOp::DateFrom,
+            DatatableFilterValue::Text("2026-01-01".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "created_at",
+            DatatableFilterOp::DateTo,
+            DatatableFilterValue::Text("2026-01-31".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "published_at",
+            DatatableFilterOp::DatetimeTo,
+            DatatableFilterValue::Text("2026-01-31T23:59:59Z".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "profile_id",
+            DatatableFilterOp::Has,
+            DatatableFilterValue::Text("1".to_string())
+        )));
+        assert!(request.filters.contains(&filter(
+            "author_name",
+            DatatableFilterOp::HasLike,
+            DatatableFilterValue::Text("sam".to_string())
+        )));
+    }
+
+    fn filter(
+        field: &str,
+        op: DatatableFilterOp,
+        value: DatatableFilterValue,
+    ) -> DatatableFilterInput {
+        DatatableFilterInput {
+            field: field.to_string(),
+            op,
+            value,
+        }
+    }
+}

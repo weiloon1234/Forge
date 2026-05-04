@@ -219,8 +219,9 @@ pub use datatable::{
     DatatableExportDelivery, DatatableFilterBinding, DatatableFilterField, DatatableFilterInput,
     DatatableFilterKind, DatatableFilterOp, DatatableFilterOption, DatatableFilterRow,
     DatatableFilterValue, DatatableFilterValueKind, DatatableJsonResponse, DatatableMapping,
-    DatatablePaginationMeta, DatatableQuery, DatatableRegistry, DatatableRequest, DatatableSort,
-    DatatableSortInput, DatatableValue, GeneratedDatatableExport,
+    DatatablePaginationMeta, DatatableQuery, DatatableRegistry, DatatableRelationColumn,
+    DatatableRelationFilter, DatatableRequest, DatatableSort, DatatableSortInput, DatatableValue,
+    GeneratedDatatableExport,
 };
 
 pub use app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption, ForgeAppEnum};

@@ -2283,6 +2283,7 @@ trait Datatable: Send + Sync + 'static {
     fn mappings() -> Vec<DatatableMapping<Self::Row>> { vec![] }
     async fn filters(ctx: &DatatableContext, query: Self::Query) -> Result<Self::Query> { Ok(query) }
     async fn available_filters(ctx: &DatatableContext) -> Result<Vec<DatatableFilterRow>> { Ok(vec![]) }
+    fn relation_filters() -> Vec<DatatableRelationFilter<Self::Row, Self::Query>> { vec![] }
     fn default_sort() -> Vec<DatatableSort<Self::Row>> { vec![] }
     async fn json(app, actor, request) -> Result<DatatableJsonResponse>;
     async fn download(app, actor, request) -> Result<Response>;
@@ -2299,6 +2300,8 @@ trait DatatableExportDelivery: Send + Sync + 'static {
 | Name | Summary |
 |------|---------|
 | `DatatableColumn<M>` | Column descriptor: name, label, sortable, filterable, exportable |
+| `DatatableRelationFilter<M, Q>` | Typed relation-backed auto-filter declaration |
+| `DatatableRelationColumn<M>` | Relation target column descriptor |
 | `DatatableSort<M>` | Default sort: column + direction |
 | `DatatableMapping<M>` | Computed output field |
 | `DatatableRequest` | Client request: page, per_page, sort, filters, search |

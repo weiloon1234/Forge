@@ -4,6 +4,7 @@ use crate::support::{Date, DateTime, LocalDateTime};
 
 use super::column::{DatatableColumn, DatatableFilterScope};
 use super::datatable_trait::DatatableQuery;
+use super::relation_filter::DatatableRelationFilter;
 use super::request::{
     DatatableFilterInput, DatatableFilterOp, DatatableFilterValue, DatatableSortInput,
 };
@@ -15,15 +16,35 @@ use super::sort::DatatableSort;
 
 /// Apply structured filter inputs to a datatable query.
 pub fn apply_auto_filters<Row: 'static, Q>(
-    mut query: Q,
+    query: Q,
     filters: &[DatatableFilterInput],
     columns: &[DatatableColumn<Row>],
 ) -> Result<Q>
 where
     Q: DatatableQuery<Row>,
 {
+    apply_auto_filters_with_relation_filters(query, filters, columns, &[])
+}
+
+pub fn apply_auto_filters_with_relation_filters<Row: 'static, Q>(
+    mut query: Q,
+    filters: &[DatatableFilterInput],
+    columns: &[DatatableColumn<Row>],
+    relation_filters: &[DatatableRelationFilter<Row, Q>],
+) -> Result<Q>
+where
+    Q: DatatableQuery<Row>,
+{
     for filter in filters {
         if filter.op == DatatableFilterOp::LikeAny {
+            if let Some(relation_filter) = relation_filters
+                .iter()
+                .find(|relation_filter| relation_filter.matches(&filter.field))
+            {
+                query = relation_filter.apply(query, filter)?;
+                continue;
+            }
+
             query = apply_like_any(query, filter, columns)?;
             continue;
         }
@@ -37,6 +58,14 @@ where
                 )));
             }
             None => {
+                if let Some(relation_filter) = relation_filters
+                    .iter()
+                    .find(|relation_filter| relation_filter.matches(&filter.field))
+                {
+                    query = relation_filter.apply(query, filter)?;
+                    continue;
+                }
+
                 return Err(Error::message(format!(
                     "unknown filter field '{}'",
                     filter.field
@@ -120,7 +149,7 @@ where
     ))
 }
 
-fn build_filter_condition(
+pub(crate) fn build_filter_condition(
     op: &DatatableFilterOp,
     target_expr: Expr,
     value: &DatatableFilterValue,

@@ -63,33 +63,33 @@ async fn health() -> impl IntoResponse {
 ## Architecture
 
 ```
-Your App                          Forge Framework
-─────────                         ───────────────
-main.rs                           ┌─────────────────────────┐
-  App::builder()                  │  AppBuilder             │
-    .register_provider(...)  ───> │    ├─ ServiceRegistrar   ��
-    .register_routes(...)    ───> │    ├─ HttpRegistrar      │
-    .register_commands(...)  ───> ���    ├─ CommandRegistry     │
-    .register_schedule(...)  ───> │    ├─ ScheduleRegistry    │
-    .run_http()              ───> │    └─ HttpKernel::serve() │
-                                  └─────────────────────────┘
-                                           │
-                                  ┌────────┴────────┐
-                                  │   AppContext     │
-                                  │  ┌────────────┐ │
-                                  │  │ Database    │ │
-                                  │  │ Redis      │ │
-                                  │  │ Auth       │ │
-                                  │  │ Storage    │ │
-                                  │  │ Email      │ │
-                                  │  │ Cache      │ │
-                                  │  │ Jobs       │ │
-                                  │  │ WebSocket  │ │
-                                  │  │ Events     │ │
-                                  │  │ I18n       │ │
-                                  │  │ ...        │ │
-                                  │  └────────────┘ │
-                                  └─────────────────┘
+Your App                         Forge Framework
+--------                         ---------------
+main.rs
+  App::builder()
+    .register_provider(...) ---> +----------------------+
+    .register_routes(...)   ---> | AppBuilder           |
+    .register_commands(...) ---> | - ServiceRegistrar   |
+    .register_schedule(...) ---> | - HttpRegistrar      |
+    .run_http()             ---> | - CommandRegistry    |
+                                 | - ScheduleRegistry   |
+                                 | - HttpKernel::serve  |
+                                 +----------+-----------+
+                                            |
+                                            v
+                                 +----------------------+
+                                 | AppContext           |
+                                 | - Database           |
+                                 | - Redis              |
+                                 | - Auth               |
+                                 | - Storage            |
+                                 | - Email              |
+                                 | - Cache              |
+                                 | - Jobs               |
+                                 | - WebSocket          |
+                                 | - Events             |
+                                 | - I18n               |
+                                 +----------------------+
 ```
 
 ## Runtime Kernels

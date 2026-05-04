@@ -901,11 +901,12 @@ impl AppBuilder {
             backend_kind,
             ReadinessRegistryBuilder::freeze_shared(readiness_registry),
         ));
-        let ws_history_ttl = app.config().websocket()?.history_ttl_seconds;
+        let ws_config = app.config().websocket()?;
         let websocket_publisher = Arc::new(WebSocketPublisher::new(
             backend.clone(),
             diagnostics.clone(),
-            ws_history_ttl,
+            ws_config.history_ttl_seconds,
+            ws_config.history_buffer_size,
         ));
         let event_bus = Arc::new(EventBus::new(
             app.clone(),

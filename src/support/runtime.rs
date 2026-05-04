@@ -620,11 +620,11 @@ impl RedisRuntime {
         }
 
         let mut pubsub = self.client.get_async_pubsub().await.map_err(Error::other)?;
+        let mut logical_topics = HashMap::new();
         for topic in topics {
-            pubsub
-                .subscribe(self.websocket_topic(topic))
-                .await
-                .map_err(Error::other)?;
+            let redis_topic = self.websocket_topic(topic);
+            pubsub.subscribe(&redis_topic).await.map_err(Error::other)?;
+            logical_topics.insert(redis_topic, topic.clone());
         }
 
         let mut stream = pubsub.into_on_message();
@@ -635,11 +635,7 @@ impl RedisRuntime {
                     Err(_) => continue,
                 };
                 let raw_topic = message.get_channel_name().to_string();
-                let topic = raw_topic
-                    .rsplit(':')
-                    .next()
-                    .map(ToOwned::to_owned)
-                    .unwrap_or(raw_topic);
+                let topic = logical_topics.get(&raw_topic).cloned().unwrap_or(raw_topic);
                 let _ = tx.send(PubSubMessage { topic, payload });
             }
         });

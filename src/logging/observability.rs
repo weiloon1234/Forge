@@ -447,8 +447,6 @@ async fn ws_history(
     axum::extract::Path(channel): axum::extract::Path<crate::support::ChannelId>,
     axum::extract::Query(params): axum::extract::Query<WsHistoryQuery>,
 ) -> Response {
-    const HISTORY_BUFFER_MAX: i64 = 50;
-
     let registry = match app.websocket_channels() {
         Ok(registry) => registry,
         Err(error) => return internal_error_response(error),
@@ -461,10 +459,15 @@ async fn ws_history(
             .into_response();
     }
 
+    let websocket_config = match app.config().websocket() {
+        Ok(config) => config,
+        Err(error) => return internal_error_response(error),
+    };
+    let history_buffer_max = websocket_config.history_buffer_size.max(1) as i64;
     let limit = params
         .limit
-        .unwrap_or(HISTORY_BUFFER_MAX)
-        .clamp(1, HISTORY_BUFFER_MAX);
+        .unwrap_or(history_buffer_max)
+        .clamp(1, history_buffer_max);
 
     let backend = match crate::support::runtime::RuntimeBackend::from_config(app.config()) {
         Ok(backend) => backend,

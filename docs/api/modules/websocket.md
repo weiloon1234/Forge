@@ -14,8 +14,8 @@ pub const PRESENCE_LEAVE_EVENT: ChannelEventId;
 pub const SUBSCRIBED_EVENT: ChannelEventId;
 pub const SYSTEM_CHANNEL: ChannelId;
 pub const UNSUBSCRIBED_EVENT: ChannelEventId;
-pub type AuthorizeCallback = Arc<dyn for<'a> Fn(&'a WebSocketContext, &'a ChannelId, Option<&'a str>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> + Send + Sync>;
-pub type LifecycleCallback = Arc<dyn for<'a> Fn(&'a WebSocketContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> + Send + Sync>;
+pub type AuthorizeCallback = Arc<dyn Fn(WebSocketContext, ChannelId, Option<String>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+pub type LifecycleCallback = Arc<dyn Fn(WebSocketContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 pub type WebSocketRouteRegistrar = Arc<dyn Fn(&mut WebSocketRegistrar) -> Result<()> + Send + Sync>;
 enum ClientAction { Subscribe, Unsubscribe, Message, ClientEvent }
 struct ClientMessage

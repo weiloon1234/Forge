@@ -72,6 +72,7 @@ mod app {
         }
 
         pub const SECURE_CHAT_CHANNEL: ChannelId = ChannelId::new("secure_chat");
+        pub const SECURE_PRESENCE_CHANNEL: ChannelId = ChannelId::new("secure_presence");
         pub const ECHO_EVENT: ChannelEventId = ChannelEventId::new("echo");
     }
 
@@ -185,6 +186,14 @@ mod app {
                     .guard(ids::AuthGuard::Api)
                     .permission(ids::Ability::WsChat),
             )?;
+            registrar.channel_with_options(
+                ids::SECURE_PRESENCE_CHANNEL,
+                |_context: WebSocketContext, _payload: serde_json::Value| async move { Ok(()) },
+                WebSocketChannelOptions::new()
+                    .presence(true)
+                    .guard(ids::AuthGuard::Api)
+                    .permission(ids::Ability::WsChat),
+            )?;
             Ok(())
         }
     }
@@ -275,6 +284,19 @@ async fn connect_websocket_with_token(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("websocket server did not become ready");
+}
+
+async fn next_websocket_message(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> ServerMessage {
+    let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("timed out waiting for websocket frame")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(frame.to_text().unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -513,6 +535,91 @@ async fn guarded_websocket_channels_require_auth_and_permissions() {
     assert_eq!(echoed.event, app::ids::ECHO_EVENT);
     assert_eq!(echoed.payload["actor_id"], "viewer-1");
     assert_eq!(echoed.payload["body"], "hello");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn disconnect_user_closes_authenticated_websocket_connections_and_broadcasts_presence_leave()
+{
+    let config_dir = tempdir().unwrap();
+    let server_port = free_port();
+    let websocket_port = free_port();
+    write_auth_config(
+        config_dir.path(),
+        server_port,
+        websocket_port,
+        &format!("auth-ws-disconnect-{websocket_port}"),
+    );
+
+    let kernel = build_websocket_app(config_dir.path())
+        .build_websocket_kernel()
+        .await
+        .unwrap();
+    let app = kernel.app().clone();
+    let server = tokio::spawn(async move { kernel.serve().await.unwrap() });
+
+    let url = format!("ws://127.0.0.1:{websocket_port}/ws");
+    let mut observer = connect_websocket_with_token(&url, Some("admin-token")).await;
+    let mut target = connect_websocket_with_token(&url, Some("viewer-token")).await;
+
+    observer
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage {
+                action: ClientAction::Subscribe,
+                channel: app::ids::SECURE_PRESENCE_CHANNEL,
+                room: Some("team".to_string()),
+                payload: None,
+                event: None,
+                ack_id: None,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_websocket_message(&mut observer).await.event,
+        SUBSCRIBED_EVENT
+    );
+
+    target
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage {
+                action: ClientAction::Subscribe,
+                channel: app::ids::SECURE_PRESENCE_CHANNEL,
+                room: Some("team".to_string()),
+                payload: None,
+                event: None,
+                ack_id: None,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let observer_join = next_websocket_message(&mut observer).await;
+    assert_eq!(observer_join.event, PRESENCE_JOIN_EVENT);
+    assert_eq!(observer_join.payload["actor_id"], "viewer-1");
+    assert_eq!(
+        next_websocket_message(&mut target).await.event,
+        SUBSCRIBED_EVENT
+    );
+
+    app.websocket()
+        .unwrap()
+        .disconnect_user("viewer-1")
+        .await
+        .unwrap();
+
+    let leave = next_websocket_message(&mut observer).await;
+    assert_eq!(leave.event, PRESENCE_LEAVE_EVENT);
+    assert_eq!(leave.payload["actor_id"], "viewer-1");
+
+    let _ = tokio::time::timeout(Duration::from_secs(2), target.next())
+        .await
+        .expect("target websocket did not close");
 
     server.abort();
 }

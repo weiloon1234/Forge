@@ -12,7 +12,7 @@ Goal:
 
 # Current State
 
-**Status: Core complete — needs production hardening**
+**Status: Hardened pre-1.0 foundation — ready for framework-level contract testing**
 
 ### What's Built
 - Channel-based pub/sub (Redis + memory backends)
@@ -23,23 +23,20 @@ Goal:
 - Permission checks per channel
 - Multi-instance via Redis pub/sub
 - Comprehensive diagnostics (connection/subscription/message counts)
+- Heartbeat/ping-pong with stale connection cleanup
+- Per-connection rate limiting and per-user connection limits
+- Dynamic subscription authorization callbacks
+- Client event relay, message acknowledgments, and replay history
+- Bounded outbound queues with slow-consumer disconnect
+- Origin allow-list support for browser handshakes
+- Lifecycle cleanup on unsubscribe, socket close, heartbeat timeout, and force disconnect
 
-### What's Missing (Priority-Ordered)
+### What's Still Missing / Deferred
 
 | Feature | Priority | Impact |
 |---------|----------|--------|
-| Heartbeat/ping-pong | **Critical** | Dead connections hang for TCP timeout |
-| Per-connection rate limiting | **Critical** | No flood protection |
-| Channel authorization callbacks | **Critical** | Can't do dynamic per-subscription access control |
-| Private channels | **Critical** | Can't build user-scoped real-time features |
-| Client events (typing, whisper) | **High** | Can't build collaborative features |
-| Presence change events (join/leave broadcast) | **High** | Others don't know when someone joins |
-| Max connections per user | **High** | No multi-device abuse prevention |
-| Force disconnect API | **High** | Can't kick banned users |
-| Channel lifecycle hooks (on_join, on_leave) | **Medium** | Can't auto-send "X joined" messages |
-| Message acknowledgment | **Medium** | No delivery confirmation |
-| Connection recovery | **Low** | Mobile reconnect loses state |
-| Message history/replay | **Low** | New subscribers miss prior messages |
+| Private channel route helpers | **Medium** | Guarded channels + `.authorize(...)` cover this today, but first-class helpers would improve DX |
+| Durable connection recovery | **Medium** | Current replay is bounded history, not session resume with sequence numbers |
 | Binary frame support | **Low** | Text-only currently |
 
 ---
@@ -48,8 +45,7 @@ Goal:
 
 ## 1.1 Heartbeat / Ping-Pong
 
-**Current:** Ping/Pong frames are silently ignored (line 307 in websocket.rs).
-**Fix:** Server sends periodic Ping frames. If no Pong received within timeout, disconnect.
+**Status:** Done. Server sends periodic Ping frames, responds to client Ping frames with Pong, and disconnects stale sockets.
 
 ### Config
 
@@ -74,8 +70,7 @@ No consumer action needed — automatic.
 
 ## 1.2 Per-Connection Rate Limiting
 
-**Current:** Zero protection — client can flood with unlimited messages.
-**Fix:** Track message count per connection per window. Drop + warn if exceeded.
+**Status:** Done. Forge tracks messages per connection in a one-second window and returns an error event when exceeded.
 
 ### Config
 
@@ -95,8 +90,7 @@ max_messages_per_second = 50
 
 ## 1.3 Channel Authorization Callbacks
 
-**Current:** Only static guard + permission checks.
-**Fix:** Allow dynamic per-subscription authorization via callback.
+**Status:** Done. Static guard/permission checks run first, then optional dynamic authorization.
 
 ### Consumer DX
 
@@ -120,38 +114,18 @@ registrar.channel_with_options(
 
 ### Internal Design
 
-- Add `authorize: Option<AuthorizeCallback>` to `WebSocketChannelOptions`
-- Type: `Box<dyn Fn(&WebSocketContext, &ChannelId, Option<&str>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>`
+- `WebSocketChannelOptions` stores `authorize: Option<AuthorizeCallback>`
+- Callback receives owned `WebSocketContext`, `ChannelId`, and `Option<String>` room values
 - Called after guard/permission checks, before subscription is confirmed
-- If callback returns Err, send ERROR_EVENT and reject subscription
+- If callback returns Err, Forge sends `ERROR_EVENT` and rejects subscription
 
 ---
 
 ## 1.4 Private Channels
 
-**Current:** No concept of user-scoped channels.
-**Fix:** Convention-based private channels where only the channel owner can subscribe.
+**Status:** Deferred. Use guarded channels plus `.authorize(...)` for user-scoped access today.
 
-### Consumer DX
-
-```rust
-// Register private channel pattern
-registrar.private_channel("user", |ctx, user_id| async move {
-    // Automatically checks actor.id == user_id
-    Ok(())
-});
-
-// Client subscribes to: private-user.{user_id}
-// Only the user with that ID can subscribe
-```
-
-### Internal Design
-
-- Channel name prefix: `private-{scope}.{id}` (e.g., `private-user.123`)
-- On subscribe, extract the ID from the channel name
-- Verify `actor.id == extracted_id` (for simple cases)
-- Or use custom authorize callback for complex cases
-- Private channels don't need explicit registration if auto-auth is sufficient
+First-class private-channel helpers can be added later once route-pattern conventions are stable.
 
 ---
 
@@ -212,7 +186,6 @@ registrar.channel_with_options(
     handle_chat,
     WebSocketChannelOptions::new()
         .allow_client_events(true)  // enable relay
-        .client_event_prefix("client-")  // only events starting with "client-" are relayed
 );
 ```
 
@@ -290,14 +263,14 @@ On reconnect, client can resume from last received message.
 | 1.1 | Heartbeat/ping-pong | ✅ Done — WriterCommand enum, ping task, pong tracking, stale close |
 | 1.2 | Per-connection rate limiting | ✅ Done — per-connection counter, 1s window, error on exceed |
 | 1.3 | Channel authorization callbacks | ✅ Done — AuthorizeCallback, wired into Subscribe flow |
-| 1.4 | Private channels | Design ready — uses authorize callback |
+| 1.4 | Private channels | Deferred — use guarded channels + authorize callback |
 | 1.5 | Max connections per user | ✅ Done — user→connection tracking, limit check on auth |
 | 1.6 | Force disconnect API | ✅ Done — hub + pub/sub command handling |
 | 2.1 | Client events | ✅ Done — ClientAction::ClientEvent, broadcast_except (relay to others) |
 | 2.2 | Presence change events | ✅ Done — auto-broadcast presence:join / presence:leave |
 | 2.3 | Channel lifecycle hooks | ✅ Done — .on_join() / .on_leave() callbacks |
 | 3.1 | Message acknowledgment | ✅ Done — `ack_id` on ClientMessage, ACK_EVENT after handler |
-| 3.2 | Connection recovery | ✅ Done — message buffer (Redis LPUSH+LTRIM), `.replay(count)` on subscribe |
+| 3.2 | Connection recovery | Partial — bounded replay is done; durable session resume is deferred |
 
 ---
 
@@ -305,12 +278,14 @@ On reconnect, client can resume from last received message.
 
 | Concern | Current | Target |
 |---------|---------|--------|
-| Auth per channel | ✅ Guard + permissions | + authorization callbacks |
+| Auth per channel | ✅ Guard + permissions + authorization callbacks | Keep callback API stable |
 | Token revocation | ⚠️ Cached, no re-validation | Add cache TTL or re-validate periodically |
-| Rate limiting | ❌ None | Per-connection message rate limit |
-| Connection limits | ❌ None | Max per user |
-| Force disconnect | ❌ None | API for banning/kicking |
-| CORS | ⚠️ HTTP-layer only | Document WS-specific guidance |
+| Subscription enforcement | ✅ Messages/client events require matching subscription | Keep covered by acceptance tests |
+| Rate limiting | ✅ Per-connection message rate limit | Tune defaults from production usage |
+| Connection limits | ✅ Max per user | Add oldest-connection eviction policy if needed |
+| Force disconnect | ✅ Cross-instance `disconnect_user` | Add connection-level disconnect only if a public connection ID story is needed |
+| Browser origins | ✅ Optional exact Origin allow-list | Document production deployment guidance |
+| Backpressure | ✅ Bounded outbound buffer + disconnect | Expose metrics for slow-consumer disconnects |
 
 ---
 
@@ -327,6 +302,10 @@ heartbeat_interval_seconds = 30
 heartbeat_timeout_seconds = 10
 max_messages_per_second = 50
 max_connections_per_user = 5
+outbound_buffer_size = 1024
+allowed_origins = []
+history_buffer_size = 50
+history_ttl_seconds = 604800
 ```
 
 ---
@@ -337,10 +316,10 @@ max_connections_per_user = 5
 - Redis pub/sub for multi-instance broadcasting (existing)
 - Presence tracked via Redis sets (existing)
 - Auth tokens validated once per connection, cached (existing)
-- Private channel convention: `private-{scope}.{id}` prefix
+- User/private channel access is expressed through guarded channels and `.authorize(...)`
 - Client events are opt-in per channel (not default)
 - Message acknowledgment is opt-in per message (not default)
-- Connection recovery uses Redis Streams for short-term buffer
+- Current recovery is bounded replay from Redis lists; durable session resume remains deferred
 
 ---
 

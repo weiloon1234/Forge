@@ -229,6 +229,15 @@ pub struct WebSocketConfig {
     pub heartbeat_timeout_seconds: u64,
     pub max_messages_per_second: u32,
     pub max_connections_per_user: u32,
+    /// Maximum queued outbound frames per connection before Forge drops the
+    /// connection to protect process memory.
+    pub outbound_buffer_size: usize,
+    /// Optional exact Origin allow-list for browser WebSocket handshakes.
+    /// Empty means any origin is accepted.
+    pub allowed_origins: Vec<String>,
+    /// Maximum number of recent messages retained per channel for replay and
+    /// observability history.
+    pub history_buffer_size: usize,
     /// Idle TTL for `ws:history:<channel>` Redis lists, in seconds.
     /// Refreshed on every published message — active channels never expire;
     /// only channels that go silent for this long get reaped by Redis.
@@ -246,6 +255,9 @@ impl Default for WebSocketConfig {
             heartbeat_timeout_seconds: 10,
             max_messages_per_second: 50,
             max_connections_per_user: 5,
+            outbound_buffer_size: 1024,
+            allowed_origins: Vec::new(),
+            history_buffer_size: 50,
             history_ttl_seconds: 604_800,
         }
     }

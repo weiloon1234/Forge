@@ -331,7 +331,7 @@ TOML-based configuration with environment overlay.
 | `DatabaseConfig` | `url`, `read_url`, `schema`, connection pool settings |
 | `DatabaseModelConfig` | `timestamps_default`, `soft_deletes_default` |
 | `RedisConfig` | `url`, `namespace` |
-| `WebSocketConfig` | `host`, `port`, `path`, `heartbeat`, rate limits |
+| `WebSocketConfig` | `host`, `port`, `path`, heartbeat, rate limits, origin allow-list, outbound buffer, history buffer/TTL |
 | `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency` |
 | `SchedulerConfig` | `tick_interval_ms`, `leader_lease_ttl_ms` |
 | `AuthConfig` | `guards`, `tokens`, `sessions`, `bearer_prefix` |
@@ -1441,6 +1441,8 @@ const ACK_EVENT: ChannelEventId;
 |------|----------|
 | `ClientAction` | `Subscribe`, `Unsubscribe`, `Message`, `ClientEvent` |
 
+Wire values serialize as `snake_case` (`subscribe`, `unsubscribe`, `message`, `client_event`). PascalCase values are accepted only as compatibility aliases.
+
 ### Structs
 
 | Name | Summary |
@@ -1510,9 +1512,15 @@ fn channel_with_options<I, H>(&mut self, id: I, handler: H, options: WebSocketCh
 
 ```rust
 type WebSocketRouteRegistrar = Arc<dyn Fn(&mut WebSocketRegistrar) -> Result<()> + Send + Sync>;
-type LifecycleCallback = Arc<dyn Fn(&WebSocketContext) -> BoxFuture<Result<()>> + Send + Sync>;
-type AuthorizeCallback = Arc<dyn Fn(&WebSocketContext, &ChannelId, Option<&str>) -> BoxFuture<Result<()>> + Send + Sync>;
+type LifecycleCallback = Arc<dyn Fn(WebSocketContext) -> BoxFuture<Result<()>> + Send + Sync>;
+type AuthorizeCallback = Arc<dyn Fn(WebSocketContext, ChannelId, Option<String>) -> BoxFuture<Result<()>> + Send + Sync>;
 ```
+
+Protocol guarantees:
+
+- `message` and `client_event` frames require an active matching channel/room subscription.
+- Channel-wide publishes reach every subscriber on that channel; room publishes reach only exact room subscribers.
+- `on_leave` and `presence:leave` run for unsubscribe, socket close, heartbeat timeout, and force disconnect.
 
 ---
 

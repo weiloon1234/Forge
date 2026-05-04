@@ -37,7 +37,7 @@ App::builder()
 Clients connect to `ws://host:3010/ws` and subscribe to channels by sending:
 
 ```json
-{ "action": "Subscribe", "channel": "chat" }
+{ "action": "subscribe", "channel": "chat" }
 ```
 
 ---
@@ -90,6 +90,8 @@ r.channel_with_options(
 | `.replay(N)` | Buffer last N messages, send to new subscribers |
 | `.on_join(async fn)` | Callback when a user subscribes |
 | `.on_leave(async fn)` | Callback when a user unsubscribes |
+
+`authorize`, `on_join`, and `on_leave` receive owned context values, so async closures can safely move the context, channel, and room into the future.
 
 ---
 
@@ -150,8 +152,10 @@ let count = ctx.presence_count().await?;      // usize
 Rooms are subdivisions within a channel. A client subscribes to a channel + room combination:
 
 ```json
-{ "action": "Subscribe", "channel": "chat", "room": "room:42" }
+{ "action": "subscribe", "channel": "chat", "room": "room:42" }
 ```
+
+A channel-wide publish (`room = None`) reaches every subscriber on that channel, including room subscribers. A room publish reaches only subscribers for that exact room; channel-wide subscribers do not receive room-specific messages unless they also subscribe to that room.
 
 Publish to a specific room:
 
@@ -270,11 +274,13 @@ Works across distributed instances via Redis pub/sub.
 
 Clients communicate via JSON frames over WebSocket:
 
+Client actions are canonical `snake_case`: `subscribe`, `unsubscribe`, `message`, and `client_event`. Forge temporarily accepts the older PascalCase spellings shown in early docs (`Subscribe`, `Unsubscribe`, `Message`, `ClientEvent`) for compatibility, but new clients should use `snake_case`.
+
 ### Subscribe
 
 ```json
-{ "action": "Subscribe", "channel": "chat" }
-{ "action": "Subscribe", "channel": "chat", "room": "room:42" }
+{ "action": "subscribe", "channel": "chat" }
+{ "action": "subscribe", "channel": "chat", "room": "room:42" }
 ```
 
 Server responds:
@@ -286,25 +292,30 @@ Server responds:
 ### Unsubscribe
 
 ```json
-{ "action": "Unsubscribe", "channel": "chat" }
+{ "action": "unsubscribe", "channel": "chat" }
 ```
 
 ### Send Message
 
 ```json
 {
-    "action": "Message",
+    "action": "message",
     "channel": "chat",
-    "event": "message",
     "payload": { "text": "hello" },
     "ack_id": "optional-client-id"
 }
 ```
 
+Clients must subscribe to the exact channel/room before sending `message` or `client_event` frames. A message for `{ "channel": "chat", "room": "room:42" }` requires a matching subscription to that room.
+
 If `ack_id` is provided, server responds with:
 
 ```json
-{ "channel": "system", "event": "ack", "payload": { "ack_id": "optional-client-id" } }
+{
+  "channel": "system",
+  "event": "ack",
+  "payload": { "ack_id": "optional-client-id", "status": "ok", "error": null }
+}
 ```
 
 ### Client Events (peer-to-peer relay)
@@ -313,7 +324,7 @@ When `allow_client_events(true)` is set:
 
 ```json
 {
-    "action": "ClientEvent",
+    "action": "client_event",
     "channel": "chat",
     "event": "typing",
     "payload": { "user": "Alice" }
@@ -337,7 +348,7 @@ The framework automatically sends these events:
 | `ERROR_EVENT` | `error` | Error occurred |
 | `ACK_EVENT` | `ack` | Message acknowledged |
 
-All system events are sent on the `system` channel.
+`error` and `ack` are sent on the `system` channel. `subscribed`, `unsubscribed`, `presence:join`, and `presence:leave` are sent on the channel they describe and include the room when relevant.
 
 ---
 
@@ -353,7 +364,13 @@ heartbeat_interval_seconds = 30       # server pings client
 heartbeat_timeout_seconds = 10        # disconnect if no pong
 max_messages_per_second = 50          # per-connection flood protection
 max_connections_per_user = 5          # multi-device limit
+outbound_buffer_size = 1024           # queued outbound frames before disconnect
+allowed_origins = []                  # exact Origin allow-list; empty allows any
+history_buffer_size = 50              # recent messages retained per channel
+history_ttl_seconds = 604800          # auto-reap idle history after 7 days
 ```
+
+If `allowed_origins` is non-empty, browser handshakes must include an `Origin` header that exactly matches one configured value. Use this with session-cookie authentication to prevent cross-site WebSocket handshakes.
 
 ---
 
@@ -387,7 +404,7 @@ Forge exposes read-only JSON endpoints under the observability base path (defaul
 | ------------------------------------- | -------------------------------------------- |
 | `GET /_forge/ws/channels`             | List all registered channels and their options |
 | `GET /_forge/ws/presence/:channel`    | Live presence members for a presence channel |
-| `GET /_forge/ws/history/:channel`     | Last up-to-50 buffered messages (metadata only by default) |
+| `GET /_forge/ws/history/:channel`     | Recent buffered messages (metadata only by default) |
 | `GET /_forge/ws/stats`                | Global + per-channel counters                |
 
 #### Example: list registered channels
@@ -436,7 +453,16 @@ curl -s "http://localhost:3000/_forge/ws/history/chat?limit=10" | jq
 
 Each entry includes `{ channel, event, room, payload_size_bytes }`. The raw `payload` is **not** included by default.
 
-History lists are capped at 50 entries per channel. Each publish also refreshes a TTL on the history key (default 7 days, configured via `websocket.history_ttl_seconds`), so channels that go silent are auto-reaped by Redis — no manual cleanup scheduler needed. Set `history_ttl_seconds = 0` to disable and retain history indefinitely.
+History lists are capped by `websocket.history_buffer_size` (default 50). Each publish also refreshes a TTL on the history key (default 7 days, configured via `websocket.history_ttl_seconds`), so channels that go silent are auto-reaped by Redis — no manual cleanup scheduler needed. Set `history_ttl_seconds = 0` to disable and retain history indefinitely.
+
+## Compatibility Notes
+
+The current hardening pass tightened a few pre-1.0 semantics:
+
+- `message` and `client_event` now require an active matching subscription.
+- Channel-wide publishes reach all subscribers; room publishes reach only exact room subscribers.
+- `on_leave` and `presence:leave` run on unsubscribe, socket close, heartbeat timeout, and force disconnect.
+- Channel callbacks receive owned `WebSocketContext`, `ChannelId`, and room values so async closures can safely move data into futures.
 
 ### Including payloads in history
 

@@ -209,7 +209,10 @@ pub use testing::{
 pub use translations::{
     current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,
 };
-pub use websocket::{ERROR_EVENT, SUBSCRIBED_EVENT, SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT};
+pub use websocket::{
+    ACK_EVENT, ERROR_EVENT, PRESENCE_JOIN_EVENT, PRESENCE_LEAVE_EVENT, SUBSCRIBED_EVENT,
+    SYSTEM_CHANNEL, UNSUBSCRIBED_EVENT,
+};
 
 pub use datatable::{
     Datatable, DatatableColumn, DatatableColumnMeta, DatatableContext, DatatableExportAccepted,

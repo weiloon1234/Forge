@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -96,6 +97,7 @@ impl BoundWebSocketServer {
 enum WriterCommand {
     Json(ServerMessage),
     Ping,
+    Pong(Bytes),
     Close,
 }
 
@@ -120,10 +122,11 @@ impl WebSocketServerState {
             .map(|channel| (channel.id.clone(), channel))
             .collect::<HashMap<_, _>>();
         let diagnostics = app.diagnostics().ok();
+        let outbound_buffer_size = ws_config.outbound_buffer_size;
         Self {
             app,
             channels: Arc::new(map),
-            hub: ConnectionHub::new(diagnostics),
+            hub: ConnectionHub::new(diagnostics, outbound_buffer_size),
             backend,
             ws_config,
         }
@@ -144,8 +147,7 @@ impl WebSocketServerState {
         // Subscribe to the system disconnect topic for force-disconnect support.
         topics.push("__system:disconnect".to_string());
 
-        let hub = self.hub.clone();
-        let ws_backend = self.backend.clone();
+        let server_state = self.clone();
         tokio::spawn(async move {
             let mut subscription = match backend.subscribe_ws(&topics).await {
                 Ok(subscription) => subscription,
@@ -163,10 +165,8 @@ impl WebSocketServerState {
                         actor_id: String,
                     }
                     if let Ok(cmd) = serde_json::from_str::<DisconnectCommand>(&message.payload) {
-                        let entries = hub.disconnect_by_actor(&cmd.actor_id).await;
-                        for entry in entries {
-                            let _ = ws_backend.srem(&entry.key, &entry.member_value).await;
-                        }
+                        let closed = server_state.hub.disconnect_by_actor(&cmd.actor_id).await;
+                        server_state.cleanup_closed_connections(closed).await;
                     } else {
                         tracing::error!(
                             "forge websocket pubsub: invalid disconnect command payload"
@@ -182,7 +182,7 @@ impl WebSocketServerState {
                         continue;
                     }
                 };
-                hub.broadcast(&envelope).await;
+                server_state.broadcast(&envelope).await;
             }
         });
 
@@ -331,6 +331,99 @@ impl WebSocketServerState {
             diagnostics.record_auth_outcome(outcome);
         }
     }
+
+    async fn send(&self, connection_id: u64, command: WriterCommand) -> Result<()> {
+        match self.hub.send(connection_id, command).await {
+            Ok(()) => Ok(()),
+            Err(HubSendError::Missing) => Err(Error::message("websocket connection not found")),
+            Err(HubSendError::Closed) => {
+                if let Some(closed) = self.hub.unregister(connection_id).await {
+                    self.cleanup_closed_connections(vec![closed]).await;
+                }
+                Err(Error::message("websocket connection closed"))
+            }
+            Err(HubSendError::Full) => {
+                if let Some(closed) = self.hub.unregister(connection_id).await {
+                    self.cleanup_closed_connections(vec![closed]).await;
+                }
+                Err(Error::message("websocket outbound buffer full"))
+            }
+        }
+    }
+
+    async fn broadcast(&self, message: &ServerMessage) {
+        let closed = self.hub.broadcast(message).await;
+        self.cleanup_closed_connections(closed).await;
+    }
+
+    async fn broadcast_except(&self, exclude_id: u64, message: &ServerMessage) {
+        let closed = self.hub.broadcast_except(exclude_id, message).await;
+        self.cleanup_closed_connections(closed).await;
+    }
+
+    async fn close_connection(&self, connection_id: u64) {
+        if let Some(closed) = self.hub.unregister(connection_id).await {
+            self.cleanup_closed_connections(vec![closed]).await;
+        }
+    }
+
+    async fn cleanup_closed_connections(&self, mut closed: Vec<ClosedConnection>) {
+        while let Some(connection) = closed.pop() {
+            for subscription in &connection.subscriptions {
+                let Some(channel) = self.channels.get(&subscription.channel) else {
+                    continue;
+                };
+                if let Some(ref on_leave) = channel.options.on_leave {
+                    let ctx = WebSocketContext::new(
+                        self.app.clone(),
+                        connection.connection_id,
+                        actor_for_channel(&connection.actors, channel),
+                        subscription.channel.clone(),
+                        subscription.room.clone(),
+                    );
+                    if let Err(error) = on_leave(ctx).await {
+                        tracing::warn!(
+                            target: "forge.websocket",
+                            error = %error,
+                            "on_leave hook failed during connection cleanup"
+                        );
+                    }
+                }
+            }
+
+            for entry in connection.presence_entries {
+                let _ = self.backend.srem(&entry.key, &entry.member_value).await;
+                let Some(channel) = self.channels.get(&entry.channel) else {
+                    continue;
+                };
+                if channel.options.presence {
+                    let leave_msg = ServerMessage {
+                        channel: entry.channel,
+                        event: PRESENCE_LEAVE_EVENT,
+                        room: entry.room,
+                        payload: serde_json::json!({
+                            "actor_id": entry.actor_id,
+                        }),
+                    };
+                    let additionally_closed = self.hub.broadcast(&leave_msg).await;
+                    closed.extend(additionally_closed);
+                }
+            }
+        }
+    }
+}
+
+fn actor_for_channel(
+    actors: &HashMap<GuardId, Actor>,
+    channel: &RegisteredChannel,
+) -> Option<Actor> {
+    if let Some(guard) = channel.options.guard_id() {
+        return actors.get(guard).cloned();
+    }
+    if actors.len() == 1 {
+        return actors.values().next().cloned();
+    }
+    None
 }
 
 async fn websocket_handler(
@@ -339,6 +432,16 @@ async fn websocket_handler(
     headers: HeaderMap,
     State(state): State<WebSocketServerState>,
 ) -> Response {
+    if !origin_allowed(&headers, &state.ws_config.allowed_origins) {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "message": "websocket origin is not allowed",
+            })),
+        )
+            .into_response();
+    }
+
     // Support token via query param (?token=xxx) for browser WebSocket connections
     // which cannot set custom headers.
     let mut headers = headers;
@@ -358,6 +461,21 @@ async fn websocket_handler(
     let mut identity = state.capture_identity(&headers).await;
     identity.client_ip = extract_client_ip_from_headers(&headers);
     ws.on_upgrade(move |socket| handle_socket(socket, state, identity))
+}
+
+fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+    if allowed_origins.is_empty() || allowed_origins.iter().any(|origin| origin == "*") {
+        return true;
+    }
+
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    allowed_origins.iter().any(|allowed| allowed == origin)
 }
 
 fn extract_client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -395,13 +513,21 @@ async fn handle_socket(
                         break;
                     }
                 }
-                WriterCommand::Close => break,
+                WriterCommand::Pong(payload) => {
+                    if sender.send(Message::Pong(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                WriterCommand::Close => {
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
+                }
             }
         }
     });
 
     // Heartbeat task: sends pings and closes the connection on timeout.
-    let heartbeat_sender = state.hub.sender(connection_id).await;
+    let heartbeat_state = state.clone();
     let heartbeat_pong = last_pong_at.clone();
     let heartbeat_interval = Duration::from_secs(state.ws_config.heartbeat_interval_seconds.max(1));
     let heartbeat_timeout = Duration::from_secs(state.ws_config.heartbeat_timeout_seconds.max(1));
@@ -410,15 +536,18 @@ async fn handle_socket(
         interval.tick().await; // skip first immediate tick
         loop {
             interval.tick().await;
-            let Some(ref hb_sender) = heartbeat_sender else {
-                break;
-            };
-            if hb_sender.send(WriterCommand::Ping).is_err() {
+            if heartbeat_state
+                .send(connection_id, WriterCommand::Ping)
+                .await
+                .is_err()
+            {
                 break;
             }
             let elapsed = heartbeat_pong.lock().await.elapsed();
             if elapsed > heartbeat_interval + heartbeat_timeout {
-                let _ = hb_sender.send(WriterCommand::Close);
+                let _ = heartbeat_state
+                    .send(connection_id, WriterCommand::Close)
+                    .await;
                 break;
             }
         }
@@ -436,7 +565,6 @@ async fn handle_socket(
                     process_client_message(&state, connection_id, text.to_string()).await
                 {
                     let _ = state
-                        .hub
                         .send(
                             connection_id,
                             WriterCommand::Json(ServerMessage {
@@ -452,15 +580,17 @@ async fn handle_socket(
             Message::Pong(_) => {
                 *last_pong_at.lock().await = tokio::time::Instant::now();
             }
+            Message::Ping(payload) => {
+                let _ = state
+                    .send(connection_id, WriterCommand::Pong(payload))
+                    .await;
+            }
             Message::Close(_) => break,
-            Message::Binary(_) | Message::Ping(_) => {}
+            Message::Binary(_) => {}
         }
     }
 
-    let presence_entries = state.hub.unregister(connection_id).await;
-    for entry in presence_entries {
-        let _ = state.backend.srem(&entry.key, &entry.member_value).await;
-    }
+    state.close_connection(connection_id).await;
     writer.abort();
     heartbeat.abort();
 }
@@ -477,7 +607,6 @@ async fn process_client_message(
         .await
     {
         state
-            .hub
             .send(
                 connection_id,
                 WriterCommand::Json(ServerMessage {
@@ -492,15 +621,16 @@ async fn process_client_message(
         return Ok(());
     }
 
-    let message: ClientMessage = serde_json::from_str(&payload).map_err(Error::other)?;
+    let message: ClientMessage = serde_json::from_str(&payload)
+        .map_err(|error| Error::http(400, format!("invalid websocket message: {error}")))?;
     if let Ok(diagnostics) = state.app.diagnostics() {
         diagnostics.record_websocket_inbound_message_on(&message.channel);
     }
     let Some(channel) = state.channels.get(&message.channel) else {
-        return Err(Error::message(format!(
-            "websocket channel `{}` is not registered",
-            message.channel
-        )));
+        return Err(Error::http(
+            404,
+            format!("websocket channel `{}` is not registered", message.channel),
+        ));
     };
 
     match message.action {
@@ -509,7 +639,6 @@ async fn process_client_message(
                 Ok(actor) => actor,
                 Err(error) => {
                     state
-                        .hub
                         .send(
                             connection_id,
                             WriterCommand::Json(ServerMessage {
@@ -534,10 +663,10 @@ async fn process_client_message(
                     message.channel.clone(),
                     message.room.clone(),
                 );
-                if let Err(error) = authorize(&ctx, &message.channel, message.room.as_deref()).await
+                if let Err(error) =
+                    authorize(ctx, message.channel.clone(), message.room.clone()).await
                 {
                     state
-                        .hub
                         .send(
                             connection_id,
                             WriterCommand::Json(ServerMessage {
@@ -553,13 +682,13 @@ async fn process_client_message(
                 }
             }
 
-            state
+            let subscribed = state
                 .hub
                 .subscribe(connection_id, &message.channel, message.room.clone())
                 .await;
 
             // Track presence if enabled for this channel.
-            if channel.options.presence {
+            if channel.options.presence && subscribed {
                 let actor_id = actor
                     .as_ref()
                     .map(|a| a.id.clone())
@@ -570,7 +699,16 @@ async fn process_client_message(
                 let _ = state.backend.sadd(&key, &member_value).await;
                 state
                     .hub
-                    .add_presence_entry(connection_id, PresenceEntry { key, member_value })
+                    .add_presence_entry(
+                        connection_id,
+                        PresenceEntry {
+                            key,
+                            member_value,
+                            channel: message.channel.clone(),
+                            room: message.room.clone(),
+                            actor_id: actor_id.clone(),
+                        },
+                    )
                     .await;
 
                 // Broadcast presence join event to all subscribers.
@@ -583,7 +721,7 @@ async fn process_client_message(
                         "joined_at": now,
                     }),
                 };
-                state.hub.broadcast_except(connection_id, &join_msg).await;
+                state.broadcast_except(connection_id, &join_msg).await;
             }
 
             // Invoke on_join lifecycle hook.
@@ -595,7 +733,7 @@ async fn process_client_message(
                     message.channel.clone(),
                     message.room.clone(),
                 );
-                if let Err(e) = on_join(&ctx).await {
+                if let Err(e) = on_join(ctx).await {
                     tracing::warn!(target: "forge.websocket", error = %e, "on_join hook failed");
                 }
             }
@@ -611,17 +749,17 @@ async fn process_client_message(
                     // Messages are stored newest-first (LPUSH), send oldest-first.
                     for raw in messages.into_iter().rev() {
                         if let Ok(msg) = serde_json::from_str::<ServerMessage>(&raw) {
-                            let _ = state
-                                .hub
-                                .send(connection_id, WriterCommand::Json(msg))
-                                .await;
+                            if !message_reaches_subscription(&msg, &message.channel, &message.room)
+                            {
+                                continue;
+                            }
+                            let _ = state.send(connection_id, WriterCommand::Json(msg)).await;
                         }
                     }
                 }
             }
 
             state
-                .hub
                 .send(
                     connection_id,
                     WriterCommand::Json(ServerMessage {
@@ -636,60 +774,42 @@ async fn process_client_message(
         ClientAction::Unsubscribe => {
             // Invoke on_leave lifecycle hook.
             if let Some(ref on_leave) = channel.options.on_leave {
-                let guard_id = channel
-                    .options
-                    .guard_id()
-                    .cloned()
-                    .unwrap_or_else(|| GuardId::new("default"));
-                let actor = state
-                    .hub
-                    .cached_actor(connection_id, &guard_id)
-                    .await
-                    .ok()
-                    .flatten();
+                let actors = state.hub.actors(connection_id).await.unwrap_or_default();
                 let ctx = WebSocketContext::new(
                     state.app.clone(),
                     connection_id,
-                    actor,
+                    actor_for_channel(&actors, channel),
                     message.channel.clone(),
                     message.room.clone(),
                 );
-                if let Err(e) = on_leave(&ctx).await {
+                if let Err(e) = on_leave(ctx).await {
                     tracing::warn!(target: "forge.websocket", error = %e, "on_leave hook failed");
                 }
             }
 
-            // Clean up presence entries for this channel before unsubscribing.
+            // Clean up presence entries for this subscription before unsubscribing.
             let entries = state
                 .hub
-                .take_presence_entries_for_channel(connection_id, &message.channel)
+                .take_presence_entries_for_subscription(
+                    connection_id,
+                    &message.channel,
+                    &message.room,
+                )
                 .await;
             for entry in &entries {
                 let _ = state.backend.srem(&entry.key, &entry.member_value).await;
             }
 
-            // Broadcast presence leave event if there were presence entries.
-            if channel.options.presence && !entries.is_empty() {
-                // Extract actor_id from the first presence entry.
-                let actor_id = entries
-                    .first()
-                    .and_then(|e| {
-                        serde_json::from_str::<serde_json::Value>(&e.member_value)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("actor_id").and_then(|a| a.as_str().map(String::from))
-                            })
-                    })
-                    .unwrap_or_else(|| format!("anon:{connection_id}"));
+            for entry in entries {
                 let leave_msg = ServerMessage {
-                    channel: message.channel.clone(),
+                    channel: entry.channel,
                     event: PRESENCE_LEAVE_EVENT,
-                    room: message.room.clone(),
+                    room: entry.room,
                     payload: serde_json::json!({
-                        "actor_id": actor_id,
+                        "actor_id": entry.actor_id,
                     }),
                 };
-                state.hub.broadcast(&leave_msg).await;
+                state.broadcast(&leave_msg).await;
             }
 
             state
@@ -697,7 +817,6 @@ async fn process_client_message(
                 .unsubscribe(connection_id, &message.channel, message.room.clone())
                 .await;
             state
-                .hub
                 .send(
                     connection_id,
                     WriterCommand::Json(ServerMessage {
@@ -710,11 +829,24 @@ async fn process_client_message(
                 .await?;
         }
         ClientAction::Message => {
+            if !state
+                .hub
+                .is_subscribed(connection_id, &message.channel, &message.room)
+                .await
+            {
+                return Err(Error::http(
+                    403,
+                    format!(
+                        "websocket connection is not subscribed to channel `{}`",
+                        message.channel
+                    ),
+                ));
+            }
+
             let actor = match state.authorize_channel(connection_id, channel).await {
                 Ok(actor) => actor,
                 Err(error) => {
                     state
-                        .hub
                         .send(
                             connection_id,
                             WriterCommand::Json(ServerMessage {
@@ -733,8 +865,8 @@ async fn process_client_message(
                 state.app.clone(),
                 connection_id,
                 actor,
-                message.channel,
-                message.room,
+                message.channel.clone(),
+                message.room.clone(),
             );
             let result = channel
                 .handler
@@ -748,7 +880,6 @@ async fn process_client_message(
                     Err(e) => ("error", Some(e.to_string())),
                 };
                 let _ = state
-                    .hub
                     .send(
                         connection_id,
                         WriterCommand::Json(ServerMessage {
@@ -769,12 +900,28 @@ async fn process_client_message(
         }
         ClientAction::ClientEvent => {
             if !channel.options.allow_client_events {
-                return Err(Error::message("client events not allowed on this channel"));
+                return Err(Error::http(
+                    403,
+                    "client events not allowed on this channel",
+                ));
+            }
+
+            if !state
+                .hub
+                .is_subscribed(connection_id, &message.channel, &message.room)
+                .await
+            {
+                return Err(Error::http(
+                    403,
+                    format!(
+                        "websocket connection is not subscribed to channel `{}`",
+                        message.channel
+                    ),
+                ));
             }
 
             if let Err(error) = state.authorize_channel(connection_id, channel).await {
                 state
-                    .hub
                     .send(
                         connection_id,
                         WriterCommand::Json(ServerMessage {
@@ -800,7 +947,7 @@ async fn process_client_message(
             };
 
             // Broadcast to all subscribers EXCEPT the sender.
-            state.hub.broadcast_except(connection_id, &server_msg).await;
+            state.broadcast_except(connection_id, &server_msg).await;
         }
     }
 
@@ -810,18 +957,18 @@ async fn process_client_message(
 #[derive(Clone)]
 struct ConnectionHub {
     next_id: Arc<AtomicU64>,
-    connections: Arc<RwLock<HashMap<u64, ConnectionState>>>,
-    user_connections: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
+    state: Arc<RwLock<HubState>>,
     diagnostics: Option<Arc<RuntimeDiagnostics>>,
+    outbound_buffer_size: usize,
 }
 
 impl ConnectionHub {
-    fn new(diagnostics: Option<Arc<RuntimeDiagnostics>>) -> Self {
+    fn new(diagnostics: Option<Arc<RuntimeDiagnostics>>, outbound_buffer_size: usize) -> Self {
         Self {
             next_id: Arc::new(AtomicU64::new(0)),
-            connections: Arc::new(RwLock::new(HashMap::new())),
-            user_connections: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(HubState::default())),
             diagnostics,
+            outbound_buffer_size: outbound_buffer_size.max(1),
         }
     }
 }
@@ -832,14 +979,15 @@ impl ConnectionHub {
         identity: ConnectionIdentity,
     ) -> (
         u64,
-        mpsc::UnboundedReceiver<WriterCommand>,
+        mpsc::Receiver<WriterCommand>,
         Arc<tokio::sync::Mutex<tokio::time::Instant>>,
     ) {
         let connection_id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(self.outbound_buffer_size);
         let last_pong_at = Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now()));
         let client_ip = identity.client_ip.clone();
-        self.connections.write().await.insert(
+        let mut hub = self.state.write().await;
+        hub.connections.insert(
             connection_id,
             ConnectionState {
                 subscriptions: HashSet::new(),
@@ -851,18 +999,17 @@ impl ConnectionHub {
                 rate_window_start: tokio::time::Instant::now(),
             },
         );
-        if let Some(diagnostics) = &self.diagnostics {
-            diagnostics.record_websocket_connection(WebSocketConnectionState::Opened);
-        }
-        // Track anonymous connections by IP
         if let Some(ref ip) = client_ip {
             let tracking_key = format!("ip:{ip}");
-            self.user_connections
-                .write()
-                .await
+            hub.user_connections
                 .entry(tracking_key)
                 .or_default()
                 .insert(connection_id);
+        }
+        drop(hub);
+
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.record_websocket_connection(WebSocketConnectionState::Opened);
         }
 
         tracing::info!(
@@ -873,48 +1020,10 @@ impl ConnectionHub {
         (connection_id, rx, last_pong_at)
     }
 
-    async fn unregister(&self, connection_id: u64) -> Vec<PresenceEntry> {
-        let state = self.connections.write().await.remove(&connection_id);
-        if let Some(state) = state {
-            if let Some(diagnostics) = &self.diagnostics {
-                for key in &state.subscriptions {
-                    diagnostics.record_websocket_subscription_closed_on(&key.channel);
-                }
-                diagnostics.record_websocket_connection(WebSocketConnectionState::Closed);
-            }
-
-            // Clean up user_connections tracking (single lock acquisition).
-            {
-                let mut user_conns = self.user_connections.write().await;
-                // Clean up actor-based tracking
-                for actor in state.actors.values() {
-                    if let Some(set) = user_conns.get_mut(&actor.id) {
-                        set.remove(&connection_id);
-                        if set.is_empty() {
-                            user_conns.remove(&actor.id);
-                        }
-                    }
-                }
-                // Clean up IP-based tracking (for anonymous connections)
-                if let Some(ref ip) = state.identity.client_ip {
-                    let ip_key = format!("ip:{ip}");
-                    if let Some(set) = user_conns.get_mut(&ip_key) {
-                        set.remove(&connection_id);
-                        if set.is_empty() {
-                            user_conns.remove(&ip_key);
-                        }
-                    }
-                }
-            }
-
-            tracing::info!(
-                target: "forge.websocket",
-                connection_id = connection_id,
-                "WebSocket connection closed"
-            );
-            return state.presence_entries;
-        }
-        Vec::new()
+    async fn unregister(&self, connection_id: u64) -> Option<ClosedConnection> {
+        let mut hub = self.state.write().await;
+        let state = hub.connections.remove(&connection_id)?;
+        Some(self.close_state(&mut hub, connection_id, state))
     }
 
     async fn subscribe(
@@ -923,7 +1032,7 @@ impl ConnectionHub {
         channel: &ChannelId,
         room: Option<String>,
     ) -> bool {
-        if let Some(state) = self.connections.write().await.get_mut(&connection_id) {
+        if let Some(state) = self.state.write().await.connections.get_mut(&connection_id) {
             let created = state.subscriptions.insert(SubscriptionKey {
                 channel: channel.clone(),
                 room,
@@ -945,7 +1054,7 @@ impl ConnectionHub {
         channel: &ChannelId,
         room: Option<String>,
     ) -> bool {
-        if let Some(state) = self.connections.write().await.get_mut(&connection_id) {
+        if let Some(state) = self.state.write().await.connections.get_mut(&connection_id) {
             let removed = state.subscriptions.remove(&SubscriptionKey {
                 channel: channel.clone(),
                 room,
@@ -961,78 +1070,74 @@ impl ConnectionHub {
         false
     }
 
-    async fn send(&self, connection_id: u64, command: WriterCommand) -> Result<()> {
+    async fn send(
+        &self,
+        connection_id: u64,
+        command: WriterCommand,
+    ) -> std::result::Result<(), HubSendError> {
         let channel = if let WriterCommand::Json(ref msg) = command {
             Some(msg.channel.clone())
         } else {
             None
         };
         let sender = self
-            .connections
+            .state
             .read()
             .await
+            .connections
             .get(&connection_id)
             .map(|state| state.sender.clone())
-            .ok_or_else(|| Error::message("websocket connection not found"))?;
-        sender
-            .send(command)
-            .map_err(|_| Error::message("websocket connection closed"))?;
+            .ok_or(HubSendError::Missing)?;
+        sender.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => HubSendError::Full,
+            mpsc::error::TrySendError::Closed(_) => HubSendError::Closed,
+        })?;
         if let Some(diagnostics) = &self.diagnostics {
             if let Some(ref ch) = channel {
                 diagnostics.record_websocket_outbound_message_on(ch);
-            } else {
-                unreachable!("WriterCommand::Ping and WriterCommand::Close are not routed through ConnectionHub::send")
             }
         }
         Ok(())
     }
 
-    async fn broadcast(&self, message: &ServerMessage) {
+    async fn broadcast(&self, message: &ServerMessage) -> Vec<ClosedConnection> {
         let senders = {
-            let connections = self.connections.read().await;
-            connections
-                .values()
-                .filter(|state| state.accepts(message))
-                .map(|state| state.sender.clone())
+            let hub = self.state.read().await;
+            hub.connections
+                .iter()
+                .filter(|(_, state)| state.accepts(message))
+                .map(|(id, state)| (*id, state.sender.clone()))
                 .collect::<Vec<_>>()
         };
 
-        for sender in senders {
-            let _ = sender.send(WriterCommand::Json(message.clone()));
-        }
+        self.send_to_many(senders, message).await
     }
 
-    async fn broadcast_except(&self, exclude_id: u64, message: &ServerMessage) {
+    async fn broadcast_except(
+        &self,
+        exclude_id: u64,
+        message: &ServerMessage,
+    ) -> Vec<ClosedConnection> {
         let senders = {
-            let connections = self.connections.read().await;
-            connections
+            let hub = self.state.read().await;
+            hub.connections
                 .iter()
                 .filter(|(id, state)| **id != exclude_id && state.accepts(message))
-                .map(|(_, state)| state.sender.clone())
+                .map(|(id, state)| (*id, state.sender.clone()))
                 .collect::<Vec<_>>()
         };
 
-        for sender in senders {
-            let _ = sender.send(WriterCommand::Json(message.clone()));
-        }
-    }
-
-    /// Returns a clone of the sender for the given connection, used by the heartbeat task.
-    async fn sender(&self, connection_id: u64) -> Option<mpsc::UnboundedSender<WriterCommand>> {
-        self.connections
-            .read()
-            .await
-            .get(&connection_id)
-            .map(|state| state.sender.clone())
+        self.send_to_many(senders, message).await
     }
 
     async fn identity(
         &self,
         connection_id: u64,
     ) -> std::result::Result<ConnectionIdentity, AuthError> {
-        self.connections
+        self.state
             .read()
             .await
+            .connections
             .get(&connection_id)
             .map(|state| state.identity.clone())
             .ok_or_else(|| AuthError::internal("websocket connection not found"))
@@ -1043,11 +1148,25 @@ impl ConnectionHub {
         connection_id: u64,
         guard: &GuardId,
     ) -> std::result::Result<Option<Actor>, AuthError> {
-        self.connections
+        self.state
             .read()
             .await
+            .connections
             .get(&connection_id)
             .map(|state| state.actors.get(guard).cloned())
+            .ok_or_else(|| AuthError::internal("websocket connection not found"))
+    }
+
+    async fn actors(
+        &self,
+        connection_id: u64,
+    ) -> std::result::Result<HashMap<GuardId, Actor>, AuthError> {
+        self.state
+            .read()
+            .await
+            .connections
+            .get(&connection_id)
+            .map(|state| state.actors.clone())
             .ok_or_else(|| AuthError::internal("websocket connection not found"))
     }
 
@@ -1060,12 +1179,12 @@ impl ConnectionHub {
         let actor_id = actor.id.clone();
         let guard = actor.guard.clone();
 
-        // Acquire both locks — check + insert atomically to prevent TOCTOU race
-        let mut user_conns = self.user_connections.write().await;
+        let mut hub = self.state.write().await;
 
         if max_connections_per_user > 0 {
-            if let Some(existing) = user_conns.get(&actor_id) {
-                if existing.len() >= max_connections_per_user as usize {
+            if let Some(existing) = hub.user_connections.get(&actor_id) {
+                let other_connections = existing.iter().filter(|id| **id != connection_id).count();
+                if other_connections >= max_connections_per_user as usize {
                     return Err(AuthError::forbidden_code(
                         AuthErrorCode::MaxConnectionsPerUserExceeded,
                     ));
@@ -1073,8 +1192,8 @@ impl ConnectionHub {
             }
         }
 
-        let mut connections = self.connections.write().await;
-        let state = connections
+        let state = hub
+            .connections
             .get_mut(&connection_id)
             .ok_or_else(|| AuthError::internal("websocket connection not found"))?;
         state.actors.insert(guard, actor);
@@ -1082,16 +1201,16 @@ impl ConnectionHub {
         // Remove IP-based tracking (anonymous → authenticated transition)
         if let Some(ref ip) = state.identity.client_ip {
             let ip_key = format!("ip:{ip}");
-            if let Some(set) = user_conns.get_mut(&ip_key) {
+            if let Some(set) = hub.user_connections.get_mut(&ip_key) {
                 set.remove(&connection_id);
                 if set.is_empty() {
-                    user_conns.remove(&ip_key);
+                    hub.user_connections.remove(&ip_key);
                 }
             }
         }
 
         // Track by actor ID
-        user_conns
+        hub.user_connections
             .entry(actor_id)
             .or_default()
             .insert(connection_id);
@@ -1100,27 +1219,47 @@ impl ConnectionHub {
     }
 
     async fn add_presence_entry(&self, connection_id: u64, entry: PresenceEntry) {
-        if let Some(state) = self.connections.write().await.get_mut(&connection_id) {
+        if let Some(state) = self.state.write().await.connections.get_mut(&connection_id) {
             state.presence_entries.push(entry);
         }
     }
 
-    async fn take_presence_entries_for_channel(
+    async fn take_presence_entries_for_subscription(
         &self,
         connection_id: u64,
         channel: &ChannelId,
+        room: &Option<String>,
     ) -> Vec<PresenceEntry> {
-        let mut connections = self.connections.write().await;
-        let Some(state) = connections.get_mut(&connection_id) else {
+        let mut hub = self.state.write().await;
+        let Some(state) = hub.connections.get_mut(&connection_id) else {
             return Vec::new();
         };
-        let key_prefix = presence_key(channel);
         let (matching, remaining): (Vec<_>, Vec<_>) = state
             .presence_entries
             .drain(..)
-            .partition(|e| e.key == key_prefix);
+            .partition(|e| e.channel == *channel && e.room == *room);
         state.presence_entries = remaining;
         matching
+    }
+
+    async fn is_subscribed(
+        &self,
+        connection_id: u64,
+        channel: &ChannelId,
+        room: &Option<String>,
+    ) -> bool {
+        self.state
+            .read()
+            .await
+            .connections
+            .get(&connection_id)
+            .map(|state| {
+                state.subscriptions.contains(&SubscriptionKey {
+                    channel: channel.clone(),
+                    room: room.clone(),
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// Per-connection rate limiting. Returns `true` if the message is allowed.
@@ -1128,8 +1267,8 @@ impl ConnectionHub {
         if max_per_second == 0 {
             return true; // unlimited
         }
-        let mut connections = self.connections.write().await;
-        let Some(state) = connections.get_mut(&connection_id) else {
+        let mut hub = self.state.write().await;
+        let Some(state) = hub.connections.get_mut(&connection_id) else {
             return false;
         };
         if state.rate_window_start.elapsed() >= Duration::from_secs(1) {
@@ -1141,43 +1280,123 @@ impl ConnectionHub {
     }
 
     /// Force-disconnect all connections belonging to a given actor.
-    async fn disconnect_by_actor(&self, actor_id: &str) -> Vec<PresenceEntry> {
-        let mut connections = self.connections.write().await;
-        let to_remove: Vec<u64> = connections
+    async fn disconnect_by_actor(&self, actor_id: &str) -> Vec<ClosedConnection> {
+        let mut hub = self.state.write().await;
+        let to_remove: Vec<u64> = hub
+            .connections
             .iter()
             .filter(|(_, state)| state.actors.values().any(|a| a.id == actor_id))
             .map(|(id, _)| *id)
             .collect();
 
-        let mut all_presence = Vec::new();
+        let mut closed = Vec::new();
         for id in &to_remove {
-            if let Some(state) = connections.remove(id) {
-                if let Some(diagnostics) = &self.diagnostics {
-                    for key in &state.subscriptions {
-                        diagnostics.record_websocket_subscription_closed_on(&key.channel);
-                    }
-                    diagnostics.record_websocket_connection(WebSocketConnectionState::Closed);
-                }
-                all_presence.extend(state.presence_entries);
-                // Dropping the sender closes the writer task which closes the socket.
+            if let Some(state) = hub.connections.remove(id) {
+                let _ = state.sender.try_send(WriterCommand::Close);
+                closed.push(self.close_state(&mut hub, *id, state));
             }
         }
 
-        // Clean up user_connections tracking.
-        if !to_remove.is_empty() {
-            drop(connections);
-            let mut user_conns = self.user_connections.write().await;
-            if let Some(set) = user_conns.get_mut(actor_id) {
-                for id in &to_remove {
-                    set.remove(id);
-                }
-                if set.is_empty() {
-                    user_conns.remove(actor_id);
-                }
+        closed
+    }
+
+    async fn send_to_many(
+        &self,
+        senders: Vec<(u64, mpsc::Sender<WriterCommand>)>,
+        message: &ServerMessage,
+    ) -> Vec<ClosedConnection> {
+        let mut to_close = Vec::new();
+        for (id, sender) in senders {
+            if sender
+                .try_send(WriterCommand::Json(message.clone()))
+                .is_err()
+            {
+                to_close.push(id);
             }
         }
 
-        all_presence
+        if to_close.is_empty() {
+            return Vec::new();
+        }
+
+        let mut hub = self.state.write().await;
+        let mut closed = Vec::new();
+        for id in to_close {
+            if let Some(state) = hub.connections.remove(&id) {
+                closed.push(self.close_state(&mut hub, id, state));
+            }
+        }
+        closed
+    }
+
+    fn close_state(
+        &self,
+        hub: &mut HubState,
+        connection_id: u64,
+        state: ConnectionState,
+    ) -> ClosedConnection {
+        if let Some(diagnostics) = &self.diagnostics {
+            for key in &state.subscriptions {
+                diagnostics.record_websocket_subscription_closed_on(&key.channel);
+            }
+            diagnostics.record_websocket_connection(WebSocketConnectionState::Closed);
+        }
+
+        for actor in state.actors.values() {
+            remove_connection_tracking(&mut hub.user_connections, &actor.id, connection_id);
+        }
+        if let Some(ref ip) = state.identity.client_ip {
+            remove_connection_tracking(
+                &mut hub.user_connections,
+                &format!("ip:{ip}"),
+                connection_id,
+            );
+        }
+
+        tracing::info!(
+            target: "forge.websocket",
+            connection_id = connection_id,
+            "WebSocket connection closed"
+        );
+
+        ClosedConnection {
+            connection_id,
+            subscriptions: state.subscriptions.into_iter().collect(),
+            presence_entries: state.presence_entries,
+            actors: state.actors,
+        }
+    }
+}
+
+#[derive(Default)]
+struct HubState {
+    connections: HashMap<u64, ConnectionState>,
+    user_connections: HashMap<String, HashSet<u64>>,
+}
+
+enum HubSendError {
+    Missing,
+    Closed,
+    Full,
+}
+
+struct ClosedConnection {
+    connection_id: u64,
+    subscriptions: Vec<SubscriptionKey>,
+    presence_entries: Vec<PresenceEntry>,
+    actors: HashMap<GuardId, Actor>,
+}
+
+fn remove_connection_tracking(
+    user_connections: &mut HashMap<String, HashSet<u64>>,
+    key: &str,
+    connection_id: u64,
+) {
+    if let Some(set) = user_connections.get_mut(key) {
+        set.remove(&connection_id);
+        if set.is_empty() {
+            user_connections.remove(key);
+        }
     }
 }
 
@@ -1186,7 +1405,7 @@ struct ConnectionState {
     presence_entries: Vec<PresenceEntry>,
     identity: ConnectionIdentity,
     actors: HashMap<GuardId, Actor>,
-    sender: mpsc::UnboundedSender<WriterCommand>,
+    sender: mpsc::Sender<WriterCommand>,
     message_count: u32,
     rate_window_start: tokio::time::Instant,
 }
@@ -1194,9 +1413,24 @@ struct ConnectionState {
 impl ConnectionState {
     fn accepts(&self, message: &ServerMessage) -> bool {
         self.subscriptions.iter().any(|subscription| {
-            subscription.channel == message.channel
-                && (subscription.room.is_none() || subscription.room == message.room)
+            message_reaches_subscription(message, &subscription.channel, &subscription.room)
         })
+    }
+}
+
+fn message_reaches_subscription(
+    message: &ServerMessage,
+    channel: &ChannelId,
+    room: &Option<String>,
+) -> bool {
+    if message.channel != *channel {
+        return false;
+    }
+
+    match (&message.room, room) {
+        (None, _) => true,
+        (Some(message_room), Some(subscription_room)) => message_room == subscription_room,
+        (Some(_), None) => false,
     }
 }
 
@@ -1219,6 +1453,9 @@ struct SubscriptionKey {
 struct PresenceEntry {
     key: String,
     member_value: String,
+    channel: ChannelId,
+    room: Option<String>,
+    actor_id: String,
 }
 
 fn auth_outcome_from_error(error: &AuthError) -> AuthOutcome {
@@ -1226,5 +1463,70 @@ fn auth_outcome_from_error(error: &AuthError) -> AuthOutcome {
         AuthError::Unauthorized(_) => AuthOutcome::Unauthorized,
         AuthError::Forbidden(_) => AuthOutcome::Forbidden,
         AuthError::Internal(_) => AuthOutcome::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_routing_matches_room_contract() {
+        let channel = ChannelId::new("chat");
+        let all_message = ServerMessage {
+            channel: channel.clone(),
+            event: ChannelEventId::new("notice"),
+            room: None,
+            payload: serde_json::Value::Null,
+        };
+        let room_message = ServerMessage {
+            channel: channel.clone(),
+            event: ChannelEventId::new("notice"),
+            room: Some("room:42".to_string()),
+            payload: serde_json::Value::Null,
+        };
+
+        assert!(message_reaches_subscription(&all_message, &channel, &None));
+        assert!(message_reaches_subscription(
+            &all_message,
+            &channel,
+            &Some("room:42".to_string())
+        ));
+        assert!(!message_reaches_subscription(
+            &room_message,
+            &channel,
+            &None
+        ));
+        assert!(message_reaches_subscription(
+            &room_message,
+            &channel,
+            &Some("room:42".to_string())
+        ));
+        assert!(!message_reaches_subscription(
+            &room_message,
+            &channel,
+            &Some("room:7".to_string())
+        ));
+    }
+
+    #[tokio::test]
+    async fn hub_reports_full_outbound_buffer() {
+        let hub = ConnectionHub::new(None, 1);
+        let (connection_id, _rx, _last_pong) = hub.register(ConnectionIdentity::default()).await;
+        let message = ServerMessage {
+            channel: ChannelId::new("chat"),
+            event: ChannelEventId::new("notice"),
+            room: None,
+            payload: serde_json::Value::Null,
+        };
+
+        assert!(hub
+            .send(connection_id, WriterCommand::Json(message.clone()))
+            .await
+            .is_ok());
+        assert!(matches!(
+            hub.send(connection_id, WriterCommand::Json(message)).await,
+            Err(HubSendError::Full)
+        ));
     }
 }

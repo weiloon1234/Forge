@@ -40,13 +40,41 @@ pub const PRESENCE_JOIN_EVENT: ChannelEventId = ChannelEventId::new("presence:jo
 pub const PRESENCE_LEAVE_EVENT: ChannelEventId = ChannelEventId::new("presence:leave");
 pub const ACK_EVENT: ChannelEventId = ChannelEventId::new("ack");
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientAction {
     Subscribe,
     Unsubscribe,
     Message,
     ClientEvent,
+}
+
+impl<'de> Deserialize<'de> for ClientAction {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "subscribe" | "Subscribe" => Ok(Self::Subscribe),
+            "unsubscribe" | "Unsubscribe" => Ok(Self::Unsubscribe),
+            "message" | "Message" => Ok(Self::Message),
+            "client_event" | "ClientEvent" => Ok(Self::ClientEvent),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &[
+                    "subscribe",
+                    "unsubscribe",
+                    "message",
+                    "client_event",
+                    "Subscribe",
+                    "Unsubscribe",
+                    "Message",
+                    "ClientEvent",
+                ],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -181,6 +209,7 @@ pub struct WebSocketPublisher {
     backend: RuntimeBackend,
     diagnostics: Arc<RuntimeDiagnostics>,
     history_ttl_seconds: u64,
+    history_buffer_size: usize,
 }
 
 impl WebSocketPublisher {
@@ -188,11 +217,13 @@ impl WebSocketPublisher {
         backend: RuntimeBackend,
         diagnostics: Arc<RuntimeDiagnostics>,
         history_ttl_seconds: u64,
+        history_buffer_size: usize,
     ) -> Self {
         Self {
             backend,
             diagnostics,
             history_ttl_seconds,
+            history_buffer_size: history_buffer_size.max(1),
         }
     }
 
@@ -226,7 +257,10 @@ impl WebSocketPublisher {
 
         // Buffer for replay so new subscribers can catch up on recent messages.
         let history_key = format!("ws:history:{}", message.channel);
-        let _ = self.backend.lpush_capped(&history_key, &payload, 50).await;
+        let _ = self
+            .backend
+            .lpush_capped(&history_key, &payload, self.history_buffer_size)
+            .await;
         if self.history_ttl_seconds > 0 {
             let _ = self
                 .backend
@@ -255,22 +289,20 @@ pub struct WebSocketRegistrar {
 
 /// Type for channel lifecycle callbacks (on_join / on_leave).
 pub type LifecycleCallback = Arc<
-    dyn for<'a> Fn(
-            &'a WebSocketContext,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+    dyn Fn(
+            WebSocketContext,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
         + Send
         + Sync,
 >;
 
 /// Type for dynamic per-subscription authorization callbacks.
 pub type AuthorizeCallback = Arc<
-    dyn for<'a> Fn(
-            &'a WebSocketContext,
-            &'a ChannelId,
-            Option<&'a str>,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+    dyn Fn(
+            WebSocketContext,
+            ChannelId,
+            Option<String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -337,7 +369,7 @@ impl WebSocketChannelOptions {
     /// ```
     pub fn authorize<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(&WebSocketContext, &ChannelId, Option<&str>) -> Fut + Send + Sync + 'static,
+        F: Fn(WebSocketContext, ChannelId, Option<String>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         self.authorize = Some(Arc::new(move |ctx, ch, room| Box::pin(f(ctx, ch, room))));
@@ -353,7 +385,7 @@ impl WebSocketChannelOptions {
     /// Register a callback invoked when a client subscribes to this channel.
     pub fn on_join<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(&WebSocketContext) -> Fut + Send + Sync + 'static,
+        F: Fn(WebSocketContext) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         self.on_join = Some(Arc::new(move |ctx| Box::pin(f(ctx))));
@@ -363,7 +395,7 @@ impl WebSocketChannelOptions {
     /// Register a callback invoked when a client unsubscribes from this channel.
     pub fn on_leave<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(&WebSocketContext) -> Fut + Send + Sync + 'static,
+        F: Fn(WebSocketContext) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         self.on_leave = Some(Arc::new(move |ctx| Box::pin(f(ctx))));

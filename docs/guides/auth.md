@@ -56,23 +56,17 @@ Config:              [auth.guards.user]
 ### Step 3: Define Permissions and Policies
 
 ```rust
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AppEnum)]
+#[forge(id_type = PermissionId)]
 enum Permission {
+    #[forge(key = "posts:read")]
     PostsRead,
+    #[forge(key = "posts:write")]
     PostsWrite,
+    #[forge(key = "posts:delete")]
     PostsDelete,
+    #[forge(key = "users:manage")]
     UsersManage,
-}
-
-impl From<Permission> for PermissionId {
-    fn from(v: Permission) -> Self {
-        match v {
-            Permission::PostsRead => PermissionId::new("posts:read"),
-            Permission::PostsWrite => PermissionId::new("posts:write"),
-            Permission::PostsDelete => PermissionId::new("posts:delete"),
-            Permission::UsersManage => PermissionId::new("users:manage"),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]

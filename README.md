@@ -442,7 +442,7 @@ async fn create_user(
 
 | Derive | Gives you |
 |--------|-----------|
-| `AppEnum` | DB column type, serde serialization, OpenAPI schema, validation rule |
+| `AppEnum` | DB column type, serde serialization, OpenAPI schema, validation rule, optional typed ID conversion |
 | `Model` | Typed columns, query builders, create/update/delete, lifecycle hooks |
 | `ApiSchema` | JSON Schema for OpenAPI (auto-resolves nested AppEnum fields) |
 | `Validate` | Request validation rules, custom messages, `Validated<T>` extractor |

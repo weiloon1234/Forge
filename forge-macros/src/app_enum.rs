@@ -2,7 +2,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Expr, ExprLit, Fields, Lit, Variant};
+use syn::{Data, DeriveInput, Expr, ExprLit, Fields, Lit, Path, Variant};
 
 // ---------------------------------------------------------------------------
 // Compile-time identifier normalization (proc-macro version, independent from runtime)
@@ -78,6 +78,7 @@ struct VariantInfo {
 
 struct EnumArgs {
     id: Option<String>,
+    id_type: Option<Path>,
     label_prefix: Option<String>,
 }
 
@@ -87,6 +88,7 @@ struct EnumArgs {
 
 fn parse_enum_args(attrs: &[syn::Attribute]) -> syn::Result<EnumArgs> {
     let mut id = None;
+    let mut id_type = None;
     let mut label_prefix = None;
 
     for attr in attrs.iter().filter(|a| a.path().is_ident("forge")) {
@@ -97,6 +99,14 @@ fn parse_enum_args(attrs: &[syn::Attribute]) -> syn::Result<EnumArgs> {
                     return Err(syn::Error::new(value.span(), "duplicate `id` attribute"));
                 }
                 id = Some(value.value());
+            } else if meta.path.is_ident("id_type") {
+                if id_type.is_some() {
+                    return Err(syn::Error::new(
+                        meta.path.span(),
+                        "duplicate `id_type` attribute",
+                    ));
+                }
+                id_type = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("label_prefix") {
                 let value: syn::LitStr = meta.value()?.parse()?;
                 if label_prefix.is_some() {
@@ -108,14 +118,18 @@ fn parse_enum_args(attrs: &[syn::Attribute]) -> syn::Result<EnumArgs> {
                 label_prefix = Some(value.value());
             } else {
                 return Err(meta.error(
-                    "unsupported forge enum attribute; expected id = \"...\" or label_prefix = \"...\"",
+                    "unsupported forge enum attribute; expected id = \"...\", id_type = Type, or label_prefix = \"...\"",
                 ));
             }
             Ok(())
         })?;
     }
 
-    Ok(EnumArgs { id, label_prefix })
+    Ok(EnumArgs {
+        id,
+        id_type,
+        label_prefix,
+    })
 }
 
 fn parse_variant_attrs(
@@ -250,6 +264,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
 
     let is_int_backed = all_have_discriminant;
+    if is_int_backed && enum_args.id_type.is_some() {
+        return Err(syn::Error::new_spanned(
+            &ident,
+            "id_type is only supported for string-backed AppEnum enums",
+        ));
+    }
 
     // Parse each variant
     let mut variant_infos = Vec::new();
@@ -318,6 +338,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let serialize = generate_serialize_impl(&ident, &variant_infos, is_int_backed)?;
     let deserialize = generate_deserialize_impl(&ident, &variant_infos, is_int_backed)?;
     let api_schema = generate_api_schema_impl(&ident, &variant_infos, is_int_backed);
+    let typed_id = generate_typed_id_impl(&ident, &variant_infos, enum_args.id_type.as_ref());
 
     Ok(quote! {
         #forge_impl
@@ -326,7 +347,56 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         #serialize
         #deserialize
         #api_schema
+        #typed_id
     })
+}
+
+fn generate_typed_id_impl(
+    ident: &syn::Ident,
+    variants: &[VariantInfo],
+    id_type: Option<&Path>,
+) -> TokenStream {
+    let Some(id_type) = id_type else {
+        return TokenStream::new();
+    };
+
+    let as_str_arms = variants.iter().map(|v| {
+        let v_ident = &v.ident;
+        let key = &v.key_str;
+        quote!(Self::#v_ident => #key)
+    });
+
+    quote! {
+        impl #ident {
+            pub const fn as_str(&self) -> &'static str {
+                match self {
+                    #(#as_str_arms),*
+                }
+            }
+
+            pub const fn typed_id(self) -> #id_type {
+                #id_type::new(self.as_str())
+            }
+        }
+
+        impl ::core::convert::From<#ident> for #id_type {
+            fn from(value: #ident) -> Self {
+                value.typed_id()
+            }
+        }
+
+        impl ::core::convert::AsRef<str> for #ident {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl ::core::fmt::Display for #ident {
+            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

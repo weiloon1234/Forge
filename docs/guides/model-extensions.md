@@ -61,6 +61,7 @@ enum TicketStatus {
 | OpenAPI schema | `ApiSchema` impl with correct enum values |
 | Validation | `.app_enum::<OrderStatus>()` rule |
 | Metadata | `ForgeAppEnum` trait (id, keys, labels, options) |
+| Typed IDs | `#[forge(id_type = PermissionId)]` generates `From<Enum>`, `as_str`, `typed_id`, `AsRef<str>`, and `Display` for string-backed enums |
 
 ### Usage in Models
 

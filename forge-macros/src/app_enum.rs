@@ -515,6 +515,11 @@ fn generate_to_db_value_impl(
             quote!(Self::#v_ident => ::forge::database::DbValue::Text(#k.to_string()))
         }
     });
+    let db_type = if is_int_backed {
+        quote!(::forge::database::DbType::Int32)
+    } else {
+        quote!(::forge::database::DbType::Text)
+    };
 
     Ok(quote! {
         impl ::forge::database::ToDbValue for #ident {
@@ -522,6 +527,10 @@ fn generate_to_db_value_impl(
                 match self {
                     #(#arms),*
                 }
+            }
+
+            fn db_type() -> ::forge::database::DbType {
+                #db_type
             }
         }
     })

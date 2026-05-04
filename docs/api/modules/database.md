@@ -546,6 +546,7 @@ trait SeederFile
   fn run_in_transaction() -> bool
 trait ToDbValue
   fn to_db_value(self) -> DbValue
+  fn db_type() -> DbType
 async fn scope_model_extensions<F, T>(future: F) -> T
 ```
 

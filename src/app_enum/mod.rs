@@ -322,6 +322,12 @@ mod tests {
         assert_eq!(UserStatus::Verified.to_db_value(), DbValue::Int32(1));
     }
 
+    #[test]
+    fn to_db_value_exposes_db_type() {
+        assert_eq!(<OrderStatus as ToDbValue>::db_type(), DbType::Text);
+        assert_eq!(<UserStatus as ToDbValue>::db_type(), DbType::Int32);
+    }
+
     // -----------------------------------------------------------------------
     // FromDbValue tests
     // -----------------------------------------------------------------------

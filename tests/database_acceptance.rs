@@ -184,6 +184,10 @@ impl ToDbValue for MerchantStatus {
             Self::Suspended => "suspended".into(),
         }
     }
+
+    fn db_type() -> DbType {
+        DbType::Text
+    }
 }
 
 impl FromDbValue for MerchantStatus {
@@ -386,6 +390,32 @@ struct HookedPost {
 
 fn fixed_time(day: u32) -> DateTime {
     DateTime::parse(format!("2026-01-{day:02}T10:00:00Z")).unwrap()
+}
+
+#[test]
+fn nullable_column_compare_ops_accept_inner_values() {
+    let now = fixed_time(10);
+
+    let _ = OptOutSoftDeletePost::DELETED_AT.eq(now);
+    let _ = OptOutSoftDeletePost::DELETED_AT.not_eq(now);
+    let _ = OptOutSoftDeletePost::DELETED_AT.lt(now);
+    let _ = OptOutSoftDeletePost::DELETED_AT.lte(now);
+    let _ = OptOutSoftDeletePost::DELETED_AT.gt(now);
+    let _ = OptOutSoftDeletePost::DELETED_AT.gte(now);
+    let _ = OptOutSoftDeletePost::DELETED_AT.in_list([now]);
+
+    assert_eq!(
+        None::<DateTime>.to_db_value(),
+        DbValue::Null(DbType::TimestampTz)
+    );
+
+    assert!(matches!(
+        OptOutSoftDeletePost::DELETED_AT.eq(None::<DateTime>),
+        Condition::Comparison {
+            right: Expr::Value(DbValue::Null(DbType::TimestampTz)),
+            ..
+        }
+    ));
 }
 
 #[async_trait]
@@ -1529,6 +1559,86 @@ async fn timestamps_and_soft_deletes_work_on_model_first_writes() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn nullable_timestamp_comparison_excludes_nulls_and_future_values() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let now = fixed_time(15);
+    let past = fixed_time(14);
+    let future = fixed_time(16);
+
+    let compiled = OptOutSoftDeletePost::query()
+        .where_(Condition::or([
+            OptOutSoftDeletePost::DELETED_AT.is_null(),
+            OptOutSoftDeletePost::DELETED_AT.lte(now),
+        ]))
+        .to_compiled_sql()
+        .unwrap();
+    assert!(compiled.sql.contains(
+        "(\"forge_test_posts\".\"deleted_at\" IS NULL OR \"forge_test_posts\".\"deleted_at\" <= $1::timestamptz)"
+    ));
+    assert_eq!(compiled.bindings, vec![DbValue::TimestampTz(now)]);
+
+    OptOutSoftDeletePost::create()
+        .set(OptOutSoftDeletePost::ID, 30_i64)
+        .set(OptOutSoftDeletePost::TITLE, "No window")
+        .set(OptOutSoftDeletePost::BODY, "Null deleted_at")
+        .set(OptOutSoftDeletePost::DELETED_AT, None::<DateTime>)
+        .save(app)
+        .await
+        .unwrap();
+    OptOutSoftDeletePost::create()
+        .set(OptOutSoftDeletePost::ID, 31_i64)
+        .set(OptOutSoftDeletePost::TITLE, "Past")
+        .set(OptOutSoftDeletePost::BODY, "Past deleted_at")
+        .set(OptOutSoftDeletePost::DELETED_AT, past)
+        .save(app)
+        .await
+        .unwrap();
+    OptOutSoftDeletePost::create()
+        .set(OptOutSoftDeletePost::ID, 32_i64)
+        .set(OptOutSoftDeletePost::TITLE, "Future")
+        .set(OptOutSoftDeletePost::BODY, "Future deleted_at")
+        .set(OptOutSoftDeletePost::DELETED_AT, future)
+        .save(app)
+        .await
+        .unwrap();
+
+    let expired = OptOutSoftDeletePost::query()
+        .where_(OptOutSoftDeletePost::DELETED_AT.lte(now))
+        .order_by(OptOutSoftDeletePost::ID.asc())
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(
+        expired.iter().map(|post| post.id).collect::<Vec<_>>(),
+        vec![31_i64]
+    );
+
+    let nullable_or_expired = OptOutSoftDeletePost::query()
+        .where_(Condition::or([
+            OptOutSoftDeletePost::DELETED_AT.is_null(),
+            OptOutSoftDeletePost::DELETED_AT.lte(now),
+        ]))
+        .order_by(OptOutSoftDeletePost::ID.asc())
+        .get(database)
+        .await
+        .unwrap();
+    assert_eq!(
+        nullable_or_expired
+            .iter()
+            .map(|post| post.id)
+            .collect::<Vec<_>>(),
+        vec![30_i64, 31_i64]
+    );
 }
 
 #[tokio::test]

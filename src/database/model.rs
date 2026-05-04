@@ -26,6 +26,16 @@ use super::runtime::{DatabaseManager, DatabaseTransaction, DbRecord, QueryExecut
 
 pub trait ToDbValue {
     fn to_db_value(self) -> DbValue;
+
+    fn db_type() -> DbType
+    where
+        Self: Sized,
+    {
+        panic!(
+            "{} does not expose a static database type",
+            type_name::<Self>()
+        )
+    }
 }
 
 pub trait FromDbValue: Sized {
@@ -74,70 +84,41 @@ where
     }
 }
 
-impl<T, V> IntoFieldValue<Option<T>> for V
-where
-    V: IntoColumnValue<Option<T>>,
-    T: ToDbValue,
-{
-    fn into_field_value(self, db_type: DbType) -> DbValue {
-        match self.into_column_value() {
-            Some(value) => value.to_db_value(),
-            None => DbValue::Null(db_type),
-        }
-    }
-}
-
 impl ToDbValue for DbValue {
     fn to_db_value(self) -> DbValue {
         self
     }
 }
 
-impl ToDbValue for i64 {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Int64(self)
-    }
+macro_rules! impl_to_db_value {
+    ($ty:ty, $variant:ident, $db_type:ident) => {
+        impl ToDbValue for $ty {
+            fn to_db_value(self) -> DbValue {
+                DbValue::$variant(self)
+            }
+
+            fn db_type() -> DbType {
+                DbType::$db_type
+            }
+        }
+    };
 }
 
-impl ToDbValue for i16 {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Int16(self)
-    }
-}
-
-impl ToDbValue for i32 {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Int32(self)
-    }
-}
-
-impl ToDbValue for bool {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Bool(self)
-    }
-}
-
-impl ToDbValue for f64 {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Float64(self)
-    }
-}
-
-impl ToDbValue for f32 {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Float32(self)
-    }
-}
-
-impl ToDbValue for Numeric {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Numeric(self)
-    }
-}
+impl_to_db_value!(i64, Int64, Int64);
+impl_to_db_value!(i16, Int16, Int16);
+impl_to_db_value!(i32, Int32, Int32);
+impl_to_db_value!(bool, Bool, Bool);
+impl_to_db_value!(f64, Float64, Float64);
+impl_to_db_value!(f32, Float32, Float32);
+impl_to_db_value!(Numeric, Numeric, Numeric);
 
 impl ToDbValue for String {
     fn to_db_value(self) -> DbValue {
         DbValue::Text(self)
+    }
+
+    fn db_type() -> DbType {
+        DbType::Text
     }
 }
 
@@ -145,53 +126,54 @@ impl ToDbValue for &str {
     fn to_db_value(self) -> DbValue {
         DbValue::Text(self.to_string())
     }
-}
 
-impl ToDbValue for serde_json::Value {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Json(self)
+    fn db_type() -> DbType {
+        DbType::Text
     }
 }
 
-impl ToDbValue for Uuid {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Uuid(self)
-    }
-}
+impl_to_db_value!(serde_json::Value, Json, Json);
+
+impl_to_db_value!(Uuid, Uuid, Uuid);
 
 impl<M> ToDbValue for ModelId<M> {
     fn to_db_value(self) -> DbValue {
         DbValue::Uuid(self.into_uuid())
     }
-}
 
-impl ToDbValue for DateTime {
-    fn to_db_value(self) -> DbValue {
-        DbValue::TimestampTz(self)
+    fn db_type() -> DbType {
+        DbType::Uuid
     }
 }
 
-impl ToDbValue for LocalDateTime {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Timestamp(self)
-    }
-}
-
-impl ToDbValue for Date {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Date(self)
-    }
-}
-
-impl ToDbValue for Time {
-    fn to_db_value(self) -> DbValue {
-        DbValue::Time(self)
-    }
-}
+impl_to_db_value!(DateTime, TimestampTz, TimestampTz);
+impl_to_db_value!(LocalDateTime, Timestamp, Timestamp);
+impl_to_db_value!(Date, Date, Date);
+impl_to_db_value!(Time, Time, Time);
 
 impl ToDbValue for Vec<u8> {
     fn to_db_value(self) -> DbValue {
         DbValue::Bytea(self)
+    }
+
+    fn db_type() -> DbType {
+        DbType::Bytea
+    }
+}
+
+impl<T> ToDbValue for Option<T>
+where
+    T: ToDbValue,
+{
+    fn to_db_value(self) -> DbValue {
+        match self {
+            Some(value) => value.to_db_value(),
+            None => DbValue::Null(T::db_type()),
+        }
+    }
+
+    fn db_type() -> DbType {
+        T::db_type()
     }
 }
 
@@ -405,10 +387,11 @@ impl IntoColumnValue<Numeric> for i32 {
 trait DbArrayElement: Sized {
     fn to_array_value(values: Vec<Self>) -> DbValue;
     fn from_array_value(value: &DbValue) -> Result<Vec<Self>>;
+    fn array_db_type() -> DbType;
 }
 
 macro_rules! impl_array_value {
-    ($ty:ty, $variant:ident, $name:literal) => {
+    ($ty:ty, $variant:ident, $db_type:ident, $name:literal) => {
         impl DbArrayElement for $ty {
             fn to_array_value(values: Vec<Self>) -> DbValue {
                 DbValue::$variant(values)
@@ -425,25 +408,29 @@ macro_rules! impl_array_value {
                     _ => Err(Error::message(concat!("expected ", $name, " array value"))),
                 }
             }
+
+            fn array_db_type() -> DbType {
+                DbType::$db_type
+            }
         }
     };
 }
 
-impl_array_value!(i16, Int16Array, "int16");
-impl_array_value!(i32, Int32Array, "int32");
-impl_array_value!(i64, Int64Array, "int64");
-impl_array_value!(bool, BoolArray, "bool");
-impl_array_value!(f32, Float32Array, "float32");
-impl_array_value!(f64, Float64Array, "float64");
-impl_array_value!(Numeric, NumericArray, "numeric");
-impl_array_value!(String, TextArray, "text");
-impl_array_value!(serde_json::Value, JsonArray, "json");
-impl_array_value!(Uuid, UuidArray, "uuid");
-impl_array_value!(DateTime, TimestampTzArray, "timestamptz");
-impl_array_value!(LocalDateTime, TimestampArray, "timestamp");
-impl_array_value!(Date, DateArray, "date");
-impl_array_value!(Time, TimeArray, "time");
-impl_array_value!(Vec<u8>, ByteaArray, "bytea");
+impl_array_value!(i16, Int16Array, Int16Array, "int16");
+impl_array_value!(i32, Int32Array, Int32Array, "int32");
+impl_array_value!(i64, Int64Array, Int64Array, "int64");
+impl_array_value!(bool, BoolArray, BoolArray, "bool");
+impl_array_value!(f32, Float32Array, Float32Array, "float32");
+impl_array_value!(f64, Float64Array, Float64Array, "float64");
+impl_array_value!(Numeric, NumericArray, NumericArray, "numeric");
+impl_array_value!(String, TextArray, TextArray, "text");
+impl_array_value!(serde_json::Value, JsonArray, JsonArray, "json");
+impl_array_value!(Uuid, UuidArray, UuidArray, "uuid");
+impl_array_value!(DateTime, TimestampTzArray, TimestampTzArray, "timestamptz");
+impl_array_value!(LocalDateTime, TimestampArray, TimestampArray, "timestamp");
+impl_array_value!(Date, DateArray, DateArray, "date");
+impl_array_value!(Time, TimeArray, TimeArray, "time");
+impl_array_value!(Vec<u8>, ByteaArray, ByteaArray, "bytea");
 
 impl<T> ToDbValue for Vec<T>
 where
@@ -451,6 +438,10 @@ where
 {
     fn to_db_value(self) -> DbValue {
         T::to_array_value(self)
+    }
+
+    fn db_type() -> DbType {
+        T::array_db_type()
     }
 }
 
@@ -467,6 +458,10 @@ impl<M> DbArrayElement for ModelId<M> {
             DbValue::Null(_) => Err(Error::message("expected uuid array, found null")),
             _ => Err(Error::message("expected uuid array value")),
         }
+    }
+
+    fn array_db_type() -> DbType {
+        DbType::UuidArray
     }
 }
 

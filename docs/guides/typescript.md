@@ -136,6 +136,31 @@ export const OrderStatusMeta = {
 } as const;
 ```
 
+String AppEnums whose keys are consistently shaped as `<module>.<action>` also export
+grouped helpers. This keeps permission call sites typed without maintaining a
+parallel frontend map:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, forge::AppEnum)]
+#[forge(id_type = PermissionId)]
+pub enum Permission {
+    #[forge(key = "audit_logs.read")]
+    AuditLogsRead,
+    #[forge(key = "observability.view")]
+    ObservabilityView,
+}
+```
+
+```typescript
+export const PermissionGroups = {
+  auditLogs: { read: "audit_logs.read" },
+  observability: { view: "observability.view" },
+} as const;
+```
+
+The exporter fails fast if one enum mixes dotted and non-dotted keys, or if two
+module names normalize to the same camelCase TypeScript property.
+
 ### `forge::TS` (escape hatch)
 
 For any type that isn't a DTO or AppEnum but needs TypeScript export:

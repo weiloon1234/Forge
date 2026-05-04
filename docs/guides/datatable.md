@@ -178,6 +178,27 @@ Supported relation filter input:
 - `LikeAny` over declared relation columns, such as `merchant.name|merchant.slug`
 - normal filter ops like `Eq`, `Like`, `Has`, `HasLike`, date, datetime, and numeric comparisons when the target column type supports them
 
+Client requests still use the normal `DatatableRequest` shape; relation filters are server-side declarations, not frontend metadata:
+
+```json
+{
+  "page": 1,
+  "per_page": 25,
+  "filters": [
+    { "field": "total", "op": "gte", "value": { "number": 5000 } },
+    { "field": "merchant.name", "op": "like", "value": { "text": "forge" } },
+    { "field": "tags.name", "op": "eq", "value": { "text": "priority" } },
+    { "field": "merchant.name|merchant.slug", "op": "like_any", "value": { "text": "forge" } }
+  ]
+}
+```
+
+Legacy query strings normalize to the same filter inputs when routed through `DatatableRequest::from_query_params()`:
+
+```text
+?f-gte-total=5000&f-like-merchant-name=forge&f-tags-name=priority
+```
+
 Projection datatables should keep relation-like behavior explicit with `filter_by(...)`, `filter_having(...)`, or a custom `filters()` hook.
 
 ## Projection / Report Example

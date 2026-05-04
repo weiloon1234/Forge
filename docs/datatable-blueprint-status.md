@@ -53,6 +53,7 @@ All datatable modules live under `src/datatable/`:
 - `DatatableFilterInput` with field, op, value
 - `DatatableFilterOp` enum covering Eq, Like, date ranges, In, Has, etc.
 - `DatatableFilterValue` enum (Text, Bool, Number, Values)
+- Frontends send the same `DatatableFilterInput` shape for direct and relation filters; relation fields such as `merchant.name`, legacy aliases such as `merchant-name`, and multi-column `LikeAny` fields such as `merchant.name|merchant.slug` resolve only when declared by the server datatable
 
 ### Filter Metadata (Blueprint: Filter Field Types)
 
@@ -68,6 +69,7 @@ All datatable modules live under `src/datatable/`:
 - Legacy param normalization via `DatatableRequest::from_query_params()` supporting f-like-, f-date-, f-gte-, etc.
 - `apply_auto_filters()` building `Condition` from declared filter expressions + `DbType`
 - `DatatableRelationFilter` applies typed `where_has(...)` / `where_has_many_to_many(...)` filters for declared relation fields and legacy hyphen aliases
+- Relation filters are server-side declarations only; the framework does not expose arbitrary relation paths or add a separate frontend wire schema
 - `apply_sorts()` with column validation against declared sort expressions
 - Supports all filter ops: Eq, Like, Gt/Gte/Lt/Lte, Date/DateFrom/DateTo, DateTime ranges, In, Has, HasLike, LikeAny
 

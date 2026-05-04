@@ -2322,6 +2322,12 @@ trait DatatableExportDelivery: Send + Sync + 'static {
 | `DatatableRegistry` | Registry of all datatables |
 | `NoopExportDelivery` | No-op delivery |
 
+Relation filters are declared on the server with `Datatable::relation_filters()` and use the
+normal `DatatableFilterInput` request shape. Clients may send fields such as `merchant.name`,
+legacy aliases such as `merchant-name`, or declared multi-column `LikeAny` targets such as
+`merchant.name|merchant.slug`; undeclared relation paths are rejected by the normal filter
+validation flow.
+
 ---
 
 ## i18n/

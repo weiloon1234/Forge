@@ -8,6 +8,9 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 
 ### Added
 
+- Datatable relation filters: model datatables can opt in to typed relation-backed filters with `Datatable::relation_filters()`, `DatatableRelationFilter`, and `DatatableRelationColumn`.
+- Datatable relation filter coverage for belongs-to, has-many, many-to-many, legacy hyphen aliases, and `LikeAny` search across declared relation columns.
+- Consumer-facing datatable request examples for direct filters, relation filters, legacy query params, and multi-column relation search.
 - Release infrastructure: GitHub Actions CI, release-readiness workflow, release checklist, and local package dry-run verification.
 - Consumer documentation: root README, contributing guide, and a first-class plugin example.
 - WebSocket observability dashboard endpoints: `GET /_forge/ws/channels`, `GET /_forge/ws/presence/:channel`, `GET /_forge/ws/history/:channel`, and `GET /_forge/ws/stats`. History payloads are redacted by default; set `observability.websocket.include_payloads = true` to include them.
@@ -21,6 +24,10 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 
 ### Changed
 
+- Datatable blueprint/status documentation now reflects implemented JSON, filter, sort, download, export, registry, legacy query-param, and relation-filter acceptance coverage.
+- Consumer starter documentation now recommends the split bootstrap layout proven by the blueprint app fixture.
+- The README architecture diagram was replaced with an ASCII-safe AppBuilder/AppContext/kernel flow.
+- `forge-build` migration filename tests now assert the current parser diagnostics for invalid timestamps and malformed `YYYYMMDDHHMM_slug.rs` filenames.
 - Crate metadata is now publish-ready for the `0.1.x` line.
 - Verification contract now explicitly includes both fixture families and packaging checks.
 - `MaxBodySize` now also updates Axum's default extractor body limit, so JSON/Form/String extractors honor the configured Forge limit instead of staying capped at Axum's 2 MiB default.

@@ -1041,7 +1041,7 @@ Each guard is a separate authentication domain:
 - [x] Create `src/auth/token.rs` with `TokenManager`, `TokenPair`, `TokenAuthenticator`
 - [x] Wire `TokenManager` into bootstrap (auto-create for `driver = "token"` guards)
 - [x] Export from `src/lib.rs` and `src/prelude.rs`
-- [ ] Unit tests for issue/validate/refresh/revoke (requires DB — tested via acceptance tests)
+- [x] DB-backed acceptance coverage for issue/validate/refresh/revoke
 
 ## Phase 4: Session Subsystem ✅ Done
 - [x] Create `src/auth/session.rs` with `SessionManager`
@@ -1053,7 +1053,7 @@ Each guard is a separate authentication domain:
 
 ---
 
-# TODO (Beyond Token + Session)
+# Beyond Token + Session Status
 
 - **Rate limiting per actor** — ✅ Done (per-user rate limiting in HTTP middleware)
 - **Audit trail** — ✅ Done (optional actor in ModelHookContext via AppTransaction::set_actor())

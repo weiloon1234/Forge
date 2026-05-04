@@ -1,0 +1,5 @@
+error: ForgeId can only be derived for fieldless enum variants
+ --> tests/ui/derive/fail_forge_id_variant_fields.rs:6:5
+  |
+6 |     Api(String),
+  |     ^^^^^^^^^^^

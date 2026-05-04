@@ -203,7 +203,7 @@ impl FromDbValue for MerchantStatus {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = USERS_TABLE, primary_key_strategy = "manual")]
 struct User {
     id: i64,
     email: String,
@@ -224,7 +224,7 @@ impl User {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = MERCHANTS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = MERCHANTS_TABLE, primary_key_strategy = "manual")]
 struct Merchant {
     id: i64,
     user_id: i64,
@@ -238,7 +238,7 @@ struct Merchant {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = ORDERS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = ORDERS_TABLE, primary_key_strategy = "manual")]
 struct Order {
     id: i64,
     merchant_id: i64,
@@ -247,7 +247,7 @@ struct Order {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = ORDER_ITEMS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = ORDER_ITEMS_TABLE, primary_key_strategy = "manual")]
 struct OrderItem {
     id: i64,
     order_id: i64,
@@ -257,14 +257,14 @@ struct OrderItem {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = PRODUCTS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = PRODUCTS_TABLE, primary_key_strategy = "manual")]
 struct Product {
     id: i64,
     name: String,
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = TAGS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = TAGS_TABLE, primary_key_strategy = "manual")]
 struct Tag {
     id: i64,
     user_id: i64,
@@ -274,14 +274,14 @@ struct Tag {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = USERS_TABLE, primary_key_strategy = "manual")]
 struct TagCreator {
     id: i64,
     email: String,
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true)]
+#[forge(table = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true)]
 struct PostRecord {
     id: i64,
     title: String,
@@ -292,7 +292,7 @@ struct PostRecord {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = NUMERIC_POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true)]
+#[forge(table = NUMERIC_POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true)]
 struct NumericPostRecord {
     id: i64,
     amount: Numeric,
@@ -303,7 +303,7 @@ struct NumericPostRecord {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = POSTS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = POSTS_TABLE, primary_key_strategy = "manual")]
 struct DefaultSoftDeletePost {
     id: i64,
     title: String,
@@ -314,7 +314,7 @@ struct DefaultSoftDeletePost {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = false)]
+#[forge(table = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = false)]
 struct OptOutSoftDeletePost {
     id: i64,
     title: String,
@@ -325,7 +325,7 @@ struct OptOutSoftDeletePost {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = PASSWORD_USERS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = PASSWORD_USERS_TABLE, primary_key_strategy = "manual")]
 struct PasswordUser {
     id: i64,
     email: String,
@@ -378,7 +378,7 @@ impl ServiceProvider for TimestampHookProvider {
 struct HookedPostLifecycle;
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true, lifecycle = HookedPostLifecycle)]
+#[forge(table = POSTS_TABLE, primary_key_strategy = "manual", soft_deletes = true, lifecycle = HookedPostLifecycle)]
 struct HookedPost {
     id: i64,
     title: String,
@@ -674,7 +674,7 @@ impl ServiceProvider for LifecycleTestProvider {
 struct LifecycleUserHooks;
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE, primary_key_strategy = "manual", lifecycle = LifecycleUserHooks)]
+#[forge(table = USERS_TABLE, primary_key_strategy = "manual", lifecycle = LifecycleUserHooks)]
 struct LifecycleUser {
     id: i64,
     email: String,
@@ -781,7 +781,7 @@ impl ModelLifecycle<LifecycleUser> for LifecycleUserHooks {
 struct RejectingLifecycleUserHooks;
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = USERS_TABLE, primary_key_strategy = "manual", lifecycle = RejectingLifecycleUserHooks)]
+#[forge(table = USERS_TABLE, primary_key_strategy = "manual", lifecycle = RejectingLifecycleUserHooks)]
 struct RejectingLifecycleUser {
     id: i64,
     email: String,
@@ -803,7 +803,7 @@ impl ModelLifecycle<RejectingLifecycleUser> for RejectingLifecycleUserHooks {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = SAFE_USERS_TABLE)]
+#[forge(table = SAFE_USERS_TABLE)]
 struct SafeUuidUser {
     id: ModelId<SafeUuidUser>,
     email: String,

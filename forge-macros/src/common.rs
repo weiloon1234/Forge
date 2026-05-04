@@ -119,7 +119,7 @@ impl DbTypeSpec {
 
 #[derive(Default)]
 pub struct ModelArgs {
-    pub model: Option<Expr>,
+    pub table: Option<Expr>,
     pub primary_key: Option<LitStr>,
     pub primary_key_strategy: Option<LitStr>,
     pub lifecycle: Option<Path>,
@@ -167,8 +167,8 @@ pub fn parse_model_args(attrs: &[Attribute]) -> syn::Result<ModelArgs> {
 
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("forge")) {
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("model") {
-                set_once_expr(&mut args.model, "model", meta.value()?)?;
+            if meta.path.is_ident("table") {
+                set_once_expr(&mut args.table, "table", meta.value()?)?;
             } else if meta.path.is_ident("primary_key") {
                 set_once_parse(&mut args.primary_key, "primary_key", meta.value()?)?;
             } else if meta.path.is_ident("primary_key_strategy") {

@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 
 mod app_enum;
 mod common;
+mod forge_id;
 mod model;
 mod openapi;
 mod projection;
@@ -21,6 +22,11 @@ pub fn derive_projection(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(AppEnum, attributes(forge))]
 pub fn derive_app_enum(input: TokenStream) -> TokenStream {
     expand_enum_with_ts(input, app_enum::expand)
+}
+
+#[proc_macro_derive(ForgeId, attributes(forge))]
+pub fn derive_forge_id(input: TokenStream) -> TokenStream {
+    expand(input, forge_id::expand)
 }
 
 #[proc_macro_derive(Validate, attributes(validate))]

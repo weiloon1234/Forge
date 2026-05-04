@@ -22,60 +22,62 @@ use crate::support::{GuardId, MigrationId, PolicyId, ProbeId, SeederId};
 use crate::validation::RuleRegistry;
 
 #[derive(Clone)]
+pub(crate) struct RegistryHub {
+    pub(crate) event: EventRegistryHandle,
+    pub(crate) job: JobRegistryHandle,
+    pub(crate) job_middleware: JobMiddlewareRegistryHandle,
+    pub(crate) migration: MigrationRegistryHandle,
+    pub(crate) seeder: SeederRegistryHandle,
+    pub(crate) guard: GuardRegistryHandle,
+    pub(crate) policy: PolicyRegistryHandle,
+    pub(crate) authenticatable: AuthenticatableRegistryHandle,
+    pub(crate) readiness: ReadinessRegistryHandle,
+    pub(crate) storage_driver: StorageDriverRegistryHandle,
+    pub(crate) email_driver: EmailDriverRegistryHandle,
+    pub(crate) notification_channel: NotificationChannelRegistryHandle,
+    pub(crate) datatable: DatatableRegistryHandle,
+}
+
+impl RegistryHub {
+    pub(crate) fn new() -> Self {
+        Self {
+            event: crate::events::EventRegistryBuilder::shared(),
+            job: crate::jobs::JobRegistryBuilder::shared(),
+            job_middleware: crate::jobs::JobMiddlewareRegistryBuilder::shared(),
+            migration: crate::database::MigrationRegistryBuilder::shared(),
+            seeder: crate::database::SeederRegistryBuilder::shared(),
+            guard: crate::auth::GuardRegistryBuilder::shared(),
+            policy: crate::auth::PolicyRegistryBuilder::shared(),
+            authenticatable: crate::auth::AuthenticatableRegistryBuilder::shared(),
+            readiness: crate::logging::ReadinessRegistryBuilder::shared(),
+            storage_driver: crate::storage::StorageDriverRegistryBuilder::shared(),
+            email_driver: crate::email::EmailDriverRegistryBuilder::shared(),
+            notification_channel: NotificationChannelRegistryBuilder::shared(),
+            datatable: DatatableRegistryBuilder::shared(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ServiceRegistrar {
     container: Container,
     config: ConfigRepository,
     rules: RuleRegistry,
-    event_registry: EventRegistryHandle,
-    job_registry: JobRegistryHandle,
-    job_middleware_registry: JobMiddlewareRegistryHandle,
-    migration_registry: MigrationRegistryHandle,
-    seeder_registry: SeederRegistryHandle,
-    guard_registry: GuardRegistryHandle,
-    policy_registry: PolicyRegistryHandle,
-    authenticatable_registry: AuthenticatableRegistryHandle,
-    readiness_registry: ReadinessRegistryHandle,
-    storage_driver_registry: StorageDriverRegistryHandle,
-    email_driver_registry: EmailDriverRegistryHandle,
-    notification_channel_registry: NotificationChannelRegistryHandle,
-    datatable_registry: DatatableRegistryHandle,
+    registries: RegistryHub,
 }
 
 impl ServiceRegistrar {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         container: Container,
         config: ConfigRepository,
         rules: RuleRegistry,
-        event_registry: EventRegistryHandle,
-        job_registry: JobRegistryHandle,
-        job_middleware_registry: JobMiddlewareRegistryHandle,
-        migration_registry: MigrationRegistryHandle,
-        seeder_registry: SeederRegistryHandle,
-        guard_registry: GuardRegistryHandle,
-        policy_registry: PolicyRegistryHandle,
-        authenticatable_registry: AuthenticatableRegistryHandle,
-        readiness_registry: ReadinessRegistryHandle,
-        storage_driver_registry: StorageDriverRegistryHandle,
-        email_driver_registry: EmailDriverRegistryHandle,
+        registries: RegistryHub,
     ) -> Self {
         Self {
             container,
             config,
             rules,
-            event_registry,
-            job_registry,
-            job_middleware_registry,
-            migration_registry,
-            seeder_registry,
-            guard_registry,
-            policy_registry,
-            authenticatable_registry,
-            readiness_registry,
-            storage_driver_registry,
-            email_driver_registry,
-            notification_channel_registry: NotificationChannelRegistryBuilder::shared(),
-            datatable_registry: DatatableRegistryBuilder::shared(),
+            registries,
         }
     }
 
@@ -127,7 +129,8 @@ impl ServiceRegistrar {
         E: Event,
         L: EventListener<E>,
     {
-        self.event_registry
+        self.registries
+            .event
             .lock()
             .expect("event registry lock poisoned")
             .listen::<E, L>(listener);
@@ -138,14 +141,16 @@ impl ServiceRegistrar {
     where
         J: Job,
     {
-        self.job_registry
+        self.registries
+            .job
             .lock()
             .expect("job registry lock poisoned")
             .register::<J>()
     }
 
     pub fn register_job_middleware<M: JobMiddleware>(&self, middleware: M) -> Result<()> {
-        self.job_middleware_registry
+        self.registries
+            .job_middleware
             .lock()
             .expect("job middleware registry lock poisoned")
             .register(Arc::new(middleware));
@@ -159,7 +164,8 @@ impl ServiceRegistrar {
     where
         M: MigrationFile,
     {
-        self.migration_registry
+        self.registries
+            .migration
             .lock()
             .expect("migration registry lock poisoned")
             .register_file::<M>(id.into())
@@ -169,7 +175,8 @@ impl ServiceRegistrar {
     where
         S: SeederFile,
     {
-        self.seeder_registry
+        self.registries
+            .seeder
             .lock()
             .expect("seeder registry lock poisoned")
             .register_file::<S>(id.into())
@@ -180,7 +187,8 @@ impl ServiceRegistrar {
         I: Into<GuardId>,
         G: BearerAuthenticator,
     {
-        self.guard_registry
+        self.registries
+            .guard
             .lock()
             .expect("guard registry lock poisoned")
             .register_arc(id, Arc::new(guard))
@@ -191,7 +199,8 @@ impl ServiceRegistrar {
         I: Into<PolicyId>,
         P: Policy,
     {
-        self.policy_registry
+        self.registries
+            .policy
             .lock()
             .expect("policy registry lock poisoned")
             .register_arc(id, Arc::new(policy))
@@ -201,7 +210,8 @@ impl ServiceRegistrar {
     where
         M: Authenticatable,
     {
-        self.authenticatable_registry
+        self.registries
+            .authenticatable
             .lock()
             .expect("authenticatable registry lock poisoned")
             .register::<M>()
@@ -212,21 +222,24 @@ impl ServiceRegistrar {
         I: Into<ProbeId>,
         C: ReadinessCheck,
     {
-        self.readiness_registry
+        self.registries
+            .readiness
             .lock()
             .expect("readiness registry lock poisoned")
             .register_arc(id, Arc::new(check))
     }
 
     pub fn register_storage_driver(&self, name: &str, factory: StorageDriverFactory) -> Result<()> {
-        self.storage_driver_registry
+        self.registries
+            .storage_driver
             .lock()
             .expect("storage driver registry lock poisoned")
             .register(name.to_string(), factory)
     }
 
     pub fn register_email_driver(&self, name: &str, factory: EmailDriverFactory) -> Result<()> {
-        self.email_driver_registry
+        self.registries
+            .email_driver
             .lock()
             .expect("email driver registry lock poisoned")
             .register(name.to_string(), factory)
@@ -237,32 +250,34 @@ impl ServiceRegistrar {
         I: Into<crate::support::NotificationChannelId>,
         N: NotificationChannel,
     {
-        self.notification_channel_registry
+        self.registries
+            .notification_channel
             .lock()
             .expect("notification channel registry lock poisoned")
             .register(id, Arc::new(channel))
     }
 
     pub(crate) fn notification_channel_registry(&self) -> NotificationChannelRegistryHandle {
-        self.notification_channel_registry.clone()
+        self.registries.notification_channel.clone()
     }
 
     pub(crate) fn job_middleware_registry(&self) -> JobMiddlewareRegistryHandle {
-        self.job_middleware_registry.clone()
+        self.registries.job_middleware.clone()
     }
 
     pub fn register_datatable<D>(&self) -> Result<()>
     where
         D: crate::datatable::Datatable,
     {
-        self.datatable_registry
+        self.registries
+            .datatable
             .lock()
             .expect("datatable registry lock poisoned")
             .register::<D>()
     }
 
     pub(crate) fn datatable_registry(&self) -> DatatableRegistryHandle {
-        self.datatable_registry.clone()
+        self.registries.datatable.clone()
     }
 }
 

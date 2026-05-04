@@ -55,6 +55,7 @@ typed_identifier!(GuardId);
 typed_identifier!(PolicyId);
 typed_identifier!(PermissionId);
 typed_identifier!(RoleId);
+typed_identifier!(RouteId);
 typed_identifier!(ValidationRuleId);
 typed_identifier!(ChannelId);
 typed_identifier!(ChannelEventId);
@@ -190,7 +191,7 @@ impl<M> From<ModelId<M>> for Uuid {
 mod tests {
     use super::{
         ChannelId, GuardId, MigrationId, ModelId, PluginAssetId, PluginId, PluginScaffoldId,
-        ProbeId, QueueId, SeederId,
+        ProbeId, QueueId, RouteId, SeederId,
     };
     use uuid::Uuid;
 
@@ -203,6 +204,7 @@ mod tests {
         const CHAT: ChannelId = ChannelId::new("chat");
         const READINESS: ProbeId = ProbeId::new("ready.database");
         const DEFAULT_QUEUE: QueueId = QueueId::new("default");
+        const ROUTE: RouteId = RouteId::new("users.show");
         const PLUGIN: PluginId = PluginId::new("forge.plugin");
         const ASSET: PluginAssetId = PluginAssetId::new("config");
         const SCAFFOLD: PluginScaffoldId = PluginScaffoldId::new("dashboard");
@@ -213,6 +215,7 @@ mod tests {
         assert_eq!(CHAT.as_str(), "chat");
         assert_eq!(READINESS.as_str(), "ready.database");
         assert_eq!(DEFAULT_QUEUE.as_str(), "default");
+        assert_eq!(ROUTE.as_str(), "users.show");
         assert_eq!(PLUGIN.as_str(), "forge.plugin");
         assert_eq!(ASSET.as_str(), "config");
         assert_eq!(SCAFFOLD.as_str(), "dashboard");

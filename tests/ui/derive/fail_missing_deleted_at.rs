@@ -1,7 +1,7 @@
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "posts", soft_deletes = true)]
+#[forge(table = "posts", soft_deletes = true)]
 struct Post {
     id: ModelId<Post>,
     title: String,

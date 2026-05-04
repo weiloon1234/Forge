@@ -1,0 +1,5 @@
+error: unsupported forge attribute for ForgeId derive; expected id = ... or rename_all = "snake_case"
+ --> tests/ui/derive/fail_forge_id_unsupported_attr.rs:4:30
+  |
+4 | #[forge(id = forge::GuardId, prefix = "admin")]
+  |                              ^^^^^^

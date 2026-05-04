@@ -167,7 +167,7 @@ mod tests {
     use crate::database::{ColumnRef, DbType, ProjectionField};
 
     #[derive(Debug, serde::Serialize, crate::Model)]
-    #[forge(model = "datatable_column_models", primary_key_strategy = "manual")]
+    #[forge(table = "datatable_column_models", primary_key_strategy = "manual")]
     struct ModelRow {
         id: i64,
     }

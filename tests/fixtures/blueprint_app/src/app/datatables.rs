@@ -6,7 +6,7 @@ const FIXTURE_USERS_TABLE: &str = "fixture_users";
 const FIXTURE_REPORTS_TABLE: &str = "fixture_reports";
 
 #[derive(Debug, Serialize, forge::Model)]
-#[forge(model = FIXTURE_USERS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = FIXTURE_USERS_TABLE, primary_key_strategy = "manual")]
 pub struct FixtureUser {
     id: i64,
     email: String,

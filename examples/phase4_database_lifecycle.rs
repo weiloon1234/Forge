@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "users")]
+#[forge(table = "users")]
 struct User {
     id: ModelId<User>,
     email: String,

@@ -18,8 +18,8 @@ struct HttpRegistrar
   fn new() -> Self
   fn route( &mut self, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
   fn route_with_options( &mut self, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
-  fn route_named( &mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
-  fn route_named_with_options( &mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
+  fn route_named<I>( &mut self, name: I, path: &str, method_router: MethodRouter<AppContext>, ) -> &mut Self
+  fn route_named_with_options<I>( &mut self, name: I, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions, ) -> &mut Self
   fn scope( &mut self, path: &str, f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>, ) -> Result<&mut Self>
   fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self
   fn merge(&mut self, router: HttpRouter) -> &mut Self
@@ -265,11 +265,11 @@ struct MessageResponse
 ```rust
 struct RouteRegistry
   fn new() -> Self
-  fn register(&mut self, name: impl Into<String>, pattern: impl Into<String>)
-  fn url(&self, name: &str, params: &[(&str, &str)]) -> Result<String>
-  fn has(&self, name: &str) -> bool
-  fn iter(&self) -> impl Iterator<Item = (&String, &String)>
-  fn signed_url( &self, name: &str, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime, ) -> Result<String>
+  fn register(&mut self, name: impl Into<RouteId>, pattern: impl Into<String>)
+  fn url<I>(&self, name: I, params: &[(&str, &str)]) -> Result<String>
+  fn has<I>(&self, name: I) -> bool
+  fn iter(&self) -> impl Iterator<Item = (&RouteId, &String)>
+  fn signed_url( &self, name: impl Into<RouteId>, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime, ) -> Result<String>
   fn verify_signature(url: &str, signing_key: &[u8]) -> Result<()>
 ```
 

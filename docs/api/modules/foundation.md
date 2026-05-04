@@ -88,8 +88,8 @@ struct AppContext
   fn lock(&self) -> Result<Arc<DistributedLock>>
   async fn notify( &self, notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> Result<()>
   async fn notify_queued( &self, notifiable: &dyn Notifiable, notification: &dyn Notification, ) -> Result<()>
-  fn route_url(&self, name: &str, params: &[(&str, &str)]) -> Result<String>
-  fn signed_route_url( &self, name: &str, params: &[(&str, &str)], expires_at: DateTime, ) -> Result<String>
+  fn route_url<I>(&self, name: I, params: &[(&str, &str)]) -> Result<String>
+  fn signed_route_url<I>( &self, name: I, params: &[(&str, &str)], expires_at: DateTime, ) -> Result<String>
   fn verify_signed_url(&self, url: &str) -> Result<()>
   async fn shutdown_plugins(&self) -> Result<()>
 struct AppTransaction

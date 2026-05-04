@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[derive(Debug, serde::Serialize, crate::Model)]
-    #[forge(model = "datatable_filter_models", primary_key_strategy = "manual")]
+    #[forge(table = "datatable_filter_models", primary_key_strategy = "manual")]
     struct SearchModel {
         id: i64,
         name: String,

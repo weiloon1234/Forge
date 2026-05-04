@@ -16,8 +16,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let fields = ensure_named_struct(&input)?;
     let args = parse_model_args(&input.attrs)?;
 
-    let table = args.model.ok_or_else(|| {
-        syn::Error::new_spanned(&ident, "missing #[forge(model = ...)] attribute")
+    let table = args.table.ok_or_else(|| {
+        syn::Error::new_spanned(&ident, "missing #[forge(table = ...)] attribute")
     })?;
     let explicit_primary_key = args.primary_key.is_some();
     let primary_key = args

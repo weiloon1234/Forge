@@ -4772,7 +4772,7 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, crate::Model)]
-    #[forge(model = "exists_users")]
+    #[forge(table = "exists_users")]
     struct ExistsUser {
         id: ModelId<Self>,
         active: bool,

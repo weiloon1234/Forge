@@ -294,12 +294,25 @@ The example above registers `admin.users.index` and `admin.users.show`.
 The lower-level named route APIs remain available when you want to register names manually:
 
 ```rust
-r.route_named("posts.list", "/posts", get(list_posts));
-r.route_named("posts.show", "/posts/:id", get(show_post));
-r.route_named("password.reset", "/reset/:token", get(reset_form));
+#[derive(Clone, Copy, ForgeId)]
+#[forge(id = RouteId)]
+enum Route {
+    #[forge(value = "posts.list")]
+    PostsList,
+    #[forge(value = "posts.show")]
+    PostsShow,
+    #[forge(value = "password.reset")]
+    PasswordReset,
+    #[forge(value = "posts.create")]
+    PostsCreate,
+}
+
+r.route_named(Route::PostsList, "/posts", get(list_posts));
+r.route_named(Route::PostsShow, "/posts/:id", get(show_post));
+r.route_named(Route::PasswordReset, "/reset/:token", get(reset_form));
 
 // Named + options
-r.route_named_with_options("posts.create", "/posts", post(create_post),
+r.route_named_with_options(Route::PostsCreate, "/posts", post(create_post),
     HttpRouteOptions::new().guard(Guard::User));
 ```
 
@@ -332,7 +345,7 @@ In a handler:
 
 ```rust
 async fn some_handler(State(app): State<AppContext>) -> Result<impl IntoResponse> {
-    let url = app.route_url("posts.show", &[("id", "42")])?;
+    let url = app.route_url(Route::PostsShow, &[("id", "42")])?;
     // → "/posts/42"
 
     Ok(Json(json!({ "url": url })))
@@ -345,7 +358,7 @@ Generate tamper-proof URLs with expiry (for password resets, email verification,
 
 ```rust
 let url = app.signed_route_url(
-    "password.reset",
+    Route::PasswordReset,
     &[("token", &reset_token)],
     DateTime::now().add_days(1),  // expires in 24 hours
 )?;
@@ -798,16 +811,16 @@ fn routes(r: &mut HttpRegistrar) -> Result<()> {
 
     // API v1
     r.api_version(1, |r| {
-        r.route_named("posts.list", "/posts", get(list_posts));
+        r.route_named(Route::PostsList, "/posts", get(list_posts));
 
-        r.route_named_with_options("posts.create", "/posts", post(create_post),
+        r.route_named_with_options(Route::PostsCreate, "/posts", post(create_post),
             HttpRouteOptions::new()
                 .guard(Guard::User)
                 .permission(Permission::PostsWrite)
                 .middleware_group("api")
                 .rate_limit(RateLimit::new(30).per_minute().by_actor()));
 
-        r.route_named_with_options("posts.show", "/posts/:id", get(show_post),
+        r.route_named_with_options(Route::PostsShow, "/posts/:id", get(show_post),
             HttpRouteOptions::new()
                 .guard(Guard::User)
                 .middleware_group("api"));

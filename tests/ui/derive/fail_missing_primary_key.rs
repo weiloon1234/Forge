@@ -3,7 +3,7 @@
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "users")]
+#[forge(table = "users")]
 struct User {
     sale_id: i64,
 }

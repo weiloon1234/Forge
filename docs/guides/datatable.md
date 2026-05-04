@@ -80,7 +80,7 @@ use forge::prelude::*;
 use serde::Serialize;
 
 #[derive(Debug, Serialize, Model)]
-#[forge(model = "orders", primary_key_strategy = "manual")]
+#[forge(table = "orders", primary_key_strategy = "manual")]
 struct Order {
     id: i64,
     merchant_id: i64,
@@ -208,7 +208,7 @@ use forge::prelude::*;
 use serde::Serialize;
 
 #[derive(Debug, Serialize, Model)]
-#[forge(model = "orders", primary_key_strategy = "manual")]
+#[forge(table = "orders", primary_key_strategy = "manual")]
 struct Order {
     id: i64,
     merchant_id: i64,

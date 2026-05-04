@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "users", lifecycle = UserLifecycle)]
+#[forge(table = "users", lifecycle = UserLifecycle)]
 struct User {
     id: ModelId<User>,
     #[forge(column = "user_email")]
@@ -18,27 +18,27 @@ struct User {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "merchants")]
+#[forge(table = "merchants")]
 struct Merchant {
     id: ModelId<Merchant>,
 }
 
 #[derive(forge::Model)]
-#[forge(model = "external_accounts", primary_key = "public_id")]
+#[forge(table = "external_accounts", primary_key = "public_id")]
 struct ExternalAccount {
     public_id: ModelId<ExternalAccount>,
     email: String,
 }
 
 #[derive(forge::Model)]
-#[forge(model = "legacy_users", primary_key_strategy = "manual")]
+#[forge(table = "legacy_users", primary_key_strategy = "manual")]
 struct LegacyUser {
     id: i64,
     email: String,
 }
 
 #[derive(forge::Model)]
-#[forge(model = "api_tokens", primary_key_strategy = "manual", audit = false)]
+#[forge(table = "api_tokens", primary_key_strategy = "manual", audit = false)]
 struct ApiToken {
     id: String,
     #[forge(audit_exclude)]

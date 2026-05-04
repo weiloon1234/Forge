@@ -164,6 +164,10 @@ struct RoleId
   const fn new(value: &'static str) -> Self
   fn owned(value: impl Into<String>) -> Self
   fn as_str(&self) -> &str
+struct RouteId
+  const fn new(value: &'static str) -> Self
+  fn owned(value: impl Into<String>) -> Self
+  fn as_str(&self) -> &str
 struct ScheduleId
   const fn new(value: &'static str) -> Self
   fn owned(value: impl Into<String>) -> Self

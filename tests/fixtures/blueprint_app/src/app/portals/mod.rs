@@ -54,8 +54,9 @@ impl forge::validation::FromMultipart for CreateUser {
 }
 
 pub fn router(registrar: &mut HttpRegistrar) -> Result<()> {
-    registrar.route("/health", get(health));
-    registrar.route_with_options(
+    registrar.route_named(ids::Route::Health, "/health", get(health));
+    registrar.route_named_with_options(
+        ids::Route::UsersStore,
         "/users",
         post(create_user),
         HttpRouteOptions::new()

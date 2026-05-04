@@ -1296,7 +1296,7 @@ fn render_model_template(pascal: &str, snake: &str) -> String {
         "use forge::prelude::*;\n\
          \n\
          #[derive(Clone, Debug, forge::Model)]\n\
-         #[forge(model = \"{table_name}\")]\n\
+         #[forge(table = \"{table_name}\")]\n\
          pub struct {pascal} {{\n\
          \x20   pub id: ModelId<{pascal}>,\n\
          \x20   pub created_at: DateTime,\n\
@@ -1531,7 +1531,7 @@ mod tests {
     fn render_model_template_contains_struct() {
         let output = super::render_model_template("User", "user");
         assert!(output.contains("pub struct User {"));
-        assert!(output.contains("#[forge(model = \"users\")]"));
+        assert!(output.contains("#[forge(table = \"users\")]"));
         assert!(output.contains("pub id: ModelId<User>"));
     }
 

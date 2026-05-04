@@ -1,7 +1,7 @@
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "payments", primary_key_strategy = "manual")]
+#[forge(table = "payments", primary_key_strategy = "manual")]
 struct Payment {
     id: i64,
     amount: Numeric,

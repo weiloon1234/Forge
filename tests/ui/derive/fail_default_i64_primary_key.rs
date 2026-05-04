@@ -1,5 +1,5 @@
 #[derive(forge::Model)]
-#[forge(model = "users")]
+#[forge(table = "users")]
 struct User {
     id: i64,
     email: String,

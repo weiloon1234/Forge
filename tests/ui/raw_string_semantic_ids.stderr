@@ -97,7 +97,7 @@ error[E0277]: the trait bound `GuardId: From<&str>` is not satisfied
    |          required by a bound introduced by this call
    |
    = note: required for `&str` to implement `Into<GuardId>`
-note: required by a bound in `forge::prelude::WebSocketChannelOptions::guard`
+note: required by a bound in `forge::WebSocketChannelOptions::guard`
   --> src/websocket/mod.rs
    |
    |     pub fn guard<I>(mut self, guard: I) -> Self
@@ -115,7 +115,7 @@ error[E0277]: the trait bound `PermissionId: From<&str>` is not satisfied
    |          required by a bound introduced by this call
    |
    = note: required for `&str` to implement `Into<PermissionId>`
-note: required by a bound in `forge::prelude::WebSocketChannelOptions::permission`
+note: required by a bound in `forge::WebSocketChannelOptions::permission`
   --> src/websocket/mod.rs
    |
    |     pub fn permission<I>(mut self, permission: I) -> Self
@@ -133,7 +133,7 @@ error[E0277]: the trait bound `CommandId: From<forge::prelude::Command>` is not 
    |                      required by a bound introduced by this call
    |
    = note: required for `forge::prelude::Command` to implement `Into<CommandId>`
-note: required by a bound in `forge::cli::CommandRegistry::command`
+note: required by a bound in `forge::CommandRegistry::command`
   --> src/cli/mod.rs
    |
    |     pub fn command<I, F, Fut>(&mut self, id: I, command: Command, handler: F) -> Result<&mut Self>
@@ -176,7 +176,7 @@ error[E0277]: the trait bound `ScheduleId: From<&str>` is not satisfied
    |         ^^^^^^^^^^^ the trait `From<&str>` is not implemented for `ScheduleId`
    |
    = note: required for `&str` to implement `Into<ScheduleId>`
-note: required by a bound in `forge::prelude::ScheduleRegistry::cron`
+note: required by a bound in `forge::ScheduleRegistry::cron`
   --> src/scheduler/mod.rs
    |
    |     pub fn cron<I, F, Fut>(

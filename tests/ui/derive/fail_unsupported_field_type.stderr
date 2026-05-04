@@ -31,7 +31,7 @@ error[E0277]: the trait bound `CustomType: FromDbValue` is not satisfied
    |
  8 |   #[derive(forge::Model)]
    |            ------------ required by a bound introduced by this call
- 9 |   #[forge(model = "users", primary_key_strategy = "manual")]
+ 9 |   #[forge(table = "users", primary_key_strategy = "manual")]
 10 |   struct User {
    |  ________^
 11 | |     id: i64,

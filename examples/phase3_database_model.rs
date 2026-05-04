@@ -27,7 +27,7 @@ impl FromDbValue for UserStatus {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "users", lifecycle = UserLifecycle, soft_deletes = true)]
+#[forge(table = "users", lifecycle = UserLifecycle, soft_deletes = true)]
 struct User {
     id: ModelId<User>,
     email: String,

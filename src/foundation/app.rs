@@ -18,6 +18,7 @@ use crate::database::{
 };
 use crate::email::{job::SendQueuedEmailJob, EmailDriverRegistryBuilder, EmailManager};
 use crate::events::{EventBus, EventRegistryBuilder};
+use crate::foundation::provider::RegistryHub;
 use crate::foundation::{Container, Error, Result, ServiceProvider, ServiceRegistrar};
 use crate::http::middleware::MiddlewareConfig;
 use crate::http::RouteRegistrar;
@@ -36,7 +37,9 @@ use crate::redis::RedisManager;
 use crate::scheduler::ScheduleRegistrar;
 use crate::storage::{StorageDriverRegistryBuilder, StorageManager};
 use crate::support::runtime::RuntimeBackend;
-use crate::support::{Clock, CryptManager, GuardId, HashManager, Timezone, ValidationRuleId};
+use crate::support::{
+    Clock, CryptManager, GuardId, HashManager, RouteId, Timezone, ValidationRuleId,
+};
 use crate::validation::{RuleRegistry, ValidationRule};
 use crate::websocket::{WebSocketPublisher, WebSocketRouteRegistrar};
 
@@ -240,20 +243,26 @@ impl AppContext {
     /// Generate a URL from a named route.
     ///
     /// ```ignore
-    /// let url = app.route_url("users.show", &[("id", "123")])?;
+    /// let url = app.route_url(Route::UsersShow, &[("id", "123")])?;
     /// ```
-    pub fn route_url(&self, name: &str, params: &[(&str, &str)]) -> Result<String> {
+    pub fn route_url<I>(&self, name: I, params: &[(&str, &str)]) -> Result<String>
+    where
+        I: Into<RouteId>,
+    {
         let registry = self.resolve::<crate::http::routes::RouteRegistry>()?;
         registry.url(name, params)
     }
 
     /// Generate a signed URL from a named route.
-    pub fn signed_route_url(
+    pub fn signed_route_url<I>(
         &self,
-        name: &str,
+        name: I,
         params: &[(&str, &str)],
         expires_at: crate::support::DateTime,
-    ) -> Result<String> {
+    ) -> Result<String>
+    where
+        I: Into<RouteId>,
+    {
         let registry = self.resolve::<crate::http::routes::RouteRegistry>()?;
         let signing_key = self.config().app()?.signing_key_bytes()?;
         registry.signed_url(name, params, &signing_key, expires_at)
@@ -768,53 +777,18 @@ impl AppBuilder {
         }
 
         let prepared_plugins = crate::plugin::prepare_plugins(&plugins)?;
-        let config = match config_dir {
-            Some(path) => ConfigRepository::from_dir_with_defaults(
-                path,
-                prepared_plugins.config_defaults.clone(),
-            )?,
-            None => ConfigRepository::with_env_overlay_and_defaults(
-                prepared_plugins.config_defaults.clone(),
-            )?,
-        };
+        let config = load_boot_config(config_dir, prepared_plugins.config_defaults.clone())?;
         set_runtime_model_defaults(config.database()?.models.clone());
         crate::logging::init(&config)?;
 
         let container = Container::new();
-        let rules = RuleRegistry::new();
-        for (name, rule) in prepared_plugins.validation_rules.iter() {
-            rules.register_arc(name.clone(), rule.clone())?;
-        }
-        for (name, rule) in validation_rules {
-            rules.register_arc(name, rule)?;
-        }
-
-        let event_registry = EventRegistryBuilder::shared();
-        let job_registry = JobRegistryBuilder::shared();
-        let job_middleware_registry = JobMiddlewareRegistryBuilder::shared();
-        let migration_registry = MigrationRegistryBuilder::shared();
-        let seeder_registry = SeederRegistryBuilder::shared();
-        let guard_registry = GuardRegistryBuilder::shared();
-        let policy_registry = PolicyRegistryBuilder::shared();
-        let authenticatable_registry = AuthenticatableRegistryBuilder::shared();
-        let readiness_registry = ReadinessRegistryBuilder::shared();
-        let storage_driver_registry = StorageDriverRegistryBuilder::shared();
-        let email_driver_registry = EmailDriverRegistryBuilder::shared();
+        let rules = build_rule_registry(&prepared_plugins.validation_rules, validation_rules)?;
+        let registries = RegistryHub::new();
         let mut registrar = ServiceRegistrar::new(
             container.clone(),
             config.clone(),
             rules.clone(),
-            event_registry.clone(),
-            job_registry.clone(),
-            job_middleware_registry.clone(),
-            migration_registry.clone(),
-            seeder_registry.clone(),
-            guard_registry.clone(),
-            policy_registry.clone(),
-            authenticatable_registry.clone(),
-            readiness_registry.clone(),
-            storage_driver_registry.clone(),
-            email_driver_registry.clone(),
+            registries.clone(),
         );
         for provider in &prepared_plugins.providers {
             provider.register(&mut registrar).await?;
@@ -860,7 +834,10 @@ impl AppBuilder {
             auth_config.sessions.clone(),
         ));
         {
-            let mut guards = guard_registry.lock().expect("guard registry lock poisoned");
+            let mut guards = registries
+                .guard
+                .lock()
+                .expect("guard registry lock poisoned");
             for (guard_name, driver_config) in &auth_config.guards {
                 if guards.contains(guard_name) {
                     continue; // consumer-registered guard takes precedence
@@ -887,19 +864,19 @@ impl AppBuilder {
 
         let auth_manager = Arc::new(AuthManager::new(
             auth_config,
-            GuardRegistryBuilder::freeze_shared(guard_registry),
+            GuardRegistryBuilder::freeze_shared(registries.guard.clone()),
         ));
         let authorizer = Arc::new(Authorizer::new(
             app.clone(),
-            PolicyRegistryBuilder::freeze_shared(policy_registry),
+            PolicyRegistryBuilder::freeze_shared(registries.policy.clone()),
         ));
         let authenticatable_registry = Arc::new(AuthenticatableRegistryBuilder::freeze_shared(
-            authenticatable_registry,
+            registries.authenticatable.clone(),
         ));
-        register_builtin_readiness_checks(&readiness_registry, backend_kind)?;
+        register_builtin_readiness_checks(&registries.readiness, backend_kind)?;
         let diagnostics = Arc::new(RuntimeDiagnostics::new(
             backend_kind,
-            ReadinessRegistryBuilder::freeze_shared(readiness_registry),
+            ReadinessRegistryBuilder::freeze_shared(registries.readiness.clone()),
         ));
         let ws_config = app.config().websocket()?;
         let websocket_publisher = Arc::new(WebSocketPublisher::new(
@@ -910,20 +887,23 @@ impl AppBuilder {
         ));
         let event_bus = Arc::new(EventBus::new(
             app.clone(),
-            EventRegistryBuilder::freeze_shared(event_registry),
+            EventRegistryBuilder::freeze_shared(registries.event.clone()),
         ));
         let job_runtime = Arc::new(JobRuntime::new(
             backend,
             jobs_config.clone(),
-            JobRegistryBuilder::freeze_shared(job_registry, &jobs_config),
+            JobRegistryBuilder::freeze_shared(registries.job.clone(), &jobs_config),
         ));
         let job_dispatcher = Arc::new(JobDispatcher::new(job_runtime.clone(), diagnostics.clone()));
         let job_middleware_registry = Arc::new(JobMiddlewareRegistryBuilder::freeze_shared(
             registrar.job_middleware_registry(),
         ));
-        let migration_registry =
-            Arc::new(MigrationRegistryBuilder::freeze_shared(migration_registry)?);
-        let seeder_registry = Arc::new(SeederRegistryBuilder::freeze_shared(seeder_registry)?);
+        let migration_registry = Arc::new(MigrationRegistryBuilder::freeze_shared(
+            registries.migration.clone(),
+        )?);
+        let seeder_registry = Arc::new(SeederRegistryBuilder::freeze_shared(
+            registries.seeder.clone(),
+        )?);
         let datatable_registry = Arc::new(
             crate::datatable::registry::DatatableRegistryBuilder::freeze_shared(
                 registrar.datatable_registry(),
@@ -1043,13 +1023,14 @@ impl AppBuilder {
 
         // Freeze storage driver registry and construct StorageManager
         let custom_storage_drivers =
-            StorageDriverRegistryBuilder::freeze_shared(storage_driver_registry);
+            StorageDriverRegistryBuilder::freeze_shared(registries.storage_driver.clone());
         let storage =
             Arc::new(StorageManager::from_config(app.config(), custom_storage_drivers).await?);
         app.container().singleton_arc(storage)?;
 
         // Freeze email driver registry and construct EmailManager
-        let custom_email_drivers = EmailDriverRegistryBuilder::freeze_shared(email_driver_registry);
+        let custom_email_drivers =
+            EmailDriverRegistryBuilder::freeze_shared(registries.email_driver.clone());
         let email = Arc::new(EmailManager::from_config(
             app.config(),
             custom_email_drivers,
@@ -1143,6 +1124,30 @@ struct BootArtifacts {
     middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
     spa_dir: Option<PathBuf>,
+}
+
+fn load_boot_config(
+    config_dir: Option<PathBuf>,
+    defaults: Vec<toml::Value>,
+) -> Result<ConfigRepository> {
+    match config_dir {
+        Some(path) => ConfigRepository::from_dir_with_defaults(path, defaults),
+        None => ConfigRepository::with_env_overlay_and_defaults(defaults),
+    }
+}
+
+fn build_rule_registry(
+    plugin_rules: &[(ValidationRuleId, Arc<dyn ValidationRule>)],
+    app_rules: Vec<(ValidationRuleId, Arc<dyn ValidationRule>)>,
+) -> Result<RuleRegistry> {
+    let rules = RuleRegistry::new();
+    for (name, rule) in plugin_rules {
+        rules.register_arc(name.clone(), rule.clone())?;
+    }
+    for (name, rule) in app_rules {
+        rules.register_arc(name, rule)?;
+    }
+    Ok(rules)
 }
 
 fn register_builtin_readiness_checks(

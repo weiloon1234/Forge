@@ -7,7 +7,7 @@ Load only the file you need — don't read them all at once.
 
 | Module | Description | Size |
 |--------|-------------|------|
-| [root](root.md) | Crate root: derive macros, re-exports | 16L |
+| [root](root.md) | Crate root: derive macros, re-exports | 10L |
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 26L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 74L |
 | [audit](modules/audit.md) |  | 32L |
@@ -31,15 +31,16 @@ Load only the file you need — don't read them all at once.
 | [notifications](modules/notifications.md) | Multi-channel notifications: email, database, broadcast | 35L |
 | [openapi](modules/openapi.md) | OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc) | 38L |
 | [plugin](modules/plugin.md) | Compile-time plugin system with dependency validation | 98L |
+| [public](modules/public.md) |  | 67L |
 | [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 40L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 48L |
 | [settings](modules/settings.md) |  | 37L |
 | [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 115L |
-| [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 203L |
+| [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 207L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 38L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
 | [typescript](modules/typescript.md) |  | 13L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 34 modules, 3216 lines across all files.**
+**Total: 35 modules, 3281 lines across all files.**

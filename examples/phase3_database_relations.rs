@@ -1,7 +1,7 @@
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "users")]
+#[forge(table = "users")]
 struct User {
     id: ModelId<User>,
     merchants: Loaded<Vec<Merchant>>,
@@ -9,7 +9,7 @@ struct User {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "merchants")]
+#[forge(table = "merchants")]
 struct Merchant {
     id: ModelId<Merchant>,
     user_id: ModelId<User>,
@@ -18,7 +18,7 @@ struct Merchant {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "orders")]
+#[forge(table = "orders")]
 struct Order {
     id: ModelId<Order>,
     merchant_id: ModelId<Merchant>,
@@ -27,7 +27,7 @@ struct Order {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "order_items")]
+#[forge(table = "order_items")]
 struct OrderItem {
     id: ModelId<OrderItem>,
     order_id: ModelId<Order>,
@@ -36,7 +36,7 @@ struct OrderItem {
 }
 
 #[derive(forge::Model)]
-#[forge(model = "products")]
+#[forge(table = "products")]
 struct Product {
     id: ModelId<Product>,
 }

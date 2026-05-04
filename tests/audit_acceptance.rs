@@ -91,7 +91,7 @@ impl ServiceProvider for AuditAuthProvider {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = AUDIT_ENTRIES_TABLE, primary_key_strategy = "manual")]
+#[forge(table = AUDIT_ENTRIES_TABLE, primary_key_strategy = "manual")]
 struct AuditEntry {
     id: i64,
     title: String,
@@ -103,7 +103,7 @@ struct AuditEntry {
 }
 
 #[derive(Debug, PartialEq, forge::Model)]
-#[forge(model = NO_AUDIT_ENTRIES_TABLE, primary_key_strategy = "manual", audit = false)]
+#[forge(table = NO_AUDIT_ENTRIES_TABLE, primary_key_strategy = "manual", audit = false)]
 struct NoAuditEntry {
     id: i64,
     title: String,

@@ -192,8 +192,8 @@ async fn notify(notifiable: &dyn Notifiable, notification: &dyn Notification) ->
 async fn notify_queued(notifiable: &dyn Notifiable, notification: &dyn Notification) -> Result<()>
 
 // URL generation
-fn route_url(name: &str, params: &[(&str, &str)]) -> Result<String>
-fn signed_route_url(name: &str, params: &[(&str, &str)], expires_at: DateTime) -> Result<String>
+fn route_url<I: Into<RouteId>>(name: I, params: &[(&str, &str)]) -> Result<String>
+fn signed_route_url<I: Into<RouteId>>(name: I, params: &[(&str, &str)], expires_at: DateTime) -> Result<String>
 fn verify_signed_url(url: &str) -> Result<()>
 
 // Plugin lifecycle
@@ -1239,8 +1239,8 @@ type HttpRouter = Router<AppContext>;
 fn new() -> Self
 fn route(&mut self, path: &str, method_router: MethodRouter<AppContext>) -> &mut Self
 fn route_with_options(&mut self, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions) -> &mut Self
-fn route_named(&mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>) -> &mut Self
-fn route_named_with_options(&mut self, name: &str, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions) -> &mut Self
+fn route_named<I: Into<RouteId>>(&mut self, name: I, path: &str, method_router: MethodRouter<AppContext>) -> &mut Self
+fn route_named_with_options<I: Into<RouteId>>(&mut self, name: I, path: &str, method_router: MethodRouter<AppContext>, options: HttpRouteOptions) -> &mut Self
 fn scope(&mut self, path: &str, f: impl FnOnce(&mut HttpScope<'_>) -> Result<()>) -> Result<&mut Self>
 fn nest(&mut self, path: &str, router: HttpRouter) -> &mut Self
 fn merge(&mut self, router: HttpRouter) -> &mut Self

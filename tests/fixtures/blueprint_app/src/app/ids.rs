@@ -1,31 +1,27 @@
 use forge::prelude::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, ForgeId)]
+#[forge(id = GuardId, rename_all = "snake_case")]
 pub enum AuthGuard {
     Api,
 }
 
-impl From<AuthGuard> for GuardId {
-    fn from(value: AuthGuard) -> Self {
-        match value {
-            AuthGuard::Api => GuardId::new("api"),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, ForgeId)]
+#[forge(id = PermissionId)]
 pub enum Ability {
+    #[forge(value = "dashboard:view")]
     DashboardView,
+    #[forge(value = "realtime:chat")]
     RealtimeChat,
 }
 
-impl From<Ability> for PermissionId {
-    fn from(value: Ability) -> Self {
-        match value {
-            Ability::DashboardView => PermissionId::new("dashboard:view"),
-            Ability::RealtimeChat => PermissionId::new("realtime:chat"),
-        }
-    }
+#[derive(Clone, Copy, ForgeId)]
+#[forge(id = RouteId)]
+pub enum Route {
+    #[forge(value = "health")]
+    Health,
+    #[forge(value = "users.store")]
+    UsersStore,
 }
 
 pub const MOBILE_RULE: ValidationRuleId = ValidationRuleId::new("mobile");

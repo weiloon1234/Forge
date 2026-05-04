@@ -1,7 +1,7 @@
 use forge::prelude::*;
 
 #[derive(forge::Model)]
-#[forge(model = "users", primary_key_strategy = "manual")]
+#[forge(table = "users", primary_key_strategy = "manual")]
 struct User {
     id: i64,
     #[forge(write_mutator = "hash_password")]

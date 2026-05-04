@@ -21,7 +21,7 @@ use crate::auth::{token::actor_has_mfa_pending, AccessScope, Actor, AuthError, A
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
 use crate::logging::AuthOutcome;
-use crate::support::{GuardId, PermissionId};
+use crate::support::{GuardId, PermissionId, RouteId};
 pub use crate::validation::{JsonValidated, Validated};
 
 pub type RouteRegistrar = Arc<dyn Fn(&mut HttpRegistrar) -> Result<()> + Send + Sync>;
@@ -611,7 +611,7 @@ impl<'a> HttpScope<'a> {
         configure(&mut route);
 
         self.registrar.route_named_resolved(
-            &self.state.route_name(name),
+            RouteId::owned(self.state.route_name(name)),
             &self.state.route_path(path),
             method_router,
             route.finish(),
@@ -848,24 +848,30 @@ impl HttpRegistrar {
     }
 
     /// Register a named route for URL generation.
-    pub fn route_named(
+    pub fn route_named<I>(
         &mut self,
-        name: &str,
+        name: I,
         path: &str,
         method_router: MethodRouter<AppContext>,
-    ) -> &mut Self {
+    ) -> &mut Self
+    where
+        I: Into<RouteId>,
+    {
         self.named_routes.register(name, path);
         self.route(path, method_router)
     }
 
     /// Register a named route with options.
-    pub fn route_named_with_options(
+    pub fn route_named_with_options<I>(
         &mut self,
-        name: &str,
+        name: I,
         path: &str,
         method_router: MethodRouter<AppContext>,
         options: HttpRouteOptions,
-    ) -> &mut Self {
+    ) -> &mut Self
+    where
+        I: Into<RouteId>,
+    {
         self.named_routes.register(name, path);
         self.route_with_options(path, method_router, options)
     }
@@ -972,7 +978,7 @@ impl HttpRegistrar {
         // Merge named routes from sub-registrar with prefix applied
         for (name, pattern) in sub.named_routes.iter() {
             self.named_routes
-                .register(name, format!("{prefix}{pattern}"));
+                .register(name.clone(), format!("{prefix}{pattern}"));
         }
         Ok(self)
     }
@@ -1008,16 +1014,26 @@ impl HttpRegistrar {
         options: HttpRouteOptions,
     ) -> &mut Self {
         if let Some(route) = routes.index {
-            self.route_named_with_options(&format!("{name}.index"), path, route, options.clone());
+            self.route_named_with_options(
+                RouteId::owned(format!("{name}.index")),
+                path,
+                route,
+                options.clone(),
+            );
         }
         if let Some(route) = routes.store {
-            self.route_named_with_options(&format!("{name}.store"), path, route, options.clone());
+            self.route_named_with_options(
+                RouteId::owned(format!("{name}.store")),
+                path,
+                route,
+                options.clone(),
+            );
         }
 
         let member_path = format!("{path}/:{}", routes.id_param);
         if let Some(route) = routes.show {
             self.route_named_with_options(
-                &format!("{name}.show"),
+                RouteId::owned(format!("{name}.show")),
                 &member_path,
                 route,
                 options.clone(),
@@ -1025,14 +1041,19 @@ impl HttpRegistrar {
         }
         if let Some(route) = routes.update {
             self.route_named_with_options(
-                &format!("{name}.update"),
+                RouteId::owned(format!("{name}.update")),
                 &member_path,
                 route,
                 options.clone(),
             );
         }
         if let Some(route) = routes.destroy {
-            self.route_named_with_options(&format!("{name}.destroy"), &member_path, route, options);
+            self.route_named_with_options(
+                RouteId::owned(format!("{name}.destroy")),
+                &member_path,
+                route,
+                options,
+            );
         }
 
         self
@@ -1157,7 +1178,7 @@ impl HttpRegistrar {
 
     fn route_named_resolved(
         &mut self,
-        name: &str,
+        name: RouteId,
         path: &str,
         method_router: MethodRouter<AppContext>,
         options: HttpRouteOptions,
@@ -1416,7 +1437,7 @@ mod tests {
 
     use super::{HttpRegistrar, HttpRegistration, HttpResourceRoutes, HttpRouteOptions};
     use crate::http::middleware::{RateLimit, RateLimitWindow};
-    use crate::support::{GuardId, PermissionId};
+    use crate::support::{GuardId, PermissionId, RouteId};
 
     async fn ok() -> &'static str {
         "ok"
@@ -1492,8 +1513,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(registrar.named_routes.has("admin.health"));
-        assert!(registrar.named_routes.has("admin.login"));
+        assert!(registrar.named_routes.has(RouteId::new("admin.health")));
+        assert!(registrar.named_routes.has(RouteId::new("admin.login")));
 
         let health = route_by_path(&registrar, "/api/admin/health");
         let health_doc = health.options.doc.as_ref().expect("docs should exist");
@@ -1523,11 +1544,11 @@ mod tests {
             HttpRouteOptions::new().guard(GuardId::new("api")),
         );
 
-        assert!(registrar.named_routes.has("users.index"));
-        assert!(registrar.named_routes.has("users.store"));
-        assert!(registrar.named_routes.has("users.show"));
-        assert!(registrar.named_routes.has("users.update"));
-        assert!(registrar.named_routes.has("users.destroy"));
+        assert!(registrar.named_routes.has(RouteId::new("users.index")));
+        assert!(registrar.named_routes.has(RouteId::new("users.store")));
+        assert!(registrar.named_routes.has(RouteId::new("users.show")));
+        assert!(registrar.named_routes.has(RouteId::new("users.update")));
+        assert!(registrar.named_routes.has(RouteId::new("users.destroy")));
 
         let registered_paths = registrar
             .registrations
@@ -1558,7 +1579,9 @@ mod tests {
             })
             .unwrap();
 
-        assert!(registrar.named_routes.has("admin.profile.update"));
+        assert!(registrar
+            .named_routes
+            .has(RouteId::new("admin.profile.update")));
 
         let route = route_by_path(&registrar, "/admin/profile");
         let doc = route.options.doc.as_ref().expect("route docs should exist");
@@ -1893,9 +1916,11 @@ mod tests {
             })
             .unwrap();
 
-        assert!(registrar.named_routes.has("admin.auth.login"));
-        assert!(registrar.named_routes.has("admin.auth.me"));
-        assert!(registrar.named_routes.has("admin.profile.update"));
+        assert!(registrar.named_routes.has(RouteId::new("admin.auth.login")));
+        assert!(registrar.named_routes.has(RouteId::new("admin.auth.me")));
+        assert!(registrar
+            .named_routes
+            .has(RouteId::new("admin.profile.update")));
 
         let docs = registrar.collect_documented_routes();
         let spec = crate::openapi::spec::generate_openapi_spec("Forge", "1.0.0", &docs);

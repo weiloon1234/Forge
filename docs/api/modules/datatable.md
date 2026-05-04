@@ -151,10 +151,6 @@ trait DynDatatable
 
 ## forge::datatable::relation_filter
 
-Typed relation-backed auto-filter declarations for model datatables. These declarations stay
-server-side; clients keep sending ordinary `DatatableFilterInput` values such as `merchant.name`,
-legacy `merchant-name`, or declared `LikeAny` targets like `merchant.name|merchant.slug`.
-
 ```rust
 struct DatatableRelationColumn
   fn field<T>(column: Column<Row, T>) -> Self
@@ -212,3 +208,4 @@ enum DatatableValue { Null, String, Number, Bool, Date, DateTime }
   fn date(value: Date) -> Self
   fn datetime(value: DateTime) -> Self
 ```
+

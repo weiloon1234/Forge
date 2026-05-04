@@ -199,7 +199,7 @@ async fn seed_payments(database: &DatabaseManager) {
 }
 
 #[derive(Debug, PartialEq, Serialize, forge::Model)]
-#[forge(model = ORDERS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = ORDERS_TABLE, primary_key_strategy = "manual")]
 struct Order {
     id: i64,
     merchant_id: i64,
@@ -207,7 +207,7 @@ struct Order {
 }
 
 #[derive(Debug, PartialEq, Serialize, forge::Model)]
-#[forge(model = MERCHANTS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = MERCHANTS_TABLE, primary_key_strategy = "manual")]
 struct Merchant {
     id: i64,
     name: String,
@@ -215,7 +215,7 @@ struct Merchant {
 }
 
 #[derive(Debug, PartialEq, Serialize, forge::Model)]
-#[forge(model = ORDER_ITEMS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = ORDER_ITEMS_TABLE, primary_key_strategy = "manual")]
 struct OrderItem {
     id: i64,
     order_id: i64,
@@ -223,7 +223,7 @@ struct OrderItem {
 }
 
 #[derive(Debug, PartialEq, Serialize, forge::Model)]
-#[forge(model = TAGS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = TAGS_TABLE, primary_key_strategy = "manual")]
 struct Tag {
     id: i64,
     name: String,
@@ -316,7 +316,7 @@ impl Datatable for OrdersDatatable {
 }
 
 #[derive(Debug, PartialEq, Serialize, forge::Model)]
-#[forge(model = PAYMENTS_TABLE, primary_key_strategy = "manual")]
+#[forge(table = PAYMENTS_TABLE, primary_key_strategy = "manual")]
 struct Payment {
     id: i64,
     amount: Numeric,

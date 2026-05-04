@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
 use crate::foundation::{Error, Result};
+use crate::support::RouteId;
 
 /// Registry of named routes mapping names to their path patterns.
 ///
-/// Used for URL generation: `app.route_url("users.show", &[("id", "123")])`.
+/// Used for URL generation: `app.route_url(Route::UsersShow, &[("id", "123")])`.
 #[derive(Clone, Debug, Default)]
 pub struct RouteRegistry {
-    routes: HashMap<String, String>,
+    routes: HashMap<RouteId, String>,
 }
 
 impl RouteRegistry {
@@ -16,21 +17,25 @@ impl RouteRegistry {
     }
 
     /// Register a named route with its path pattern.
-    pub fn register(&mut self, name: impl Into<String>, pattern: impl Into<String>) {
+    pub fn register(&mut self, name: impl Into<RouteId>, pattern: impl Into<String>) {
         self.routes.insert(name.into(), pattern.into());
     }
 
     /// Generate a URL from a named route, replacing `:param` segments.
     ///
     /// ```ignore
-    /// let url = registry.url("users.show", &[("id", "123")])?;
+    /// let url = registry.url(Route::UsersShow, &[("id", "123")])?;
     /// // Returns: "/api/v1/users/123"
     /// ```
-    pub fn url(&self, name: &str, params: &[(&str, &str)]) -> Result<String> {
+    pub fn url<I>(&self, name: I, params: &[(&str, &str)]) -> Result<String>
+    where
+        I: Into<RouteId>,
+    {
+        let name = name.into();
         let pattern = self
             .routes
-            .get(name)
-            .ok_or_else(|| Error::message(format!("route '{name}' not found")))?;
+            .get(&name)
+            .ok_or_else(|| Error::message(format!("route '{}' not found", name.as_str())))?;
 
         let mut url = pattern.clone();
         for (key, value) in params {
@@ -41,19 +46,22 @@ impl RouteRegistry {
     }
 
     /// Check if a named route exists.
-    pub fn has(&self, name: &str) -> bool {
-        self.routes.contains_key(name)
+    pub fn has<I>(&self, name: I) -> bool
+    where
+        I: Into<RouteId>,
+    {
+        self.routes.contains_key(&name.into())
     }
 
     /// Iterate over all registered routes.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&RouteId, &String)> {
         self.routes.iter()
     }
 
     /// Generate a signed URL with HMAC-SHA256 signature and expiry timestamp.
     pub fn signed_url(
         &self,
-        name: &str,
+        name: impl Into<RouteId>,
         params: &[(&str, &str)],
         signing_key: &[u8],
         expires_at: crate::support::DateTime,

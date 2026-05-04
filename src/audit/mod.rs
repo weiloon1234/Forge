@@ -8,7 +8,7 @@ use crate::database::{DbRecord, DbType, DbValue, Model, QueryExecutor};
 use crate::foundation::{Error, Result};
 
 #[derive(Debug, Serialize, Deserialize, crate::Model)]
-#[forge(model = "audit_logs", audit = false)]
+#[forge(table = "audit_logs", audit = false)]
 pub struct AuditLog {
     pub id: crate::ModelId<AuditLog>,
     pub event_type: String,

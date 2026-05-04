@@ -1,4 +1,4 @@
-error: missing #[forge(model = ...)] attribute
+error: missing #[forge(table = ...)] attribute
  --> tests/ui/derive/fail_missing_table.rs:6:8
   |
 6 | struct User {

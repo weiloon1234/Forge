@@ -5,7 +5,7 @@ pub mod response;
 pub mod routes;
 pub(crate) mod spa;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,6 +29,25 @@ pub type HttpRouter = Router<AppContext>;
 pub type HttpAuthorizeCallback = Arc<
     dyn Fn(HttpAuthorizeContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
 >;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteManifestEntry {
+    pub id: RouteId,
+    pub path: String,
+    pub method: Option<String>,
+    pub params: Vec<String>,
+    pub guard: Option<GuardId>,
+    pub permissions: Vec<PermissionId>,
+    pub summary: Option<String>,
+    pub request: Option<&'static str>,
+    pub responses: Vec<RouteManifestResponse>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteManifestResponse {
+    pub status: u16,
+    pub schema: &'static str,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum AuditAreaSetting {
@@ -341,7 +360,9 @@ impl HttpResourceRoutes {
 }
 
 struct RouteRegistration {
+    name: Option<RouteId>,
     path: String,
+    method: Option<String>,
     method_router: MethodRouter<AppContext>,
     options: HttpRouteOptions,
     inherit_parent_defaults_on_merge: bool,
@@ -613,6 +634,7 @@ impl<'a> HttpScope<'a> {
         self.registrar.route_named_resolved(
             RouteId::owned(self.state.route_name(name)),
             &self.state.route_path(path),
+            Some(method),
             method_router,
             route.finish(),
         );
@@ -839,7 +861,9 @@ impl HttpRegistrar {
         options: HttpRouteOptions,
     ) -> &mut Self {
         self.push_route_registration(
+            None,
             path.to_string(),
+            None,
             method_router,
             options.with_defaults(&self.default_route_options),
             true,
@@ -857,8 +881,13 @@ impl HttpRegistrar {
     where
         I: Into<RouteId>,
     {
-        self.named_routes.register(name, path);
-        self.route(path, method_router)
+        self.route_named_with_options_and_method(
+            name,
+            path,
+            method_router,
+            HttpRouteOptions::default(),
+            None,
+        )
     }
 
     /// Register a named route with options.
@@ -872,8 +901,7 @@ impl HttpRegistrar {
     where
         I: Into<RouteId>,
     {
-        self.named_routes.register(name, path);
-        self.route_with_options(path, method_router, options)
+        self.route_named_with_options_and_method(name, path, method_router, options, None)
     }
 
     pub fn scope(
@@ -945,20 +973,22 @@ impl HttpRegistrar {
         for registration in sub.registrations {
             match registration {
                 HttpRegistration::Route(route) => {
-                    if route.inherit_parent_defaults_on_merge {
-                        self.route_with_options(
-                            &format!("{prefix}{}", route.path),
-                            route.method_router,
-                            route.options,
-                        );
+                    let RouteRegistration {
+                        name,
+                        path,
+                        method,
+                        method_router,
+                        options,
+                        inherit_parent_defaults_on_merge,
+                    } = *route;
+                    let path = format!("{prefix}{path}");
+                    let options = if inherit_parent_defaults_on_merge {
+                        options.with_defaults(&self.default_route_options)
                     } else {
-                        self.push_route_registration(
-                            format!("{prefix}{}", route.path),
-                            route.method_router,
-                            route.options,
-                            false,
-                        );
-                    }
+                        options
+                    };
+
+                    self.push_route_registration(name, path, method, method_router, options, false);
                 }
                 HttpRegistration::Nest { path, router } => {
                     self.registrations.push(HttpRegistration::Nest {
@@ -1018,7 +1048,7 @@ impl HttpRegistrar {
                 RouteId::owned(format!("{name}.index")),
                 path,
                 route,
-                options.clone(),
+                options.clone().document_method("get"),
             );
         }
         if let Some(route) = routes.store {
@@ -1026,7 +1056,7 @@ impl HttpRegistrar {
                 RouteId::owned(format!("{name}.store")),
                 path,
                 route,
-                options.clone(),
+                options.clone().document_method("post"),
             );
         }
 
@@ -1036,7 +1066,7 @@ impl HttpRegistrar {
                 RouteId::owned(format!("{name}.show")),
                 &member_path,
                 route,
-                options.clone(),
+                options.clone().document_method("get"),
             );
         }
         if let Some(route) = routes.update {
@@ -1044,7 +1074,7 @@ impl HttpRegistrar {
                 RouteId::owned(format!("{name}.update")),
                 &member_path,
                 route,
-                options.clone(),
+                options.clone().document_method("put"),
             );
         }
         if let Some(route) = routes.destroy {
@@ -1052,7 +1082,7 @@ impl HttpRegistrar {
                 RouteId::owned(format!("{name}.destroy")),
                 &member_path,
                 route,
-                options,
+                options.document_method("delete"),
             );
         }
 
@@ -1066,7 +1096,11 @@ impl HttpRegistrar {
             if let HttpRegistration::Route(route) = registration {
                 if let Some(ref doc) = route.options.doc {
                     docs.push(crate::openapi::spec::DocumentedRoute {
-                        method: doc.method.clone().unwrap_or_else(|| "get".into()),
+                        method: route
+                            .method
+                            .clone()
+                            .or_else(|| doc.method.clone())
+                            .unwrap_or_else(|| "get".into()),
                         path: route.path.clone(),
                         doc: doc.clone(),
                     });
@@ -1180,29 +1214,153 @@ impl HttpRegistrar {
         &mut self,
         name: RouteId,
         path: &str,
+        method: Option<&str>,
         method_router: MethodRouter<AppContext>,
         options: HttpRouteOptions,
     ) -> &mut Self {
-        self.named_routes.register(name, path);
-        self.push_route_registration(path.to_string(), method_router, options, false);
+        self.named_routes.register(name.clone(), path);
+        self.push_route_registration(
+            Some(name),
+            path.to_string(),
+            method.map(ToOwned::to_owned),
+            method_router,
+            options,
+            false,
+        );
+        self
+    }
+
+    fn route_named_with_options_and_method<I>(
+        &mut self,
+        name: I,
+        path: &str,
+        method_router: MethodRouter<AppContext>,
+        options: HttpRouteOptions,
+        method: Option<&str>,
+    ) -> &mut Self
+    where
+        I: Into<RouteId>,
+    {
+        let name = name.into();
+        self.named_routes.register(name.clone(), path);
+        self.push_route_registration(
+            Some(name),
+            path.to_string(),
+            method.map(ToOwned::to_owned),
+            method_router,
+            options.with_defaults(&self.default_route_options),
+            true,
+        );
         self
     }
 
     fn push_route_registration(
         &mut self,
+        name: Option<RouteId>,
         path: String,
+        method: Option<String>,
         method_router: MethodRouter<AppContext>,
         options: HttpRouteOptions,
         inherit_parent_defaults_on_merge: bool,
     ) {
         self.registrations
             .push(HttpRegistration::Route(Box::new(RouteRegistration {
+                name,
                 path,
+                method,
                 method_router,
                 options,
                 inherit_parent_defaults_on_merge,
             })));
     }
+
+    pub fn collect_route_manifest(&self) -> Result<Vec<RouteManifestEntry>> {
+        let mut manifest = Vec::new();
+        let mut route_ids = HashSet::new();
+
+        for registration in &self.registrations {
+            let HttpRegistration::Route(route) = registration else {
+                continue;
+            };
+            let Some(id) = &route.name else {
+                continue;
+            };
+
+            if !route_ids.insert(id.clone()) {
+                return Err(Error::message(format!(
+                    "route manifest contains duplicate route id `{}`",
+                    id.as_str()
+                )));
+            }
+
+            let doc = route.options.doc.as_ref();
+            let method = route
+                .method
+                .clone()
+                .or_else(|| doc.and_then(|doc| doc.method.clone()));
+            let mut responses = doc
+                .map(|doc| {
+                    doc.responses
+                        .iter()
+                        .map(|(status, schema)| RouteManifestResponse {
+                            status: *status,
+                            schema: schema.name,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            responses.sort_by_key(|response| response.status);
+
+            manifest.push(RouteManifestEntry {
+                id: id.clone(),
+                path: route.path.clone(),
+                method,
+                params: route_path_params(&route.path),
+                guard: route.options.guard_id().cloned(),
+                permissions: route.options.permissions_set().into_iter().collect(),
+                summary: doc.and_then(|doc| doc.summary.clone()),
+                request: doc.and_then(|doc| doc.request.as_ref().map(|schema| schema.name)),
+                responses,
+            });
+        }
+
+        manifest.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        Ok(manifest)
+    }
+}
+
+trait DocumentMethod {
+    fn document_method(self, method: &str) -> Self;
+}
+
+impl DocumentMethod for HttpRouteOptions {
+    fn document_method(mut self, method: &str) -> Self {
+        mutate_doc(&mut self, |doc| doc.method(method));
+        self
+    }
+}
+
+pub(crate) fn route_path_params(path: &str) -> Vec<String> {
+    let mut params = Vec::new();
+
+    for segment in path.split('/') {
+        let param = if let Some(inner) = segment
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+        {
+            inner.strip_prefix('*').unwrap_or(inner)
+        } else if let Some(inner) = segment.strip_prefix(':') {
+            inner
+        } else {
+            continue;
+        };
+
+        if !param.is_empty() && !params.iter().any(|existing| existing == param) {
+            params.push(param.to_string());
+        }
+    }
+
+    params
 }
 
 #[derive(Clone)]
@@ -1563,6 +1721,61 @@ mod tests {
     }
 
     #[test]
+    fn route_path_params_extract_axum_wildcards_and_legacy_segments() {
+        assert_eq!(
+            super::route_path_params("/users/{id}/files/{*path}/legacy/:token"),
+            vec!["id".to_string(), "path".to_string(), "token".to_string()]
+        );
+        assert_eq!(
+            super::route_path_params("/users/{id}/audit/{id}"),
+            vec!["id".to_string()]
+        );
+        assert!(super::route_path_params("/health").is_empty());
+    }
+
+    #[test]
+    fn route_registry_url_supports_axum_params_and_percent_encodes_values() {
+        let mut registry = super::routes::RouteRegistry::new();
+        registry.register(
+            RouteId::new("files.show"),
+            "/files/{*path}/users/{id}/legacy/:token",
+        );
+
+        let url = registry
+            .url(
+                RouteId::new("files.show"),
+                &[
+                    ("path", "quarter 1/report.pdf"),
+                    ("id", "42/99"),
+                    ("token", "a b"),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            url,
+            "/files/quarter%201%2Freport.pdf/users/42%2F99/legacy/a%20b"
+        );
+    }
+
+    #[test]
+    fn route_registry_url_rejects_missing_params() {
+        let mut registry = super::routes::RouteRegistry::new();
+        registry.register(RouteId::new("users.show"), "/users/{id}");
+
+        let error = registry
+            .url(RouteId::new("users.show"), &[])
+            .expect_err("missing params should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("route 'users.show' is missing required parameter `id`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn scope_joins_nested_paths_and_relative_route_names() {
         let mut registrar = HttpRegistrar::new();
         registrar
@@ -1587,6 +1800,80 @@ mod tests {
         let doc = route.options.doc.as_ref().expect("route docs should exist");
         assert_eq!(doc.method.as_deref(), Some("put"));
         assert_eq!(doc.summary.as_deref(), Some("Update admin profile"));
+    }
+
+    #[test]
+    fn collect_route_manifest_includes_named_route_metadata() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .api_version(1, |routes| {
+                routes.scope("/admin", |admin| {
+                    admin
+                        .name_prefix("admin")
+                        .guard(GuardId::new("admin"))
+                        .permission(PermissionId::new("users.read"));
+
+                    admin.scope("/users", |users| {
+                        users.name_prefix("users");
+                        users.get("", "index", ok, |route| {
+                            route.summary("List admin users");
+                            route.response::<String>(200);
+                        });
+                        users.get("/{id}", "show", ok, |route| {
+                            route.summary("Show admin user");
+                            route.request::<String>();
+                            route.response::<String>(200);
+                        });
+                        Ok(())
+                    })?;
+
+                    Ok(())
+                })?;
+
+                Ok(())
+            })
+            .unwrap();
+
+        let manifest = registrar.collect_route_manifest().unwrap();
+        let index = manifest
+            .iter()
+            .find(|route| route.id == RouteId::new("admin.users.index"))
+            .expect("index route manifest entry");
+        assert_eq!(index.path, "/api/v1/admin/users");
+        assert_eq!(index.method.as_deref(), Some("get"));
+        assert!(index.params.is_empty());
+        assert_eq!(index.guard, Some(GuardId::new("admin")));
+        assert_eq!(index.permissions, vec![PermissionId::new("users.read")]);
+        assert_eq!(index.summary.as_deref(), Some("List admin users"));
+
+        let show = manifest
+            .iter()
+            .find(|route| route.id == RouteId::new("admin.users.show"))
+            .expect("show route manifest entry");
+        assert_eq!(show.path, "/api/v1/admin/users/{id}");
+        assert_eq!(show.params, vec!["id".to_string()]);
+        assert_eq!(show.request, Some("String"));
+        assert_eq!(show.responses.len(), 1);
+        assert_eq!(show.responses[0].status, 200);
+        assert_eq!(show.responses[0].schema, "String");
+    }
+
+    #[test]
+    fn collect_route_manifest_rejects_duplicate_route_ids() {
+        let mut registrar = HttpRegistrar::new();
+        registrar.route_named(RouteId::new("health"), "/health", get(ok));
+        registrar.route_named(RouteId::new("health"), "/healthz", get(ok));
+
+        let error = registrar
+            .collect_route_manifest()
+            .expect_err("duplicate route ids should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("route manifest contains duplicate route id `health`"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

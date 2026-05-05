@@ -30,6 +30,7 @@ struct HttpRegistrar
   fn resource_with_options( &mut self, name: &str, path: &str, routes: HttpResourceRoutes, options: HttpRouteOptions, ) -> &mut Self
   fn into_router(self, app: AppContext) -> Router
   fn into_router_with_middlewares( self, app: AppContext, middlewares: Vec<MiddlewareConfig>, ) -> Router
+  fn collect_route_manifest(&self) -> Result<Vec<RouteManifestEntry>>
 struct HttpResourceRoutes
   fn new() -> Self
   fn index(self, route: MethodRouter<AppContext>) -> Self
@@ -96,6 +97,8 @@ struct HttpScope
   fn put<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
   fn patch<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
   fn delete<H, T>( &mut self, path: &str, name: &str, handler: H, configure: impl FnOnce(&mut HttpRouteBuilder), ) -> &mut Self
+struct RouteManifestEntry
+struct RouteManifestResponse
 ```
 
 ## forge::http::cookie

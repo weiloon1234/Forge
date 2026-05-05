@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use crate::foundation::{Error, Result};
 use crate::support::RouteId;
@@ -21,7 +22,7 @@ impl RouteRegistry {
         self.routes.insert(name.into(), pattern.into());
     }
 
-    /// Generate a URL from a named route, replacing `:param` segments.
+    /// Generate a URL from a named route, replacing `:param`, `{param}`, and `{*param}` segments.
     ///
     /// ```ignore
     /// let url = registry.url(Route::UsersShow, &[("id", "123")])?;
@@ -37,10 +38,17 @@ impl RouteRegistry {
             .get(&name)
             .ok_or_else(|| Error::message(format!("route '{}' not found", name.as_str())))?;
 
+        let params_by_key = params.iter().copied().collect::<HashMap<_, _>>();
         let mut url = pattern.clone();
-        for (key, value) in params {
-            let placeholder = format!(":{key}");
-            url = url.replace(&placeholder, value);
+        for param in super::route_path_params(pattern) {
+            let value = params_by_key.get(param.as_str()).ok_or_else(|| {
+                Error::message(format!(
+                    "route '{}' is missing required parameter `{param}`",
+                    name.as_str()
+                ))
+            })?;
+            let encoded = percent_encode(value);
+            url = replace_route_param(&url, &param, &encoded);
         }
         Ok(url)
     }
@@ -96,6 +104,24 @@ impl RouteRegistry {
 
         Ok(())
     }
+}
+
+fn replace_route_param(url: &str, param: &str, value: &str) -> String {
+    url.replace(&format!("{{{param}}}"), value)
+        .replace(&format!("{{*{param}}}"), value)
+        .replace(&format!(":{param}"), value)
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 fn extract_signature_param(url: &str) -> Result<(String, String)> {

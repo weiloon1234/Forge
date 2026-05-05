@@ -21,7 +21,7 @@ Load only the file you need — don't read them all at once.
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 159L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 31L |
 | [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 135L |
-| [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 275L |
+| [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 278L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
 | [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 50L |
@@ -39,8 +39,8 @@ Load only the file you need — don't read them all at once.
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 207L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 38L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
-| [typescript](modules/typescript.md) |  | 13L |
+| [typescript](modules/typescript.md) |  | 14L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 35 modules, 3281 lines across all files.**
+**Total: 35 modules, 3285 lines across all files.**

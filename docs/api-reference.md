@@ -1225,6 +1225,8 @@ Routes, middleware, cookies, resources, SPA.
 |------|---------|
 | `HttpRegistrar` | Route registration builder |
 | `HttpRouteOptions` | Per-route config: access, middleware, rate limit, docs |
+| `RouteManifestEntry` | Named route metadata exported to TypeScript |
+| `RouteManifestResponse` | Route response schema metadata exported to TypeScript |
 
 ### Type Aliases
 
@@ -1249,6 +1251,7 @@ fn group_with_options(&mut self, prefix: &str, options: HttpRouteOptions, f: imp
 fn resource(&mut self, name: &str, path: &str, routes: HttpResourceRoutes) -> &mut Self
 fn resource_with_options(&mut self, name: &str, path: &str, routes: HttpResourceRoutes, options: HttpRouteOptions) -> &mut Self
 fn api_version(&mut self, version: u32, f: impl FnOnce(&mut HttpRegistrar) -> Result<()>) -> Result<&mut Self>
+fn collect_route_manifest(&self) -> Result<Vec<RouteManifestEntry>>
 fn into_router(self, app: AppContext) -> Router
 fn into_router_with_middlewares(self, app: AppContext, middlewares: Vec<MiddlewareConfig>) -> Router
 ```
@@ -1409,11 +1412,11 @@ trait ApiResource<T> {
 struct RouteRegistry;
 
 fn new() -> Self
-fn register(&mut self, name: impl Into<String>, pattern: impl Into<String>)
-fn url(&self, name: &str, params: &[(&str, &str)]) -> Result<String>
-fn has(&self, name: &str) -> bool
-fn iter(&self) -> impl Iterator<Item = (&String, &String)>
-fn signed_url(&self, name: &str, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime) -> Result<String>
+fn register(&mut self, name: impl Into<RouteId>, pattern: impl Into<String>)
+fn url<I>(&self, name: I, params: &[(&str, &str)]) -> Result<String>
+fn has<I>(&self, name: I) -> bool
+fn iter(&self) -> impl Iterator<Item = (&RouteId, &String)>
+fn signed_url(&self, name: impl Into<RouteId>, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime) -> Result<String>
 fn verify_signature(url: &str, signing_key: &[u8]) -> Result<()>  // static
 ```
 

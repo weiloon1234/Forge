@@ -352,6 +352,28 @@ async fn some_handler(State(app): State<AppContext>) -> Result<impl IntoResponse
 }
 ```
 
+### Frontend Route URLs
+
+Named routes are also exported to TypeScript during `types:export`. This lets
+frontend code use the same route id SSOT instead of hand-writing internal API
+paths:
+
+```typescript
+import { RouteIds, createRouteUrlBuilder } from "@shared/types/generated";
+
+const adminRouteUrl = createRouteUrlBuilder({ basePath: "/api/v1/admin" });
+
+api.get(adminRouteUrl(RouteIds.admin.users.show, { id: userId }));
+// -> "/users/123" for an Axios client whose baseURL is "/api/v1/admin"
+```
+
+`RouteManifest.ts` is generated from registered named routes. It supports Axum
+`{id}` / `{*path}` params and legacy `:id` params, URL-encodes substituted
+values, and fails fast for duplicate route ids during export.
+
+This does not replace request validation. Handlers should keep accepting trusted
+input through Forge extractors such as `JsonValidated<T>` and `Validated<T>`.
+
 ### Signed URLs
 
 Generate tamper-proof URLs with expiry (for password resets, email verification, etc.):

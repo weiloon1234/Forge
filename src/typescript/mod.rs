@@ -13,13 +13,14 @@
 //! ] as const;
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta};
 use crate::cli::CommandRegistrar;
 use crate::foundation::{Error, Result};
+use crate::http::{HttpRegistrar, RouteManifestEntry, RouteRegistrar};
 use crate::support::CommandId;
 
 const TYPES_EXPORT_COMMAND: CommandId = CommandId::new("types:export");
@@ -95,7 +96,7 @@ fn is_ts_identifier(value: &str) -> bool {
     chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
-fn to_camel_case_identifier(value: &str) -> Result<String> {
+fn to_camel_case_identifier_with_context(value: &str, context: &str) -> Result<String> {
     let mut words = Vec::new();
     let mut current = String::new();
 
@@ -108,7 +109,7 @@ fn to_camel_case_identifier(value: &str) -> Result<String> {
             }
         } else {
             return Err(Error::message(format!(
-                "AppEnum grouped TypeScript export only supports ASCII module keys; `{value}` contains unsupported character `{ch}`"
+                "{context} only supports ASCII property keys; `{value}` contains unsupported character `{ch}`"
             )));
         }
     }
@@ -118,9 +119,9 @@ fn to_camel_case_identifier(value: &str) -> Result<String> {
     }
 
     if words.is_empty() {
-        return Err(Error::message(
-            "AppEnum grouped TypeScript export requires non-empty module keys",
-        ));
+        return Err(Error::message(format!(
+            "{context} requires non-empty property keys"
+        )));
     }
 
     let mut identifier = words[0].to_ascii_lowercase();
@@ -135,11 +136,15 @@ fn to_camel_case_identifier(value: &str) -> Result<String> {
 
     if !is_ts_identifier(&identifier) {
         return Err(Error::message(format!(
-            "AppEnum grouped TypeScript export normalized module `{value}` to invalid TypeScript identifier `{identifier}`"
+            "{context} normalized `{value}` to invalid TypeScript identifier `{identifier}`"
         )));
     }
 
     Ok(identifier)
+}
+
+fn to_camel_case_identifier(value: &str) -> Result<String> {
+    to_camel_case_identifier_with_context(value, "AppEnum grouped TypeScript export")
 }
 
 fn parse_grouped_key<'a>(name: &str, key: &'a str) -> Result<Option<(&'a str, &'a str)>> {
@@ -305,8 +310,315 @@ fn render_app_enum(name: &str, meta: &EnumMeta) -> Result<RenderedAppEnum> {
     })
 }
 
+#[derive(Default)]
+struct RouteIdTreeNode {
+    value: Option<String>,
+    children: BTreeMap<String, RouteIdTreeChild>,
+}
+
+struct RouteIdTreeChild {
+    segment: String,
+    node: RouteIdTreeNode,
+}
+
+fn option_string_literal(value: Option<&str>) -> String {
+    value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn string_array_literal<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    let values = values.into_iter().map(json_string).collect::<Vec<_>>();
+    format!("[{}]", values.join(", "))
+}
+
+fn first_route_id(node: &RouteIdTreeNode) -> Option<&str> {
+    node.value.as_deref().or_else(|| {
+        node.children
+            .values()
+            .find_map(|child| first_route_id(&child.node))
+    })
+}
+
+fn insert_route_id_node(
+    node: &mut RouteIdTreeNode,
+    route_id: &str,
+    segments: &[&str],
+) -> Result<()> {
+    let Some((segment, remaining)) = segments.split_first() else {
+        if let Some(existing) = &node.value {
+            return Err(Error::message(format!(
+                "RouteManifest TypeScript export contains duplicate route id `{existing}`"
+            )));
+        }
+        if let Some(existing) = first_route_id(node) {
+            return Err(Error::message(format!(
+                "RouteManifest TypeScript export cannot group route id `{route_id}` because it is also a prefix of `{existing}`"
+            )));
+        }
+
+        node.value = Some(route_id.to_string());
+        return Ok(());
+    };
+
+    if let Some(existing) = &node.value {
+        return Err(Error::message(format!(
+            "RouteManifest TypeScript export cannot group route id `{route_id}` because `{existing}` is already a route id"
+        )));
+    }
+    if segment.is_empty() {
+        return Err(Error::message(format!(
+            "RouteManifest TypeScript export requires non-empty route id segments; got `{route_id}`"
+        )));
+    }
+
+    let property =
+        to_camel_case_identifier_with_context(segment, "RouteManifest TypeScript export")?;
+    if let Some(child) = node.children.get_mut(&property) {
+        if child.segment != *segment {
+            return Err(Error::message(format!(
+                "RouteManifest TypeScript export has route id segments `{}` and `{segment}` that both normalize to `{property}`",
+                child.segment
+            )));
+        }
+
+        return insert_route_id_node(&mut child.node, route_id, remaining);
+    }
+
+    node.children.insert(
+        property.clone(),
+        RouteIdTreeChild {
+            segment: (*segment).to_string(),
+            node: RouteIdTreeNode::default(),
+        },
+    );
+    let child = node
+        .children
+        .get_mut(&property)
+        .expect("just inserted route id segment");
+    insert_route_id_node(&mut child.node, route_id, remaining)
+}
+
+fn route_id_tree(routes: &[RouteManifestEntry]) -> Result<RouteIdTreeNode> {
+    let mut root = RouteIdTreeNode::default();
+
+    for route in routes {
+        let route_id = route.id.as_str();
+        let segments = route_id.split('.').collect::<Vec<_>>();
+        insert_route_id_node(&mut root, route_id, &segments)?;
+    }
+
+    Ok(root)
+}
+
+fn render_route_id_node(node: &RouteIdTreeNode, indent: usize) -> String {
+    if node.children.is_empty() {
+        return "{}".to_string();
+    }
+
+    let entry_indent = " ".repeat(indent + 2);
+    let closing_indent = " ".repeat(indent);
+    let entries = node
+        .children
+        .iter()
+        .map(|(property, child)| {
+            if child.node.children.is_empty() {
+                let route_id = child
+                    .node
+                    .value
+                    .as_ref()
+                    .expect("leaf route id should have a value");
+                format!("{entry_indent}{property}: {}", json_string(route_id))
+            } else {
+                format!(
+                    "{entry_indent}{property}: {}",
+                    render_route_id_node(&child.node, indent + 2)
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+
+    format!("{{\n{},\n{closing_indent}}}", entries.join(",\n"))
+}
+
+fn render_route_ids(routes: &[RouteManifestEntry]) -> Result<String> {
+    let tree = route_id_tree(routes)?;
+    Ok(render_route_id_node(&tree, 0))
+}
+
+fn ensure_unique_route_manifest(routes: &[RouteManifestEntry]) -> Result<()> {
+    let mut route_ids = HashSet::new();
+    for route in routes {
+        if !route_ids.insert(route.id.as_str()) {
+            return Err(Error::message(format!(
+                "RouteManifest TypeScript export contains duplicate route id `{}`",
+                route.id.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn render_route_manifest(routes: &[RouteManifestEntry]) -> Result<String> {
+    ensure_unique_route_manifest(routes)?;
+    let route_ids = render_route_ids(routes)?;
+
+    let route_literals = routes
+        .iter()
+        .map(|route| {
+            let params = string_array_literal(route.params.iter().map(String::as_str));
+            let permissions =
+                string_array_literal(route.permissions.iter().map(|permission| permission.as_str()));
+            let responses = route
+                .responses
+                .iter()
+                .map(|response| {
+                    format!(
+                        "{{ status: {}, schema: {} }}",
+                        response.status,
+                        json_string(response.schema)
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            format!(
+                "  {}: {{ id: {}, path: {}, method: {}, params: {}, guard: {}, permissions: {}, summary: {}, request: {}, responses: [{}] }}",
+                json_string(route.id.as_str()),
+                json_string(route.id.as_str()),
+                json_string(&route.path),
+                option_string_literal(route.method.as_deref()),
+                params,
+                option_string_literal(route.guard.as_ref().map(|guard| guard.as_str())),
+                permissions,
+                option_string_literal(route.summary.as_deref()),
+                option_string_literal(route.request),
+                responses.join(", "),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let route_params = if routes.is_empty() {
+        "export type RouteParams = Record<RouteName, Record<never, never>>;\n".to_string()
+    } else {
+        let entries = routes
+            .iter()
+            .map(|route| {
+                if route.params.is_empty() {
+                    format!(
+                        "  {}: Record<never, never>;",
+                        json_string(route.id.as_str())
+                    )
+                } else {
+                    let fields = route
+                        .params
+                        .iter()
+                        .map(|param| format!("{}: RouteParamValue", json_string(param)))
+                        .collect::<Vec<_>>();
+                    format!(
+                        "  {}: {{ {} }};",
+                        json_string(route.id.as_str()),
+                        fields.join("; ")
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "export type RouteParams = {{\n{}\n}};\n",
+            entries.join("\n")
+        )
+    };
+
+    Ok(format!(
+        "// Auto-generated from Forge routes. Do not edit.\n\n\
+         export type RouteParamValue = string | number | boolean;\n\
+         export type RouteUrlOptions = {{ basePath?: string }};\n\
+         type RouteManifestRuntimeEntry = {{ readonly path: string; readonly params: readonly string[] }};\n\n\
+         export const RouteManifest = {{\n{}\n\
+         }} as const;\n\n\
+         export const RouteIds = {} as const;\n\n\
+         export type RouteName = keyof typeof RouteManifest;\n\
+         {}\n\
+         type RouteArgs<Name extends RouteName> = Name extends RouteName\n\
+           ? keyof RouteParams[Name] extends never\n\
+             ? [params?: RouteParams[Name], options?: RouteUrlOptions]\n\
+             : [params: RouteParams[Name], options?: RouteUrlOptions]\n\
+           : never;\n\n\
+         function replaceAll(input: string, search: string, value: string): string {{\n\
+           return input.split(search).join(value);\n\
+         }}\n\n\
+         function normalizeBasePath(basePath: string | undefined): string {{\n\
+           if (!basePath || basePath === \"/\") {{\n\
+             return \"\";\n\
+           }}\n\
+           const normalized = basePath.startsWith(\"/\") ? basePath : `/${{basePath}}`;\n\
+           return normalized.replace(/\\/+$/, \"\");\n\
+         }}\n\n\
+         function stripBasePath(path: string, basePath: string | undefined): string {{\n\
+           const normalized = normalizeBasePath(basePath);\n\
+           if (!normalized) {{\n\
+             return path;\n\
+           }}\n\
+           if (path === normalized) {{\n\
+             return \"/\";\n\
+           }}\n\
+           if (path.startsWith(`${{normalized}}/`)) {{\n\
+             return path.slice(normalized.length);\n\
+           }}\n\
+           return path;\n\
+         }}\n\n\
+         function substituteRouteParams(\n\
+           name: RouteName,\n\
+           entry: RouteManifestRuntimeEntry,\n\
+           params: Record<string, RouteParamValue>,\n\
+         ): string {{\n\
+           let path = entry.path;\n\
+           for (const param of entry.params) {{\n\
+             if (!Object.prototype.hasOwnProperty.call(params, param)) {{\n\
+               throw new Error(`Route ${{String(name)}} is missing required parameter ${{param}}`);\n\
+             }}\n\
+             const value = encodeURIComponent(String(params[param]));\n\
+             path = replaceAll(path, `{{${{param}}}}`, value);\n\
+             path = replaceAll(path, `{{*${{param}}}}`, value);\n\
+             path = replaceAll(path, `:${{param}}`, value);\n\
+           }}\n\
+           return path;\n\
+         }}\n\n\
+         export function routeUrl<Name extends RouteName>(\n\
+           name: Name,\n\
+           ...args: RouteArgs<Name>\n\
+         ): string {{\n\
+           const entry = RouteManifest[name] as RouteManifestRuntimeEntry | undefined;\n\
+           if (!entry) {{\n\
+             throw new Error(`Unknown route ${{String(name)}}`);\n\
+           }}\n\
+           const params = (args[0] ?? {{}}) as Record<string, RouteParamValue>;\n\
+           const options = (args[1] ?? {{}}) as RouteUrlOptions;\n\
+           return stripBasePath(substituteRouteParams(name, entry, params), options.basePath);\n\
+         }}\n\n\
+         export function createRouteUrlBuilder(options: RouteUrlOptions) {{\n\
+           return function buildRouteUrl<Name extends RouteName>(\n\
+             name: Name,\n\
+             ...args: RouteArgs<Name>\n\
+           ): string {{\n\
+             const routeOptions = (args[1] ?? {{}}) as RouteUrlOptions;\n\
+             return routeUrl(\n\
+               name,\n\
+               args[0] as RouteParams[Name],\n\
+               {{ ...options, ...routeOptions }},\n\
+             );\n\
+           }};\n\
+         }}\n",
+        route_literals.join(",\n"),
+        route_ids,
+        route_params,
+    ))
+}
+
 /// Export all registered TypeScript types to a directory.
 pub fn export_all(dir: &Path) -> Result<()> {
+    export_all_with_routes(dir, &[])
+}
+
+/// Export all registered TypeScript types and HTTP route metadata to a directory.
+pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Result<()> {
     std::fs::create_dir_all(dir).map_err(Error::other)?;
 
     // Clean existing .ts files
@@ -344,6 +656,9 @@ pub fn export_all(dir: &Path) -> Result<()> {
     names.sort();
     names.dedup();
 
+    std::fs::write(dir.join("RouteManifest.ts"), render_route_manifest(routes)?)
+        .map_err(Error::other)?;
+
     let mut barrel = String::from("// Auto-generated barrel. Do not edit.\n");
     for name in &names {
         if enum_names.contains(name) {
@@ -359,6 +674,9 @@ pub fn export_all(dir: &Path) -> Result<()> {
             barrel.push_str(&format!("export type {{ {name} }} from \"./{name}\";\n"));
         }
     }
+    barrel.push_str(
+        "export { RouteManifest, RouteIds, createRouteUrlBuilder, routeUrl, type RouteName, type RouteParams, type RouteParamValue, type RouteUrlOptions } from \"./RouteManifest\";\n",
+    );
     std::fs::write(dir.join("index.ts"), barrel).map_err(Error::other)?;
 
     println!("Exported {} type(s) to {}", names.len(), dir.display());
@@ -366,9 +684,18 @@ pub fn export_all(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn collect_route_manifest(routes: &[RouteRegistrar]) -> Result<Vec<RouteManifestEntry>> {
+    let mut registrar = HttpRegistrar::new();
+    for route in routes {
+        route(&mut registrar)?;
+    }
+    registrar.collect_route_manifest()
+}
+
 /// CLI registrar for the `types:export` command.
-pub fn builtin_cli_registrar() -> CommandRegistrar {
-    Arc::new(|registry| {
+pub fn builtin_cli_registrar(routes: Vec<RouteRegistrar>) -> CommandRegistrar {
+    Arc::new(move |registry| {
+        let routes = routes.clone();
         registry.command(
             TYPES_EXPORT_COMMAND,
             clap::Command::new("types:export")
@@ -379,15 +706,20 @@ pub fn builtin_cli_registrar() -> CommandRegistrar {
                         .short('o')
                         .help("Output directory (overrides config)"),
                 ),
-            |invocation| async move {
-                let output = if let Some(dir) = invocation.matches().get_one::<String>("output") {
-                    PathBuf::from(dir)
-                } else {
-                    let config = invocation.app().config().typescript().unwrap_or_default();
-                    PathBuf::from(config.output_dir)
-                };
+            move |invocation| {
+                let routes = routes.clone();
+                async move {
+                    let output = if let Some(dir) = invocation.matches().get_one::<String>("output")
+                    {
+                        PathBuf::from(dir)
+                    } else {
+                        let config = invocation.app().config().typescript().unwrap_or_default();
+                        PathBuf::from(config.output_dir)
+                    };
 
-                export_all(&output)
+                    let route_manifest = collect_route_manifest(&routes)?;
+                    export_all_with_routes(&output, &route_manifest)
+                }
             },
         )?;
         Ok(())
@@ -401,10 +733,13 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta, EnumOption};
-    use crate::support::Collection;
+    use crate::http::{RouteManifestEntry, RouteManifestResponse};
+    use crate::support::{Collection, GuardId, PermissionId, RouteId};
 
     use super::export_all;
+    use super::export_all_with_routes;
     use super::render_app_enum;
+    use super::render_route_manifest;
 
     #[derive(Clone, Debug, PartialEq, Eq, crate::AppEnum)]
     enum MinimalExportStatus {
@@ -444,6 +779,23 @@ mod tests {
         }
     }
 
+    fn route_manifest_entry(id: &'static str, path: &str, params: &[&str]) -> RouteManifestEntry {
+        RouteManifestEntry {
+            id: RouteId::new(id),
+            path: path.to_string(),
+            method: Some("get".to_string()),
+            params: params.iter().map(|param| (*param).to_string()).collect(),
+            guard: Some(GuardId::new("admin")),
+            permissions: vec![PermissionId::new("users.read")],
+            summary: Some("Show user".to_string()),
+            request: Some("ShowUserRequest"),
+            responses: vec![RouteManifestResponse {
+                status: 200,
+                schema: "ShowUserResponse",
+            }],
+        }
+    }
+
     #[test]
     fn exports_framework_typescript_helpers() {
         let dir = tempdir().unwrap();
@@ -460,6 +812,7 @@ mod tests {
             "TokenPair.ts",
             "TokenResponse.ts",
             "WsTokenResponse.ts",
+            "RouteManifest.ts",
         ] {
             assert!(
                 dir.path().join(file).exists(),
@@ -643,6 +996,156 @@ mod tests {
         assert!(
             !index.contains("MinimalExportStatusGroups"),
             "did not expect non-dotted AppEnum groups in barrel:\n{index}"
+        );
+        assert!(
+            index.contains(
+                "export { RouteManifest, RouteIds, createRouteUrlBuilder, routeUrl, type RouteName, type RouteParams, type RouteParamValue, type RouteUrlOptions } from \"./RouteManifest\";"
+            ),
+            "expected index.ts to re-export route manifest helpers:\n{index}"
+        );
+
+        let route_manifest = fs::read_to_string(dir.path().join("RouteManifest.ts")).unwrap();
+        assert!(
+            route_manifest.contains("export const RouteManifest = {"),
+            "expected RouteManifest.ts to export manifest object:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("export const RouteIds = {} as const;"),
+            "expected empty route ids when no routes were exported:\n{route_manifest}"
+        );
+    }
+
+    #[test]
+    fn exports_route_manifest_file_and_barrel_helpers() {
+        let dir = tempdir().unwrap();
+        export_all_with_routes(
+            dir.path(),
+            &[route_manifest_entry(
+                "admin.users.show",
+                "/api/v1/admin/users/{id}",
+                &["id"],
+            )],
+        )
+        .unwrap();
+
+        let route_manifest = fs::read_to_string(dir.path().join("RouteManifest.ts")).unwrap();
+        assert!(
+            route_manifest.contains("\"admin.users.show\": { id: \"admin.users.show\""),
+            "expected route entry:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("path: \"/api/v1/admin/users/{id}\""),
+            "expected route path:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("params: [\"id\"]"),
+            "expected route params:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("guard: \"admin\""),
+            "expected guard metadata:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("permissions: [\"users.read\"]"),
+            "expected permission metadata:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("request: \"ShowUserRequest\""),
+            "expected request schema metadata:\n{route_manifest}"
+        );
+        assert!(
+            route_manifest.contains("{ status: 200, schema: \"ShowUserResponse\" }"),
+            "expected response schema metadata:\n{route_manifest}"
+        );
+
+        let index = fs::read_to_string(dir.path().join("index.ts")).unwrap();
+        assert!(
+            index.contains("from \"./RouteManifest\";"),
+            "expected route manifest barrel export:\n{index}"
+        );
+    }
+
+    #[test]
+    fn route_manifest_renders_grouped_route_ids_and_url_helpers() {
+        let routes = vec![
+            route_manifest_entry("admin.audit_logs.index", "/api/v1/admin/audit-logs", &[]),
+            route_manifest_entry("admin.users.show", "/api/v1/admin/users/{id}", &["id"]),
+            route_manifest_entry("files.download", "/api/v1/files/{*path}", &["path"]),
+            route_manifest_entry("legacy.users.show", "/legacy/users/:id", &["id"]),
+            route_manifest_entry("health", "/health", &[]),
+        ];
+
+        let rendered = render_route_manifest(&routes).unwrap();
+
+        assert!(
+            rendered.contains("auditLogs: {"),
+            "expected snake_case route id segments to become camelCase:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("show: \"admin.users.show\""),
+            "expected nested route id leaf:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("health: \"health\""),
+            "expected non-dotted route ids to remain usable:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("\"admin.users.show\": { \"id\": RouteParamValue };"),
+            "expected typed params for routes with params:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("\"health\": Record<never, never>;"),
+            "expected no-param routes to be callable without params:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("encodeURIComponent(String(params[param]))"),
+            "expected runtime param URL encoding:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Route ${String(name)} is missing required parameter ${param}"),
+            "expected clear missing-param runtime error:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("function stripBasePath"),
+            "expected basePath stripping helper:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("export function createRouteUrlBuilder"),
+            "expected portal route URL builder helper:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn route_manifest_rejects_duplicate_route_ids() {
+        let routes = vec![
+            route_manifest_entry("admin.users.show", "/users/{id}", &["id"]),
+            route_manifest_entry("admin.users.show", "/admin/users/{id}", &["id"]),
+        ];
+
+        let error = render_route_manifest(&routes)
+            .expect_err("duplicate route ids should fail manifest export");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate route id `admin.users.show`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn route_manifest_rejects_camel_case_route_id_collisions() {
+        let routes = vec![
+            route_manifest_entry("admin.audit_logs.index", "/audit-logs", &[]),
+            route_manifest_entry("admin.audit-logs.index", "/audit/logs", &[]),
+        ];
+
+        let error =
+            render_route_manifest(&routes).expect_err("camelCase route id collisions should fail");
+
+        assert!(
+            error.to_string().contains("both normalize to `auditLogs`"),
+            "unexpected error: {error}"
         );
     }
 

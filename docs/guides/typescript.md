@@ -161,6 +161,39 @@ export const PermissionGroups = {
 The exporter fails fast if one enum mixes dotted and non-dotted keys, or if two
 module names normalize to the same camelCase TypeScript property.
 
+### Route Manifest
+
+`types:export` also boots the registered HTTP route modules and writes a
+generated `RouteManifest.ts`. Named routes from `scope()`, `route_named()`, and
+`resource()` become typed frontend URL helpers:
+
+```typescript
+import {
+  RouteIds,
+  createRouteUrlBuilder,
+  routeUrl,
+} from "@shared/types/generated";
+
+routeUrl(RouteIds.admin.users.show, { id: userId });
+
+const adminRouteUrl = createRouteUrlBuilder({ basePath: "/api/v1/admin" });
+adminRouteUrl(RouteIds.admin.users.show, { id: userId });
+// -> "/users/123" after substituting and stripping the admin API base path
+```
+
+The generated manifest includes route id, path, method, path params, guard,
+permissions, summary, request schema name, and response schema names when Forge
+can infer them from the registered route. Route id groups are camelCased for
+TypeScript property access, so `admin.audit_logs.index` becomes
+`RouteIds.admin.auditLogs.index`.
+
+Route params support Axum `{id}` / `{*path}` patterns and legacy `:id` patterns.
+The helper URL-encodes substituted params and throws a clear runtime error if a
+required param is missing.
+
+This is route URL and metadata generation only. Request body trust still belongs
+to Forge validation extractors such as `JsonValidated<T>` and `Validated<T>`.
+
 ### `forge::TS` (escape hatch)
 
 For any type that isn't a DTO or AppEnum but needs TypeScript export:

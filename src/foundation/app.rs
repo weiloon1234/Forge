@@ -1005,6 +1005,52 @@ impl AppBuilder {
             }
         }
 
+        let mut boot_routes = prepared_plugins.routes;
+        boot_routes.extend(routes);
+        let route_registry = Arc::new(crate::http::collect_named_routes(&boot_routes)?);
+        app.container().singleton_arc(route_registry)?;
+
+        // Freeze registries that providers populated during register() before boot()
+        // so boot hooks can resolve the same runtime services as handlers and jobs.
+        let custom_storage_drivers =
+            StorageDriverRegistryBuilder::freeze_shared(registries.storage_driver.clone());
+        let storage =
+            Arc::new(StorageManager::from_config(app.config(), custom_storage_drivers).await?);
+        app.container().singleton_arc(storage)?;
+
+        let custom_email_drivers =
+            EmailDriverRegistryBuilder::freeze_shared(registries.email_driver.clone());
+        let email = Arc::new(EmailManager::from_config(
+            app.config(),
+            custom_email_drivers,
+            app.clone(),
+        )?);
+        app.container().singleton_arc(email)?;
+
+        let hashing_config = app.config().hashing()?;
+        let hash = Arc::new(HashManager::from_config(&hashing_config)?);
+        app.container().singleton_arc(hash)?;
+
+        let crypt_config = app.config().crypt()?;
+        if !crypt_config.key.is_empty() {
+            let crypt = Arc::new(CryptManager::from_config(&crypt_config)?);
+            app.container().singleton_arc(crypt)?;
+        }
+
+        let mut boot_websocket_routes = prepared_plugins.websocket_routes;
+        boot_websocket_routes.extend(websocket_routes);
+
+        let mut ws_registrar = crate::websocket::WebSocketRegistrar::new();
+        for route in &boot_websocket_routes {
+            route(&mut ws_registrar)?;
+        }
+        let ws_registry = crate::websocket::WebSocketChannelRegistry::from_registrar(ws_registrar);
+        for descriptor in ws_registry.descriptors() {
+            diagnostics.register_websocket_channel(&descriptor.id);
+        }
+        app.container()
+            .singleton_arc(std::sync::Arc::new(ws_registry))?;
+
         for provider in &prepared_plugins.providers {
             provider.boot(&app).await?;
         }
@@ -1021,39 +1067,7 @@ impl AppBuilder {
             provider.boot(&app).await?;
         }
 
-        // Freeze storage driver registry and construct StorageManager
-        let custom_storage_drivers =
-            StorageDriverRegistryBuilder::freeze_shared(registries.storage_driver.clone());
-        let storage =
-            Arc::new(StorageManager::from_config(app.config(), custom_storage_drivers).await?);
-        app.container().singleton_arc(storage)?;
-
-        // Freeze email driver registry and construct EmailManager
-        let custom_email_drivers =
-            EmailDriverRegistryBuilder::freeze_shared(registries.email_driver.clone());
-        let email = Arc::new(EmailManager::from_config(
-            app.config(),
-            custom_email_drivers,
-            app.clone(),
-        )?);
-        app.container().singleton_arc(email)?;
-
-        // Hash manager (argon2 password hashing)
-        let hashing_config = app.config().hashing()?;
-        let hash = Arc::new(HashManager::from_config(&hashing_config)?);
-        app.container().singleton_arc(hash)?;
-
-        // Crypt manager (AES-256-GCM encryption, optional)
-        let crypt_config = app.config().crypt()?;
-        if !crypt_config.key.is_empty() {
-            let crypt = Arc::new(CryptManager::from_config(&crypt_config)?);
-            app.container().singleton_arc(crypt)?;
-        }
-
         diagnostics.mark_bootstrap_complete();
-
-        let mut boot_routes = prepared_plugins.routes;
-        boot_routes.extend(routes);
 
         let mut boot_commands = vec![
             crate::config::publish::config_publish_cli_registrar(),
@@ -1076,20 +1090,6 @@ impl AppBuilder {
 
         let mut boot_schedules = prepared_plugins.schedules;
         boot_schedules.extend(schedules);
-
-        let mut boot_websocket_routes = prepared_plugins.websocket_routes;
-        boot_websocket_routes.extend(websocket_routes);
-
-        let mut ws_registrar = crate::websocket::WebSocketRegistrar::new();
-        for route in &boot_websocket_routes {
-            route(&mut ws_registrar)?;
-        }
-        let ws_registry = crate::websocket::WebSocketChannelRegistry::from_registrar(ws_registrar);
-        for descriptor in ws_registry.descriptors() {
-            diagnostics.register_websocket_channel(&descriptor.id);
-        }
-        app.container()
-            .singleton_arc(std::sync::Arc::new(ws_registry))?;
 
         let mut boot_middlewares = prepared_plugins.middlewares;
         boot_middlewares.extend(middlewares);
@@ -1225,15 +1225,17 @@ fn register_builtin_readiness_checks(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use serde::Serialize;
+    use tempfile::tempdir;
 
     use super::App;
     use crate::events::{Event, EventContext, EventListener};
     use crate::foundation::{AppContext, Result, ServiceProvider, ServiceRegistrar};
-    use crate::support::EventId;
+    use crate::support::{EventId, RouteId};
 
     struct TestProvider {
         order: Arc<Mutex<Vec<&'static str>>>,
@@ -1283,6 +1285,18 @@ mod tests {
         log: Arc<Mutex<Vec<String>>>,
     }
 
+    struct BootServiceProvider {
+        resolved: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    struct RouteUrlBootProvider {
+        urls: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn route_url_health() -> &'static str {
+        "ok"
+    }
+
     #[async_trait]
     impl ServiceProvider for TestProvider {
         async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
@@ -1317,6 +1331,37 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ServiceProvider for BootServiceProvider {
+        async fn boot(&self, app: &AppContext) -> Result<()> {
+            app.storage()?;
+            self.resolved.lock().unwrap().push("storage");
+
+            app.email()?;
+            self.resolved.lock().unwrap().push("email");
+
+            app.hash()?;
+            self.resolved.lock().unwrap().push("hash");
+
+            app.crypt()?.encrypt_string("boot")?;
+            self.resolved.lock().unwrap().push("crypt");
+
+            app.websocket_channels()?;
+            self.resolved.lock().unwrap().push("websocket_channels");
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ServiceProvider for RouteUrlBootProvider {
+        async fn boot(&self, app: &AppContext) -> Result<()> {
+            let url = app.route_url(RouteId::new("boot.show"), &[("id", "a b")])?;
+            self.urls.lock().unwrap().push(url);
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn providers_register_before_boot() {
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -1329,6 +1374,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(order.lock().unwrap().as_slice(), ["register", "boot"]);
+    }
+
+    #[tokio::test]
+    async fn providers_boot_after_core_services_are_registered() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("crypt.toml"),
+            r#"
+            [crypt]
+            key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            "#,
+        )
+        .unwrap();
+
+        let resolved = Arc::new(Mutex::new(Vec::new()));
+        let _kernel = App::builder()
+            .load_config_dir(dir.path())
+            .register_provider(BootServiceProvider {
+                resolved: resolved.clone(),
+            })
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolved.lock().unwrap().as_slice(),
+            ["storage", "email", "hash", "crypt", "websocket_channels"]
+        );
+    }
+
+    #[tokio::test]
+    async fn route_urls_are_available_during_provider_boot() {
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let _kernel = App::builder()
+            .register_routes(|routes| {
+                routes.route_named(
+                    RouteId::new("boot.show"),
+                    "/boot/:id",
+                    axum::routing::get(route_url_health),
+                );
+                Ok(())
+            })
+            .register_provider(RouteUrlBootProvider { urls: urls.clone() })
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        assert_eq!(urls.lock().unwrap().as_slice(), ["/boot/a%20b"]);
     }
 
     #[tokio::test]

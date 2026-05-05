@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -87,7 +88,15 @@ impl BoundWebSocketServer {
     }
 
     pub async fn serve(self) -> Result<()> {
+        self.serve_until(super::shutdown::shutdown_signal()).await
+    }
+
+    async fn serve_until<S>(self, shutdown: S) -> Result<()>
+    where
+        S: Future<Output = ()> + Send + 'static,
+    {
         axum::serve(self.listener, self.router)
+            .with_graceful_shutdown(shutdown)
             .await
             .map_err(Error::other)
     }
@@ -1528,5 +1537,18 @@ mod tests {
             hub.send(connection_id, WriterCommand::Json(message)).await,
             Err(HubSendError::Full)
         ));
+    }
+
+    #[tokio::test]
+    async fn bound_server_exits_when_shutdown_future_completes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let server = BoundWebSocketServer {
+            listener,
+            router: axum::Router::new(),
+            local_addr,
+        };
+
+        server.serve_until(async {}).await.unwrap();
     }
 }

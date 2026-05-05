@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -224,19 +225,38 @@ impl SchedulerKernel {
     }
 
     pub async fn run(self) -> Result<()> {
+        self.run_until(super::shutdown::shutdown_signal()).await
+    }
+
+    async fn run_until<S>(self, shutdown: S) -> Result<()>
+    where
+        S: Future<Output = ()>,
+    {
         let mut interval = tokio::time::interval(self.tick_interval);
+        tokio::pin!(shutdown);
+
         loop {
-            interval.tick().await;
-            // Error from run_once is only from leadership — not from tasks
-            // (tasks are spawned and isolated). Leadership errors are recoverable.
-            if let Err(e) = self.run_once().await {
-                tracing::warn!(
-                    target: "forge.scheduler",
-                    error = %e,
-                    "Scheduler tick error (leadership), will retry"
-                );
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    tracing::info!(target: "forge.scheduler", "scheduler shutdown requested");
+                    break;
+                }
+                _ = interval.tick() => {
+                    // Error from run_once is only from leadership — not from tasks
+                    // (tasks are spawned and isolated). Leadership errors are recoverable.
+                    if let Err(e) = self.run_once().await {
+                        tracing::warn!(
+                            target: "forge.scheduler",
+                            error = %e,
+                            "Scheduler tick error (leadership), will retry"
+                        );
+                    }
+                }
             }
         }
+
+        Ok(())
     }
 
     async fn ensure_leadership(&self) -> Result<bool> {
@@ -358,5 +378,18 @@ impl Drop for ScheduleLockGuard {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn scheduler_run_exits_when_shutdown_future_completes() {
+        let kernel = crate::App::builder()
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        kernel.run_until(async {}).await.unwrap();
     }
 }

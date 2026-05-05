@@ -410,8 +410,8 @@ mod tests {
         .unwrap();
         fs::write(seeders_dir.join("users_seed.rs"), "pub struct Entry;").unwrap();
 
-        let migrations = discover_migration_sources(&[migrations_dir.clone()]).unwrap();
-        let seeders = discover_seeder_sources(&[seeders_dir.clone()]).unwrap();
+        let migrations = discover_migration_sources(std::slice::from_ref(&migrations_dir)).unwrap();
+        let seeders = discover_seeder_sources(std::slice::from_ref(&seeders_dir)).unwrap();
 
         assert_eq!(
             migrations

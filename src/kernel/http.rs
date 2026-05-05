@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use crate::config::ServerConfig;
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
-use crate::http::{HttpRegistrar, RouteRegistrar};
+use crate::http::RouteRegistrar;
 use crate::logging::ObservabilityOptions;
 
 pub struct HttpKernel {
@@ -39,10 +39,7 @@ impl HttpKernel {
     }
 
     pub fn build_router(&self) -> Result<axum::Router> {
-        let mut registrar = HttpRegistrar::new();
-        for routes in &self.routes {
-            routes(&mut registrar)?;
-        }
+        let mut registrar = crate::http::build_registrar(&self.routes)?;
         if let Some(options) = &self.observability {
             let obs_config = self.app.config().observability()?;
 

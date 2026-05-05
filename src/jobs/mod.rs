@@ -2,6 +2,7 @@ mod backend;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -520,6 +521,14 @@ impl Worker {
     /// When `max_concurrent_jobs` is set (> 0), a semaphore bounds concurrency.
     /// When 0 (default), jobs spawn without limit — true goroutine behavior.
     pub async fn run(self) -> Result<()> {
+        self.run_until(crate::kernel::shutdown::shutdown_signal())
+            .await
+    }
+
+    pub(crate) async fn run_until<S>(self, shutdown: S) -> Result<()>
+    where
+        S: Future<Output = ()> + Send + 'static,
+    {
         // 0 = unlimited (use a large semaphore that never blocks in practice)
         let max_concurrent = if self.runtime.config.max_concurrent_jobs == 0 {
             u32::MAX >> 1 // ~1 billion — effectively unlimited
@@ -530,13 +539,13 @@ impl Worker {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent as usize));
 
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
-        {
+        let shutdown_handle = {
             let tx = shutdown_tx.clone();
             tokio::spawn(async move {
-                crate::kernel::shutdown::shutdown_signal().await;
+                shutdown.await;
                 let _ = tx.send(true);
-            });
-        }
+            })
+        };
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tracing::info!(
@@ -585,7 +594,16 @@ impl Worker {
                 }
             };
 
-            match worker.runtime.claim_job().await {
+            let claim = tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => {
+                    drop(permit);
+                    continue;
+                }
+                claim = worker.runtime.claim_job() => claim,
+            };
+
+            match claim {
                 Ok(Some(lease)) => {
                     worker
                         .diagnostics
@@ -600,17 +618,35 @@ impl Worker {
                 }
                 Ok(None) => {
                     drop(permit);
-                    tokio::time::sleep(worker.runtime.poll_interval()).await;
+                    Self::sleep_or_shutdown(&mut shutdown_rx, worker.runtime.poll_interval()).await;
                 }
                 Err(error) => {
                     drop(permit);
                     tracing::error!(target: "forge.worker", error = %error, "claim failed");
-                    tokio::time::sleep(worker.runtime.poll_interval()).await;
+                    Self::sleep_or_shutdown(&mut shutdown_rx, worker.runtime.poll_interval()).await;
                 }
             }
         }
 
+        shutdown_handle.abort();
+        let _ = shutdown_handle.await;
+
         Ok(())
+    }
+
+    async fn sleep_or_shutdown(
+        shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+        duration: Duration,
+    ) {
+        if *shutdown_rx.borrow() {
+            return;
+        }
+
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {}
+            _ = tokio::time::sleep(duration) => {}
+        }
     }
 
     pub async fn run_once(&self) -> Result<bool> {

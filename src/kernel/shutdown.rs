@@ -3,17 +3,29 @@ use tokio::signal;
 /// Wait for SIGTERM or SIGINT (Ctrl+C) to initiate graceful shutdown.
 pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(error) = signal::ctrl_c().await {
+            tracing::warn!(
+                error = %error,
+                "forge: failed to listen for SIGINT shutdown signal"
+            );
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "forge: failed to listen for SIGTERM shutdown signal"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]

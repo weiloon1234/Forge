@@ -30,6 +30,18 @@ pub type HttpAuthorizeCallback = Arc<
     dyn Fn(HttpAuthorizeContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
 >;
 
+pub(crate) fn build_registrar(registrars: &[RouteRegistrar]) -> Result<HttpRegistrar> {
+    let mut registrar = HttpRegistrar::new();
+    for routes in registrars {
+        routes(&mut registrar)?;
+    }
+    Ok(registrar)
+}
+
+pub(crate) fn collect_named_routes(registrars: &[RouteRegistrar]) -> Result<routes::RouteRegistry> {
+    Ok(build_registrar(registrars)?.named_routes)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteManifestEntry {
     pub id: RouteId,
@@ -1573,9 +1585,8 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
                             }
                         }
                     }
-                    Err(_) => {
-                        println!("Route registry not available (routes are built during HTTP kernel startup).");
-                        println!("Named routes registered via route_named() will appear here after HTTP boot.");
+                    Err(error) => {
+                        println!("Route registry not available: {error}");
                     }
                 }
                 Ok(())

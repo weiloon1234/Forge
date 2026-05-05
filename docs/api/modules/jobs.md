@@ -48,3 +48,7 @@ trait JobMiddleware
 fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 ```
 
+## Notes
+
+- `spawn_worker(app)` is managed by the app lifecycle. On app shutdown, Forge asks the worker to drain and aborts it after `app.background_shutdown_timeout_ms`.
+

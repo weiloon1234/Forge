@@ -67,3 +67,8 @@ struct WebSocketConfig
 struct WebSocketObservabilityConfig
 ```
 
+## Notes
+
+- `AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.
+- `SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining.
+

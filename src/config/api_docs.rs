@@ -7,6 +7,7 @@ use std::{fs, process::Command};
 use regex::Regex;
 
 use crate::cli::CommandRegistrar;
+use crate::config::api_docs_metadata::{append_module_notes, module_description};
 use crate::foundation::Error;
 use crate::support::CommandId;
 
@@ -143,6 +144,7 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
         }
 
         if has_content {
+            append_module_notes(group_key, &mut content);
             let lines = content.lines().count();
             fs::write(modules_dir.join(format!("{group_key}.md")), &content)
                 .map_err(Error::other)?;
@@ -262,43 +264,6 @@ fn filter_root_items(items: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, 
         }
     }
     filtered
-}
-
-fn module_description(stem: &str) -> &'static str {
-    match stem {
-        "app_enum" => "Enum metadata and serialization (ForgeAppEnum)",
-        "audit" => "Built-in audit logging with automatic model mutation tracking",
-        "attachments" => "File attachments with lifecycle (HasAttachments)",
-        "auth" => "Auth: guards, policies, tokens, sessions, password reset, email verification",
-        "cache" => "In-memory and Redis-backed caching (CacheManager)",
-        "cli" => "CLI command registration (CommandRegistry)",
-        "config" => "TOML-based configuration (ConfigRepository, AppConfig, etc.)",
-        "countries" => "Built-in country data (250 countries)",
-        "database" => "AST-first query system: models, relations, projections, compiler",
-        "datatable" => "Server-side datatables: filtering, sorting, pagination, XLSX export",
-        "email" => "Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES",
-        "events" => "Domain event bus with typed listeners",
-        "foundation" => "Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider",
-        "http" => "HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources",
-        "i18n" => "Internationalization: locale extraction, translation catalogs",
-        "imaging" => "Image processing pipeline (resize, crop, rotate, format conversion)",
-        "jobs" => "Background job queue with leased at-least-once delivery",
-        "kernel" => "5 runtime kernels: HTTP, CLI, Scheduler, Worker, WebSocket",
-        "logging" => "Structured logging, observability, health probes, diagnostics",
-        "metadata" => "Key-value metadata for models (HasMetadata)",
-        "notifications" => "Multi-channel notifications: email, database, broadcast",
-        "openapi" => "OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc)",
-        "plugin" => "Compile-time plugin system with dependency validation",
-        "redis" => "Namespaced Redis wrapper (RedisManager, RedisConnection)",
-        "scheduler" => "Cron + interval scheduling with Redis-safe leadership",
-        "storage" => "File storage: local + S3, multipart uploads, file validation",
-        "support" => "Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks",
-        "testing" => "Test infrastructure: TestApp, TestClient, Factory",
-        "translations" => "Model field translations across locales (HasTranslations)",
-        "validation" => "Validation: 38+ rules, custom rules, request validation extractor",
-        "websocket" => "Channel-based WebSocket with presence and typed messages",
-        _ => "",
-    }
 }
 
 // ── Module discovery (sidebar-items.js) ──────────────────────────────

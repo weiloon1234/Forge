@@ -114,6 +114,14 @@ const APP_FIELDS: &[PublishedField] = &[
         false,
         Some("Base64 key - generate with `key:generate`"),
     ),
+    field(
+        "background_shutdown_timeout_ms",
+        "30000",
+        "30000",
+        false,
+        false,
+        Some("0 = abort managed background tasks immediately"),
+    ),
 ];
 
 const SERVER_FIELDS: &[PublishedField] = &[

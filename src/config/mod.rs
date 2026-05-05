@@ -1,4 +1,5 @@
 pub(crate) mod api_docs;
+pub(crate) mod api_docs_metadata;
 pub(crate) mod env_publish;
 pub(crate) mod publish;
 pub(crate) mod published;
@@ -99,6 +100,7 @@ pub struct AppConfig {
     pub timezone: Timezone,
     #[serde(default)]
     pub signing_key: String,
+    pub background_shutdown_timeout_ms: u64,
 }
 
 impl Default for AppConfig {
@@ -108,6 +110,7 @@ impl Default for AppConfig {
             environment: Environment::default(),
             timezone: Timezone::utc(),
             signing_key: String::new(),
+            background_shutdown_timeout_ms: 30_000,
         }
     }
 }
@@ -905,6 +908,7 @@ mod tests {
             r#"
                 [app]
                 timezone = "Asia/Kuala_Lumpur"
+                background_shutdown_timeout_ms = 15000
             "#,
         )
         .unwrap();
@@ -913,6 +917,7 @@ mod tests {
         let app: AppConfig = config.app().unwrap();
 
         assert_eq!(app.timezone.to_string(), "Asia/Kuala_Lumpur");
+        assert_eq!(app.background_shutdown_timeout_ms, 15_000);
     }
 
     #[test]

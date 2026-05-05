@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -18,6 +19,7 @@ use crate::database::{
 };
 use crate::email::{job::SendQueuedEmailJob, EmailDriverRegistryBuilder, EmailManager};
 use crate::events::{EventBus, EventRegistryBuilder};
+use crate::foundation::background_tasks::ManagedBackgroundTasks;
 use crate::foundation::provider::RegistryHub;
 use crate::foundation::{Container, Error, Result, ServiceProvider, ServiceRegistrar};
 use crate::http::middleware::MiddlewareConfig;
@@ -56,6 +58,36 @@ pub struct AppTransaction {
     transaction: DatabaseTransaction,
     after_commit: Mutex<Vec<AfterCommitCallback>>,
     actor: Option<Actor>,
+}
+
+async fn finish_kernel_run(app: AppContext, result: Result<()>) -> Result<()> {
+    let kernel_failed = result.is_err();
+    let mut cleanup_error = None;
+
+    if let Err(error) = app.shutdown_background_tasks().await {
+        tracing::warn!(
+            error = %error,
+            "background task shutdown failed"
+        );
+        if !kernel_failed && cleanup_error.is_none() {
+            cleanup_error = Some(error);
+        }
+    }
+
+    if let Err(error) = app.shutdown_plugins().await {
+        tracing::warn!(
+            error = %error,
+            "plugin shutdown failed"
+        );
+        if !kernel_failed && cleanup_error.is_none() {
+            cleanup_error = Some(error);
+        }
+    }
+
+    match result {
+        Ok(()) => cleanup_error.map_or(Ok(()), Err),
+        Err(error) => Err(error),
+    }
 }
 
 impl AppContext {
@@ -290,6 +322,48 @@ impl AppContext {
                 );
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn managed_background_tasks(&self) -> Result<Arc<ManagedBackgroundTasks>> {
+        self.resolve::<ManagedBackgroundTasks>()
+    }
+
+    pub(crate) fn spawn_managed_background_task<F, Fut>(
+        &self,
+        name: impl Into<String>,
+        build_task: F,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>>
+    where
+        F: FnOnce(tokio::sync::oneshot::Receiver<()>) -> Result<Fut>,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let tasks = match self.managed_background_tasks() {
+            Ok(tasks) => tasks,
+            Err(_) => return Ok(None),
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        let task = build_task(shutdown_rx)?;
+        let handle = tokio::spawn(async move {
+            task.await;
+            let _ = completed_tx.send(());
+        });
+        tasks.register(name, shutdown_tx, completed_rx, handle.abort_handle());
+        Ok(Some(handle))
+    }
+
+    pub(crate) async fn shutdown_background_tasks(&self) -> Result<()> {
+        let tasks = match self.managed_background_tasks() {
+            Ok(tasks) => tasks,
+            Err(_) => return Ok(()),
+        };
+        let timeout = self
+            .config()
+            .app()
+            .map(|config| Duration::from_millis(config.background_shutdown_timeout_ms))
+            .unwrap_or_else(|_| Duration::from_millis(30_000));
+        tasks.shutdown(timeout).await;
         Ok(())
     }
 
@@ -667,8 +741,7 @@ impl AppBuilder {
         let kernel = self.build_http_kernel().await?;
         let app = kernel.app().clone();
         let result = kernel.serve().await;
-        app.shutdown_plugins().await?;
-        result
+        finish_kernel_run(app, result).await
     }
 
     pub fn run_cli(self) -> Result<()> {
@@ -679,8 +752,7 @@ impl AppBuilder {
         let kernel = self.build_cli_kernel().await?;
         let app = kernel.app().clone();
         let result = kernel.run().await;
-        app.shutdown_plugins().await?;
-        result
+        finish_kernel_run(app, result).await
     }
 
     pub fn run_scheduler(self) -> Result<()> {
@@ -691,8 +763,7 @@ impl AppBuilder {
         let kernel = self.build_scheduler_kernel().await?;
         let app = kernel.app().clone();
         let result = kernel.run().await;
-        app.shutdown_plugins().await?;
-        result
+        finish_kernel_run(app, result).await
     }
 
     pub fn run_worker(self) -> Result<()> {
@@ -703,8 +774,7 @@ impl AppBuilder {
         let kernel = self.build_worker_kernel().await?;
         let app = kernel.app().clone();
         let result = kernel.run().await;
-        app.shutdown_plugins().await?;
-        result
+        finish_kernel_run(app, result).await
     }
 
     pub fn run_websocket(self) -> Result<()> {
@@ -715,8 +785,7 @@ impl AppBuilder {
         let kernel = self.build_websocket_kernel().await?;
         let app = kernel.app().clone();
         let result = kernel.serve().await;
-        app.shutdown_plugins().await?;
-        result
+        finish_kernel_run(app, result).await
     }
 
     pub async fn build_http_kernel(self) -> Result<HttpKernel> {
@@ -807,6 +876,8 @@ impl AppBuilder {
         registrar.register_job::<crate::notifications::SendNotificationJob>()?;
 
         let app = AppContext::new(container, config, rules)?;
+        app.container()
+            .singleton_arc(Arc::new(ManagedBackgroundTasks::default()))?;
         let error_reporter_registry = Arc::new(ErrorReporterRegistry::new(error_reporters));
         crate::logging::set_global_panic_reporters(error_reporter_registry.clone());
         registrar.register_job_middleware(crate::logging::ErrorReporterJobMiddleware)?;
@@ -1227,14 +1298,15 @@ fn register_builtin_readiness_checks(
 mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use serde::Serialize;
     use tempfile::tempdir;
 
-    use super::App;
+    use super::{finish_kernel_run, App};
     use crate::events::{Event, EventContext, EventListener};
-    use crate::foundation::{AppContext, Result, ServiceProvider, ServiceRegistrar};
+    use crate::foundation::{AppContext, Error, Result, ServiceProvider, ServiceRegistrar};
     use crate::support::{EventId, RouteId};
 
     struct TestProvider {
@@ -1422,6 +1494,127 @@ mod tests {
             .unwrap();
 
         assert_eq!(urls.lock().unwrap().as_slice(), ["/boot/a%20b"]);
+    }
+
+    #[tokio::test]
+    async fn managed_background_task_helper_drains_during_app_shutdown() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = kernel
+            .app()
+            .spawn_managed_background_task("test.helper", move |shutdown_rx| {
+                Ok(async move {
+                    let _ = started_tx.send(());
+                    let _ = shutdown_rx.await;
+                })
+            })
+            .unwrap()
+            .unwrap();
+
+        started_rx.await.unwrap();
+        kernel.app().shutdown_background_tasks().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawned_worker_drains_during_app_shutdown() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let handle = crate::jobs::spawn_worker(kernel.app().clone()).unwrap();
+
+        kernel.app().shutdown_background_tasks().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_shutdown_aborts_tasks_after_timeout() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("app.toml"),
+            r#"
+            [app]
+            background_shutdown_timeout_ms = 1
+            "#,
+        )
+        .unwrap();
+
+        let kernel = App::builder()
+            .load_config_dir(dir.path())
+            .build_cli_kernel()
+            .await
+            .unwrap();
+        let tasks = kernel.app().managed_background_tasks().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _completed_tx = completed_tx;
+            let _ = shutdown_rx.await;
+            std::future::pending::<()>().await;
+        });
+        tasks.register(
+            "slow-task",
+            shutdown_tx,
+            completed_rx,
+            handle.abort_handle(),
+        );
+
+        kernel.app().shutdown_background_tasks().await.unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn background_task_registered_after_shutdown_is_aborted() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let tasks = kernel.app().managed_background_tasks().unwrap();
+
+        kernel.app().shutdown_background_tasks().await.unwrap();
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
+        let (_completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(std::future::pending::<()>());
+        tasks.register(
+            "late-task",
+            shutdown_tx,
+            completed_rx,
+            handle.abort_handle(),
+        );
+
+        let error = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn kernel_cleanup_preserves_original_kernel_error() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let handle = crate::jobs::spawn_worker(kernel.app().clone()).unwrap();
+
+        let error = finish_kernel_run(
+            kernel.app().clone(),
+            Err(Error::message("kernel failed before cleanup")),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("kernel failed before cleanup"));
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

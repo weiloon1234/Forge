@@ -10,11 +10,11 @@ Load only the file you need — don't read them all at once.
 | [root](root.md) | Crate root: derive macros, re-exports | 10L |
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 26L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 74L |
-| [audit](modules/audit.md) |  | 32L |
+| [audit](modules/audit.md) | Built-in audit logging with automatic model mutation tracking | 34L |
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 206L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 26L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
-| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 69L |
+| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 74L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
 | [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 727L |
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 211L |
@@ -24,7 +24,7 @@ Load only the file you need — don't read them all at once.
 | [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 278L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
-| [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 50L |
+| [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 54L |
 | [kernel](modules/kernel.md) | 5 runtime kernels: HTTP, CLI, Scheduler, Worker, WebSocket | 67L |
 | [logging](modules/logging.md) | Structured logging, observability, health probes, diagnostics | 80L |
 | [metadata](modules/metadata.md) | Key-value metadata for models (HasMetadata) | 21L |
@@ -43,4 +43,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 35 modules, 3285 lines across all files.**
+**Total: 35 modules, 3296 lines across all files.**

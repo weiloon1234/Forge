@@ -1150,6 +1150,23 @@ impl Worker {
 }
 
 pub fn spawn_worker(app: AppContext) -> Result<tokio::task::JoinHandle<()>> {
+    let worker_app = app.clone();
+    if let Some(handle) = app.spawn_managed_background_task("forge.worker", move |shutdown_rx| {
+        let worker = Worker::from_app(worker_app)?;
+        Ok(async move {
+            let result = worker
+                .run_until(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+            if let Err(error) = result {
+                tracing::error!("forge worker exited with error: {error}");
+            }
+        })
+    })? {
+        return Ok(handle);
+    }
+
     let kernel = crate::kernel::worker::WorkerKernel::new(app)?;
     Ok(tokio::spawn(async move {
         if let Err(error) = kernel.run().await {

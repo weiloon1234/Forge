@@ -320,7 +320,7 @@ my-app/
 ├── Cargo.toml
 ├── build.rs                        # database codegen (migrations/seeders)
 ├── config/
-│   ├── app.toml                    # app name, environment, timezone
+│   ├── app.toml                    # app name, environment, timezone, shutdown
 │   ├── server.toml                 # HTTP host/port
 │   ├── database.toml               # PostgreSQL connection
 │   ├── redis.toml                  # Redis connection

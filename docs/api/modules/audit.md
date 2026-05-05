@@ -1,5 +1,7 @@
 # audit
 
+Built-in audit logging with automatic model mutation tracking
+
 [Back to index](../index.md)
 
 ## forge::audit

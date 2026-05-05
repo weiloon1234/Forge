@@ -244,9 +244,17 @@ let kernel = app_builder.build_worker_kernel().await?;
 kernel.run_once().await?;  // process one job
 ```
 
+Workers started with `spawn_worker(app)` inside another kernel are owned by the app lifecycle:
+Forge signals them to drain during app shutdown, then aborts them after the app background
+shutdown timeout.
+
 ### Config
 
 ```toml
+# config/app.toml
+[app]
+background_shutdown_timeout_ms = 30000  # 0 = abort managed background tasks immediately
+
 # config/jobs.toml
 [jobs]
 queue = "default"              # default queue name

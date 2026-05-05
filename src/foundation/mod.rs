@@ -1,4 +1,5 @@
 mod app;
+mod background_tasks;
 mod container;
 mod error;
 mod provider;

@@ -326,7 +326,7 @@ TOML-based configuration with environment overlay.
 | Name | Summary |
 |------|---------|
 | `ConfigRepository` | Loads and queries TOML config |
-| `AppConfig` | `name`, `environment`, `timezone`, `signing_key` |
+| `AppConfig` | `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms` |
 | `ServerConfig` | `host`, `port` |
 | `DatabaseConfig` | `url`, `read_url`, `schema`, connection pool settings |
 | `DatabaseModelConfig` | `timestamps_default`, `soft_deletes_default` |
@@ -1807,6 +1807,8 @@ fn dispatch(self) -> Result<()>
 ```rust
 fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 ```
+
+Workers spawned with `spawn_worker(app)` are managed by the app lifecycle. During shutdown, Forge signals them to drain before plugin shutdown and aborts them after `app.background_shutdown_timeout_ms`.
 
 ---
 

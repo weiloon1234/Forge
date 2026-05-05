@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::foundation::shutdown_drain::{
+    drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
+};
 use crate::foundation::{AppContext, Result};
 use crate::logging::SchedulerLeadershipState;
 use crate::scheduler::{cron_due, ScheduleKind, ScheduleRegistry, ScheduledTask};
@@ -22,7 +25,7 @@ pub struct SchedulerKernel {
     leader_active: AtomicBool,
     last_tick: Mutex<Option<DateTime>>,
     last_interval_run: Mutex<HashMap<ScheduleId, DateTime>>,
-    active_tasks: Mutex<Vec<JoinHandle<()>>>,
+    active_tasks: Mutex<Vec<ScheduleTaskHandle>>,
 }
 
 impl SchedulerKernel {
@@ -272,7 +275,7 @@ impl SchedulerKernel {
         self.active_tasks
             .lock()
             .expect("scheduler active task mutex poisoned")
-            .push(handle);
+            .push(ScheduleTaskHandle(handle));
     }
 
     async fn prune_finished_tasks(&self) {
@@ -293,12 +296,12 @@ impl SchedulerKernel {
         }
 
         for handle in finished {
-            await_schedule_task(handle).await;
+            handle.wait_finished().await;
         }
     }
 
     async fn drain_active_tasks(&self) {
-        let mut active_tasks = {
+        let active_tasks = {
             let mut active_tasks = self
                 .active_tasks
                 .lock()
@@ -306,58 +309,20 @@ impl SchedulerKernel {
             std::mem::take(&mut *active_tasks)
         };
 
-        if active_tasks.is_empty() {
-            return;
-        }
-
-        if self.shutdown_timeout.is_zero() {
-            tracing::warn!(
-                target: "forge.scheduler",
-                active = active_tasks.len(),
-                "scheduler shutdown timeout disabled; aborting active schedule tasks"
-            );
-            abort_schedule_tasks(active_tasks).await;
-            return;
-        }
-
-        let task_count = active_tasks.len();
-        tracing::info!(
-            target: "forge.scheduler",
-            active = task_count,
-            timeout_ms = self.shutdown_timeout.as_millis(),
-            "waiting for active schedule tasks during shutdown"
-        );
-
-        let timeout = tokio::time::sleep(self.shutdown_timeout);
-        tokio::pin!(timeout);
-
-        loop {
-            reap_finished_tasks(&mut active_tasks).await;
-            if active_tasks.is_empty() {
-                tracing::info!(
-                    target: "forge.scheduler",
-                    active = task_count,
-                    "active schedule tasks drained"
-                );
-                return;
-            }
-
-            tokio::select! {
-                biased;
-                _ = &mut timeout => {
-                    let remaining = active_tasks.len();
-                    tracing::warn!(
-                        target: "forge.scheduler",
-                        active = remaining,
-                        timeout_ms = self.shutdown_timeout.as_millis(),
-                        "scheduler shutdown timeout elapsed; aborting active schedule tasks"
-                    );
-                    abort_schedule_tasks(active_tasks).await;
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
-            }
-        }
+        drain_tasks(
+            active_tasks,
+            self.shutdown_timeout,
+            ShutdownDrainMessages {
+                target: ShutdownDrainTarget::Scheduler,
+                timeout_disabled:
+                    "scheduler shutdown timeout disabled; aborting active schedule tasks",
+                waiting: "waiting for active schedule tasks during shutdown",
+                drained: "active schedule tasks drained",
+                timeout_elapsed:
+                    "scheduler shutdown timeout elapsed; aborting active schedule tasks",
+            },
+        )
+        .await;
     }
 
     async fn ensure_leadership(&self) -> Result<bool> {
@@ -462,35 +427,30 @@ fn next_owner_id() -> String {
     )
 }
 
-async fn reap_finished_tasks(active_tasks: &mut Vec<JoinHandle<()>>) {
-    let mut index = 0;
-    while index < active_tasks.len() {
-        if active_tasks[index].is_finished() {
-            let handle = active_tasks.swap_remove(index);
-            await_schedule_task(handle).await;
-        } else {
-            index += 1;
+struct ScheduleTaskHandle(JoinHandle<()>);
+
+#[async_trait::async_trait]
+impl ShutdownDrainTask for ScheduleTaskHandle {
+    fn is_finished(&mut self) -> bool {
+        self.0.is_finished()
+    }
+
+    async fn wait_finished(self) {
+        if let Err(error) = self.0.await {
+            tracing::warn!(
+                target: "forge.scheduler",
+                error = %error,
+                "Schedule task finished with join error"
+            );
         }
     }
-}
 
-async fn await_schedule_task(handle: JoinHandle<()>) {
-    if let Err(error) = handle.await {
-        tracing::warn!(
-            target: "forge.scheduler",
-            error = %error,
-            "Schedule task finished with join error"
-        );
-    }
-}
-
-async fn abort_schedule_tasks(active_tasks: Vec<JoinHandle<()>>) {
-    for handle in &active_tasks {
-        handle.abort();
+    fn abort(&self) {
+        self.0.abort();
     }
 
-    for handle in active_tasks {
-        let _ = handle.await;
+    async fn wait_after_abort(self) {
+        let _ = self.0.await;
     }
 }
 

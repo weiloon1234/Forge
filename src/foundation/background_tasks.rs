@@ -2,6 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::foundation::shutdown_drain::{
+    drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
+};
+
 #[derive(Default)]
 pub(crate) struct ManagedBackgroundTasks {
     shutting_down: AtomicBool,
@@ -56,76 +60,44 @@ impl ManagedBackgroundTasks {
             std::mem::take(&mut *tasks)
         };
 
-        if tasks.is_empty() {
-            return;
-        }
-
         for task in &mut tasks {
             if let Some(shutdown) = task.shutdown.take() {
                 let _ = shutdown.send(());
             }
         }
 
-        if timeout.is_zero() {
-            tracing::warn!(
-                active = tasks.len(),
-                "background shutdown timeout disabled; aborting managed background tasks"
-            );
-            abort_background_tasks(tasks);
-            return;
-        }
-
-        let task_count = tasks.len();
-        tracing::info!(
-            active = task_count,
-            timeout_ms = timeout.as_millis(),
-            "waiting for managed background tasks during shutdown"
-        );
-
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
-
-        loop {
-            reap_completed_background_tasks(&mut tasks);
-            if tasks.is_empty() {
-                tracing::info!(active = task_count, "managed background tasks drained");
-                return;
-            }
-
-            tokio::select! {
-                biased;
-                _ = &mut deadline => {
-                    tracing::warn!(
-                        active = tasks.len(),
-                        timeout_ms = timeout.as_millis(),
-                        "background shutdown timeout elapsed; aborting managed background tasks"
-                    );
-                    abort_background_tasks(tasks);
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
-            }
-        }
+        drain_tasks(
+            tasks,
+            timeout,
+            ShutdownDrainMessages {
+                target: ShutdownDrainTarget::ManagedBackgroundTasks,
+                timeout_disabled:
+                    "background shutdown timeout disabled; aborting managed background tasks",
+                waiting: "waiting for managed background tasks during shutdown",
+                drained: "managed background tasks drained",
+                timeout_elapsed:
+                    "background shutdown timeout elapsed; aborting managed background tasks",
+            },
+        )
+        .await;
     }
 }
 
-fn reap_completed_background_tasks(tasks: &mut Vec<ManagedBackgroundTask>) {
-    let mut index = 0;
-    while index < tasks.len() {
-        match tasks[index].completed.try_recv() {
-            Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                tasks.swap_remove(index);
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                index += 1;
-            }
+#[async_trait::async_trait]
+impl ShutdownDrainTask for ManagedBackgroundTask {
+    fn is_finished(&mut self) -> bool {
+        match self.completed.try_recv() {
+            Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
         }
     }
-}
 
-fn abort_background_tasks(tasks: Vec<ManagedBackgroundTask>) {
-    for task in tasks {
-        tracing::warn!(task = %task.name, "aborting managed background task");
-        task.abort.abort();
+    async fn wait_finished(self) {}
+
+    fn abort(&self) {
+        tracing::warn!(task = %self.name, "aborting managed background task");
+        self.abort.abort();
     }
+
+    async fn wait_after_abort(self) {}
 }

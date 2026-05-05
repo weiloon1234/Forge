@@ -3,6 +3,7 @@ mod background_tasks;
 mod container;
 mod error;
 mod provider;
+pub(crate) mod shutdown_drain;
 
 pub use app::{App, AppBuilder, AppContext, AppTransaction};
 pub use container::Container;

@@ -309,6 +309,14 @@ const JOBS_FIELDS: &[PublishedField] = &[
 const SCHEDULER_FIELDS: &[PublishedField] = &[
     field("tick_interval_ms", "1000", "1000", false, false, None),
     field("leader_lease_ttl_ms", "5000", "5000", false, false, None),
+    field(
+        "shutdown_timeout_ms",
+        "30000",
+        "30000",
+        false,
+        false,
+        Some("0 = do not wait"),
+    ),
 ];
 
 const WEBSOCKET_FIELDS: &[PublishedField] = &[

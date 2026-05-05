@@ -9,6 +9,7 @@ use crate::logging::SchedulerLeadershipState;
 use crate::scheduler::{cron_due, ScheduleKind, ScheduleRegistry, ScheduledTask};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{DateTime, ScheduleId};
+use tokio::task::JoinHandle;
 
 pub struct SchedulerKernel {
     app: AppContext,
@@ -16,10 +17,12 @@ pub struct SchedulerKernel {
     backend: RuntimeBackend,
     tick_interval: Duration,
     leader_lease_ttl: Duration,
+    shutdown_timeout: Duration,
     owner_id: String,
     leader_active: AtomicBool,
     last_tick: Mutex<Option<DateTime>>,
     last_interval_run: Mutex<HashMap<ScheduleId, DateTime>>,
+    active_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl SchedulerKernel {
@@ -32,10 +35,12 @@ impl SchedulerKernel {
             backend,
             tick_interval: Duration::from_millis(config.tick_interval_ms.max(1)),
             leader_lease_ttl: Duration::from_millis(config.leader_lease_ttl_ms.max(1)),
+            shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
             owner_id: next_owner_id(),
             leader_active: AtomicBool::new(false),
             last_tick: Mutex::new(None),
             last_interval_run: Mutex::new(HashMap::new()),
+            active_tasks: Mutex::new(Vec::new()),
         })
     }
 
@@ -60,6 +65,8 @@ impl SchedulerKernel {
     }
 
     pub async fn tick_at(&self, now: DateTime) -> Result<Vec<ScheduleId>> {
+        self.prune_finished_tasks().await;
+
         if let Ok(diagnostics) = self.app.diagnostics() {
             diagnostics.record_scheduler_tick();
         }
@@ -114,7 +121,7 @@ impl SchedulerKernel {
             // Spawn each task independently — no blocking the tick loop
             let diagnostics = self.app.diagnostics().ok();
             let spawned_id = task_id.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let task_id = spawned_id;
                 // Overlap prevention via distributed lock (Drop guard releases on panic too)
                 let _lock_guard = if options.without_overlapping {
@@ -217,6 +224,7 @@ impl SchedulerKernel {
                 // _lock_guard releases via Drop (safe on panic too)
                 drop(_lock_guard);
             });
+            self.track_active_task(handle);
 
             executed.push(task_id);
         }
@@ -256,7 +264,100 @@ impl SchedulerKernel {
             }
         }
 
+        self.drain_active_tasks().await;
         Ok(())
+    }
+
+    fn track_active_task(&self, handle: JoinHandle<()>) {
+        self.active_tasks
+            .lock()
+            .expect("scheduler active task mutex poisoned")
+            .push(handle);
+    }
+
+    async fn prune_finished_tasks(&self) {
+        let mut finished = Vec::new();
+        {
+            let mut active_tasks = self
+                .active_tasks
+                .lock()
+                .expect("scheduler active task mutex poisoned");
+            let mut index = 0;
+            while index < active_tasks.len() {
+                if active_tasks[index].is_finished() {
+                    finished.push(active_tasks.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+
+        for handle in finished {
+            await_schedule_task(handle).await;
+        }
+    }
+
+    async fn drain_active_tasks(&self) {
+        let mut active_tasks = {
+            let mut active_tasks = self
+                .active_tasks
+                .lock()
+                .expect("scheduler active task mutex poisoned");
+            std::mem::take(&mut *active_tasks)
+        };
+
+        if active_tasks.is_empty() {
+            return;
+        }
+
+        if self.shutdown_timeout.is_zero() {
+            tracing::warn!(
+                target: "forge.scheduler",
+                active = active_tasks.len(),
+                "scheduler shutdown timeout disabled; aborting active schedule tasks"
+            );
+            abort_schedule_tasks(active_tasks).await;
+            return;
+        }
+
+        let task_count = active_tasks.len();
+        tracing::info!(
+            target: "forge.scheduler",
+            active = task_count,
+            timeout_ms = self.shutdown_timeout.as_millis(),
+            "waiting for active schedule tasks during shutdown"
+        );
+
+        let timeout = tokio::time::sleep(self.shutdown_timeout);
+        tokio::pin!(timeout);
+
+        loop {
+            reap_finished_tasks(&mut active_tasks).await;
+            if active_tasks.is_empty() {
+                tracing::info!(
+                    target: "forge.scheduler",
+                    active = task_count,
+                    "active schedule tasks drained"
+                );
+                return;
+            }
+
+            tokio::select! {
+                biased;
+                _ = &mut timeout => {
+                    let remaining = active_tasks.len();
+                    tracing::warn!(
+                        target: "forge.scheduler",
+                        active = remaining,
+                        timeout_ms = self.shutdown_timeout.as_millis(),
+                        "scheduler shutdown timeout elapsed; aborting active schedule tasks"
+                    );
+                    abort_schedule_tasks(active_tasks).await;
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
     }
 
     async fn ensure_leadership(&self) -> Result<bool> {
@@ -361,6 +462,38 @@ fn next_owner_id() -> String {
     )
 }
 
+async fn reap_finished_tasks(active_tasks: &mut Vec<JoinHandle<()>>) {
+    let mut index = 0;
+    while index < active_tasks.len() {
+        if active_tasks[index].is_finished() {
+            let handle = active_tasks.swap_remove(index);
+            await_schedule_task(handle).await;
+        } else {
+            index += 1;
+        }
+    }
+}
+
+async fn await_schedule_task(handle: JoinHandle<()>) {
+    if let Err(error) = handle.await {
+        tracing::warn!(
+            target: "forge.scheduler",
+            error = %error,
+            "Schedule task finished with join error"
+        );
+    }
+}
+
+async fn abort_schedule_tasks(active_tasks: Vec<JoinHandle<()>>) {
+    for handle in &active_tasks {
+        handle.abort();
+    }
+
+    for handle in active_tasks {
+        let _ = handle.await;
+    }
+}
+
 /// Drop guard that releases a schedule overlap lock, even on panic.
 struct ScheduleLockGuard {
     backend: RuntimeBackend,
@@ -383,6 +516,13 @@ impl Drop for ScheduleLockGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+
     #[tokio::test]
     async fn scheduler_run_exits_when_shutdown_future_completes() {
         let kernel = crate::App::builder()
@@ -391,5 +531,56 @@ mod tests {
             .unwrap();
 
         kernel.run_until(async {}).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_waits_for_active_schedule_tasks() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let kernel = crate::App::builder()
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        let task_completed = completed.clone();
+        kernel.track_active_task(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            task_completed.store(true, Ordering::SeqCst);
+        }));
+
+        kernel.drain_active_tasks().await;
+
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_aborts_active_schedule_tasks_after_timeout() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("scheduler.toml"),
+            r#"
+            [scheduler]
+            shutdown_timeout_ms = 1
+            "#,
+        )
+        .unwrap();
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let kernel = crate::App::builder()
+            .load_config_dir(dir.path())
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        let task_completed = completed.clone();
+        kernel.track_active_task(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            task_completed.store(true, Ordering::SeqCst);
+        }));
+
+        tokio::time::timeout(Duration::from_millis(100), kernel.drain_active_tasks())
+            .await
+            .unwrap();
+
+        assert!(!completed.load(Ordering::SeqCst));
     }
 }

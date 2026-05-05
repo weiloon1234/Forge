@@ -298,6 +298,7 @@ impl Default for JobsConfig {
 pub struct SchedulerConfig {
     pub tick_interval_ms: u64,
     pub leader_lease_ttl_ms: u64,
+    pub shutdown_timeout_ms: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -305,6 +306,7 @@ impl Default for SchedulerConfig {
         Self {
             tick_interval_ms: 1_000,
             leader_lease_ttl_ms: 5_000,
+            shutdown_timeout_ms: 30_000,
         }
     }
 }
@@ -1039,6 +1041,7 @@ mod tests {
                 [scheduler]
                 tick_interval_ms = 250
                 leader_lease_ttl_ms = 7000
+                shutdown_timeout_ms = 15000
             "#,
         )
         .unwrap();
@@ -1068,6 +1071,7 @@ mod tests {
         assert_eq!(jobs.requeue_batch_size, 12);
         assert_eq!(scheduler.tick_interval_ms, 250);
         assert_eq!(scheduler.leader_lease_ttl_ms, 7_000);
+        assert_eq!(scheduler.shutdown_timeout_ms, 15_000);
     }
 
     #[test]

@@ -581,29 +581,33 @@ fn render_route_manifest(routes: &[RouteManifestEntry]) -> Result<String> {
            }}\n\
            return path;\n\
          }}\n\n\
-         export function routeUrl<Name extends RouteName>(\n\
-           name: Name,\n\
-           ...args: RouteArgs<Name>\n\
+         function resolveRouteUrl(\n\
+           name: RouteName,\n\
+           params: Record<string, RouteParamValue>,\n\
+           options: RouteUrlOptions,\n\
          ): string {{\n\
            const entry = RouteManifest[name] as RouteManifestRuntimeEntry | undefined;\n\
            if (!entry) {{\n\
              throw new Error(`Unknown route ${{String(name)}}`);\n\
            }}\n\
+           return stripBasePath(substituteRouteParams(name, entry, params), options.basePath);\n\
+         }}\n\n\
+         export function routeUrl<Name extends RouteName>(\n\
+           name: Name,\n\
+           ...args: RouteArgs<Name>\n\
+         ): string {{\n\
            const params = (args[0] ?? {{}}) as Record<string, RouteParamValue>;\n\
            const options = (args[1] ?? {{}}) as RouteUrlOptions;\n\
-           return stripBasePath(substituteRouteParams(name, entry, params), options.basePath);\n\
+           return resolveRouteUrl(name, params, options);\n\
          }}\n\n\
          export function createRouteUrlBuilder(options: RouteUrlOptions) {{\n\
            return function buildRouteUrl<Name extends RouteName>(\n\
              name: Name,\n\
              ...args: RouteArgs<Name>\n\
            ): string {{\n\
+             const params = (args[0] ?? {{}}) as Record<string, RouteParamValue>;\n\
              const routeOptions = (args[1] ?? {{}}) as RouteUrlOptions;\n\
-             return routeUrl(\n\
-               name,\n\
-               args[0] as RouteParams[Name],\n\
-               {{ ...options, ...routeOptions }},\n\
-             );\n\
+             return resolveRouteUrl(name, params, {{ ...options, ...routeOptions }});\n\
            }};\n\
          }}\n",
         route_literals.join(",\n"),

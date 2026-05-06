@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -389,7 +389,17 @@ async fn run_spawned_schedule_task(
 }
 
 async fn run_schedule_handler(app: &AppContext, handler: &ScheduleHandler) -> Result<()> {
-    match AssertUnwindSafe(handler(app.clone())).catch_unwind().await {
+    let future = match catch_unwind(AssertUnwindSafe(|| handler(app.clone()))) {
+        Ok(future) => future,
+        Err(panic) => {
+            return Err(Error::message(format!(
+                "schedule panicked: {}",
+                panic_payload_message(panic)
+            )));
+        }
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result,
         Err(panic) => Err(Error::message(format!(
             "schedule panicked: {}",
@@ -404,7 +414,21 @@ async fn run_schedule_hook(
     hook: &'static str,
     callback: &ScheduleHook,
 ) {
-    match AssertUnwindSafe(callback(app.clone())).catch_unwind().await {
+    let future = match catch_unwind(AssertUnwindSafe(|| callback(app.clone()))) {
+        Ok(future) => future,
+        Err(panic) => {
+            tracing::warn!(
+                target: "forge.scheduler",
+                schedule = %task_id,
+                hook = hook,
+                panic = %panic_payload_message(panic),
+                "Schedule hook panicked"
+            );
+            return;
+        }
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(
@@ -685,6 +709,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn panicking_schedule_handler_factory_runs_failure_path() {
+        let failure_count = Arc::new(AtomicUsize::new(0));
+        let schedule_failure_count = failure_count.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let failure_count = schedule_failure_count.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.factory-panic.failure"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().on_failure(move |_| {
+                        let failure_count = failure_count.clone();
+                        async move {
+                            failure_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    }),
+                    |_| -> std::future::Ready<crate::Result<()>> {
+                        panic!("schedule factory explode")
+                    },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        let executed = kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            executed,
+            vec![ScheduleId::new("scheduler.factory-panic.failure")]
+        );
+        wait_for_count(&failure_count, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn panicking_schedule_does_not_stop_other_due_schedules() {
         let failure_count = Arc::new(AtomicUsize::new(0));
         let success_count = Arc::new(AtomicUsize::new(0));
@@ -762,6 +836,52 @@ mod tests {
                     ScheduleId::new("scheduler.before.panic"),
                     CronExpression::every_minute()?,
                     ScheduleOptions::new().before(|_| async { panic_result("before explode") }),
+                    move |_| {
+                        let handled = handled.clone();
+                        async move {
+                            handled.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        wait_for_count(&handled, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn before_hook_factory_panic_isolated_and_handler_still_runs() {
+        let handled = Arc::new(AtomicUsize::new(0));
+        let schedule_handled = handled.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let handled = schedule_handled.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.before.factory-panic"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().before(|_| -> std::future::Ready<crate::Result<()>> {
+                        panic!("before factory explode")
+                    }),
                     move |_| {
                         let handled = handled.clone();
                         async move {

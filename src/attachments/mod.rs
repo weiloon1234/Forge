@@ -413,12 +413,12 @@ where
             return Ok(());
         };
 
-        let ids = collect_unique_ids(models.iter().map(|model| model.attachable_id()));
+        let ids = collect_attachment_ids(models)?;
         if ids.is_empty() {
             return Ok(());
         }
 
-        let attachable_type = M::attachable_type();
+        let attachable_type = attachment_model_type::<M>()?;
         let missing_ids = scope.missing_attachment_ids(attachable_type, &self.collection, &ids);
         if missing_ids.is_empty() {
             return Ok(());
@@ -769,13 +769,10 @@ pub trait HasAttachments: Send + Sync {
     }
 
     async fn attachment(&self, app: &AppContext, collection: &str) -> Result<Option<Attachment>> {
-        if let Some(rows) = cached_attachments_for_id(
-            app,
-            Self::attachable_type(),
-            &self.attachable_id(),
-            collection,
-        )
-        .await?
+        let attachable_type = attachment_model_type::<Self>()?;
+        let attachable_id = attachment_model_id(self)?;
+        if let Some(rows) =
+            cached_attachments_for_id(app, attachable_type, &attachable_id, collection).await?
         {
             return Ok(rows.into_iter().next());
         }
@@ -789,8 +786,8 @@ pub trait HasAttachments: Send + Sync {
                  WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3 \
                  ORDER BY sort_order, created_at LIMIT 1",
                 &[
-                    DbValue::Text(Self::attachable_type().to_string()),
-                    DbValue::Text(self.attachable_id()),
+                    DbValue::Text(attachable_type.to_string()),
+                    DbValue::Text(attachable_id),
                     DbValue::Text(collection.to_string()),
                 ],
             )
@@ -799,103 +796,39 @@ pub trait HasAttachments: Send + Sync {
     }
 
     async fn attachments(&self, app: &AppContext, collection: &str) -> Result<Vec<Attachment>> {
-        if let Some(rows) = cached_attachments_for_id(
-            app,
-            Self::attachable_type(),
-            &self.attachable_id(),
-            collection,
-        )
-        .await?
-        {
-            return Ok(rows);
-        }
-
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT id, attachable_type, attachable_id, collection, disk, path, name, \
-                 original_name, mime_type, size, sort_order, custom_properties \
-                 FROM attachments \
-                 WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3 \
-                 ORDER BY sort_order, created_at",
-                &[
-                    DbValue::Text(Self::attachable_type().to_string()),
-                    DbValue::Text(self.attachable_id()),
-                    DbValue::Text(collection.to_string()),
-                ],
-            )
-            .await?;
-        Ok(rows.iter().map(row_to_attachment).collect())
+        let attachable_type = attachment_model_type::<Self>()?;
+        let attachable_id = attachment_model_id(self)?;
+        attachments_for_identity(app, attachable_type, &attachable_id, collection).await
     }
 
     /// Delete an attachment and its file from storage.
     async fn detach(&self, app: &AppContext, attachment_id: &str) -> Result<()> {
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT disk, path FROM attachments \
-                 WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
-                &[
-                    DbValue::Text(attachment_id.to_string()),
-                    DbValue::Text(Self::attachable_type().to_string()),
-                    DbValue::Text(self.attachable_id()),
-                ],
-            )
-            .await?;
-
-        if let Some(row) = rows.first() {
-            if let (Some(DbValue::Text(disk)), Some(DbValue::Text(path))) =
-                (row.get("disk"), row.get("path"))
-            {
-                if let Ok(storage) = app.storage() {
-                    if let Ok(d) = storage.disk(disk) {
-                        let _ = d.delete(path).await;
-                    }
-                }
-            }
-        }
-
-        db.raw_execute(
-            "DELETE FROM attachments \
-             WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
-            &[
-                DbValue::Text(attachment_id.to_string()),
-                DbValue::Text(Self::attachable_type().to_string()),
-                DbValue::Text(self.attachable_id()),
-            ],
-        )
-        .await?;
-        invalidate_attachment_cache(Self::attachable_type(), &self.attachable_id(), None);
-        Ok(())
+        let attachable_type = attachment_model_type::<Self>()?;
+        let attachable_id = attachment_model_id(self)?;
+        detach_attachment_by_identity(app, attachable_type, &attachable_id, attachment_id, true)
+            .await
     }
 
     /// Delete attachment record but keep the file on storage.
     async fn detach_keep_file(&self, app: &AppContext, attachment_id: &str) -> Result<()> {
-        let db = app.database()?;
-        db.raw_execute(
-            "DELETE FROM attachments \
-             WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
-            &[
-                DbValue::Text(attachment_id.to_string()),
-                DbValue::Text(Self::attachable_type().to_string()),
-                DbValue::Text(self.attachable_id()),
-            ],
-        )
-        .await?;
-        invalidate_attachment_cache(Self::attachable_type(), &self.attachable_id(), None);
-        Ok(())
+        let attachable_type = attachment_model_type::<Self>()?;
+        let attachable_id = attachment_model_id(self)?;
+        detach_attachment_by_identity(app, attachable_type, &attachable_id, attachment_id, false)
+            .await
     }
 
     /// Delete all attachments in a collection and their files.
     async fn detach_all(&self, app: &AppContext, collection: &str) -> Result<u64> {
+        let attachable_type = attachment_model_type::<Self>()?;
+        let attachable_id = attachment_model_id(self)?;
         let db = app.database()?;
         let rows = db
             .raw_query(
                 "SELECT disk, path FROM attachments \
                  WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3",
                 &[
-                    DbValue::Text(Self::attachable_type().to_string()),
-                    DbValue::Text(self.attachable_id()),
+                    DbValue::Text(attachable_type.to_string()),
+                    DbValue::Text(attachable_id.clone()),
                     DbValue::Text(collection.to_string()),
                 ],
             )
@@ -918,17 +851,13 @@ pub trait HasAttachments: Send + Sync {
                 "DELETE FROM attachments \
              WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3",
                 &[
-                    DbValue::Text(Self::attachable_type().to_string()),
-                    DbValue::Text(self.attachable_id()),
+                    DbValue::Text(attachable_type.to_string()),
+                    DbValue::Text(attachable_id.clone()),
                     DbValue::Text(collection.to_string()),
                 ],
             )
             .await?;
-        invalidate_attachment_cache(
-            Self::attachable_type(),
-            &self.attachable_id(),
-            Some(collection),
-        );
+        invalidate_attachment_cache(attachable_type, &attachable_id, Some(collection));
         Ok(affected)
     }
 }
@@ -942,6 +871,33 @@ fn opt_text(value: &Option<String>) -> DbValue {
         Some(s) => DbValue::Text(s.clone()),
         None => DbValue::Null(DbType::Text),
     }
+}
+
+fn attachment_model_type<M>() -> Result<&'static str>
+where
+    M: HasAttachments + ?Sized,
+{
+    let subject = format!("attachable_type for model `{}`", std::any::type_name::<M>());
+    callback::run_attachment_sync(&subject, M::attachable_type)
+}
+
+fn attachment_model_id<M>(model: &M) -> Result<String>
+where
+    M: HasAttachments + ?Sized,
+{
+    let subject = format!("attachable_id for model `{}`", std::any::type_name::<M>());
+    callback::run_attachment_sync(&subject, || model.attachable_id())
+}
+
+fn collect_attachment_ids<'a, M>(models: impl IntoIterator<Item = &'a M>) -> Result<Vec<String>>
+where
+    M: HasAttachments + ?Sized + 'a,
+{
+    let mut ids = Vec::new();
+    for model in models {
+        ids.push(attachment_model_id(model)?);
+    }
+    Ok(collect_unique_ids(ids))
 }
 
 struct ResolvedAttachmentSpec<M> {
@@ -966,6 +922,8 @@ where
     M: HasAttachments,
 {
     let resolved = resolve_attachment_spec::<M>(collection)?;
+    let attachable_type = attachment_model_type::<M>()?;
+    let attachable_id = attachment_model_id(model)?;
 
     if let Some(resolved) = &resolved {
         run_before_store_hooks(resolved, app, model, collection, &file).await?;
@@ -977,7 +935,7 @@ where
             .map(|resolved| resolved.spec.is_single())
             .unwrap_or(false);
     let existing = if should_replace {
-        model.attachments(app, collection).await?
+        attachments_for_identity(app, attachable_type, &attachable_id, collection).await?
     } else {
         Vec::new()
     };
@@ -988,9 +946,7 @@ where
         builder = builder.apply_spec(&resolved.spec);
     }
 
-    let attachment = builder
-        .store(app, M::attachable_type(), &model.attachable_id())
-        .await?;
+    let attachment = builder.store(app, attachable_type, &attachable_id).await?;
 
     if let Some(resolved) = &resolved {
         if let Err(error) = run_after_store_hooks(
@@ -1004,7 +960,14 @@ where
         .await
         {
             return cleanup_after_store_failure(error, || async {
-                model.detach(app, &attachment.id).await
+                detach_attachment_by_identity(
+                    app,
+                    attachable_type,
+                    &attachable_id,
+                    &attachment.id,
+                    true,
+                )
+                .await
             })
             .await;
         }
@@ -1012,17 +975,92 @@ where
 
     for old in existing {
         if old.id != attachment.id {
-            model.detach(app, &old.id).await?;
+            detach_attachment_by_identity(app, attachable_type, &attachable_id, &old.id, true)
+                .await?;
         }
     }
 
-    invalidate_attachment_cache(
-        M::attachable_type(),
-        &model.attachable_id(),
-        Some(collection),
-    );
+    invalidate_attachment_cache(attachable_type, &attachable_id, Some(collection));
 
     Ok(attachment)
+}
+
+async fn attachments_for_identity(
+    app: &AppContext,
+    attachable_type: &str,
+    attachable_id: &str,
+    collection: &str,
+) -> Result<Vec<Attachment>> {
+    if let Some(rows) =
+        cached_attachments_for_id(app, attachable_type, attachable_id, collection).await?
+    {
+        return Ok(rows);
+    }
+
+    let db = app.database()?;
+    let rows = db
+        .raw_query(
+            "SELECT id, attachable_type, attachable_id, collection, disk, path, name, \
+             original_name, mime_type, size, sort_order, custom_properties \
+             FROM attachments \
+             WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3 \
+             ORDER BY sort_order, created_at",
+            &[
+                DbValue::Text(attachable_type.to_string()),
+                DbValue::Text(attachable_id.to_string()),
+                DbValue::Text(collection.to_string()),
+            ],
+        )
+        .await?;
+    Ok(rows.iter().map(row_to_attachment).collect())
+}
+
+async fn detach_attachment_by_identity(
+    app: &AppContext,
+    attachable_type: &str,
+    attachable_id: &str,
+    attachment_id: &str,
+    delete_file: bool,
+) -> Result<()> {
+    let db = app.database()?;
+    if delete_file {
+        let rows = db
+            .raw_query(
+                "SELECT disk, path FROM attachments \
+                 WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
+                &[
+                    DbValue::Text(attachment_id.to_string()),
+                    DbValue::Text(attachable_type.to_string()),
+                    DbValue::Text(attachable_id.to_string()),
+                ],
+            )
+            .await?;
+
+        if let Some(row) = rows.first() {
+            if let (Some(DbValue::Text(disk)), Some(DbValue::Text(path))) =
+                (row.get("disk"), row.get("path"))
+            {
+                if let Ok(storage) = app.storage() {
+                    if let Ok(d) = storage.disk(disk) {
+                        let _ = d.delete(path).await;
+                    }
+                }
+            }
+        }
+    }
+
+    db.raw_execute(
+        "DELETE FROM attachments \
+         WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
+        &[
+            DbValue::Text(attachment_id.to_string()),
+            DbValue::Text(attachable_type.to_string()),
+            DbValue::Text(attachable_id.to_string()),
+        ],
+    )
+    .await?;
+    invalidate_attachment_cache(attachable_type, attachable_id, None);
+    Ok(())
 }
 
 async fn run_before_store_hooks<M>(
@@ -1462,6 +1500,30 @@ mod tests {
         }
     }
 
+    struct PanickingTypeAttachable;
+
+    impl HasAttachments for PanickingTypeAttachable {
+        fn attachable_type() -> &'static str {
+            panic!("attachable type exploded")
+        }
+
+        fn attachable_id(&self) -> String {
+            Uuid::now_v7().to_string()
+        }
+    }
+
+    struct PanickingIdAttachable;
+
+    impl HasAttachments for PanickingIdAttachable {
+        fn attachable_type() -> &'static str {
+            "panicking_id_attachables"
+        }
+
+        fn attachable_id(&self) -> String {
+            panic!("attachable id exploded")
+        }
+    }
+
     struct NoopAttachmentHook;
 
     #[async_trait]
@@ -1693,6 +1755,92 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("attachment spec registry for model"));
         assert!(message.contains("panicked: attachment specs exploded"));
+    }
+
+    #[test]
+    fn attachable_type_panic_becomes_error() {
+        let error = attachment_model_type::<PanickingTypeAttachable>()
+            .expect_err("attachable_type panic should become an error");
+
+        let message = error.to_string();
+        assert!(message.contains("attachment attachable_type for model"));
+        assert!(message.contains("panicked: attachable type exploded"));
+    }
+
+    #[test]
+    fn attachable_id_panic_becomes_error() {
+        let model = PanickingIdAttachable;
+        let error =
+            attachment_model_id(&model).expect_err("attachable_id panic should become an error");
+
+        let message = error.to_string();
+        assert!(message.contains("attachment attachable_id for model"));
+        assert!(message.contains("panicked: attachable id exploded"));
+    }
+
+    #[tokio::test]
+    async fn attachment_lookup_identity_panic_becomes_error_before_database() {
+        let app = test_app_context();
+        let model = PanickingIdAttachable;
+        let error = model
+            .attachment(&app, "main")
+            .await
+            .expect_err("attachable_id panic should become a lookup error");
+
+        assert!(error
+            .to_string()
+            .contains("attachment attachable_id for model"));
+    }
+
+    #[tokio::test]
+    async fn detach_identity_panic_becomes_error_before_database() {
+        let app = test_app_context();
+        let model = PanickingIdAttachable;
+        let error = model
+            .detach(&app, &Uuid::now_v7().to_string())
+            .await
+            .expect_err("attachable_id panic should become a detach error");
+
+        assert!(error
+            .to_string()
+            .contains("attachment attachable_id for model"));
+    }
+
+    #[tokio::test]
+    async fn store_identity_panic_becomes_error_before_storage() {
+        let app = test_app_context();
+        let model = PanickingIdAttachable;
+        let file = test_uploaded_file("voucher.png");
+        let error = store_model_attachment(&model, &app, "main", file, false)
+            .await
+            .expect_err("attachable_id panic should become a store error");
+
+        assert!(error
+            .to_string()
+            .contains("attachment attachable_id for model"));
+    }
+
+    #[tokio::test]
+    async fn extension_loader_identity_panic_becomes_error() {
+        let executor = CountingAttachmentExecutor::default();
+        let loader = AttachmentExtensionLoader::<PanickingIdAttachable> {
+            collection: "main".to_string(),
+            _model: PhantomData,
+        };
+        let models = [PanickingIdAttachable];
+
+        let error = scope_model_extensions(async {
+            loader
+                .load(&executor, &models)
+                .await
+                .expect_err("attachable_id panic should become a loader error")
+        })
+        .await;
+
+        assert!(error
+            .to_string()
+            .contains("attachment attachable_id for model"));
+        assert_eq!(executor.query_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

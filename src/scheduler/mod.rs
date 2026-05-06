@@ -1,5 +1,6 @@
 mod leadership;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,12 +8,34 @@ use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 
 use crate::foundation::{AppContext, Error, Result};
+use crate::logging::panic_payload_message;
 use crate::support::{boxed, BoxFuture};
 use crate::support::{DateTime, ScheduleId};
 
 pub type ScheduleRegistrar = Arc<dyn Fn(&mut ScheduleRegistry) -> Result<()> + Send + Sync>;
 pub(crate) type ScheduleHandler = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
 pub(crate) type ScheduleHook = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
+
+pub(crate) fn build_registry(registrars: &[ScheduleRegistrar]) -> Result<ScheduleRegistry> {
+    let mut registry = ScheduleRegistry::new();
+    for registrar in registrars {
+        match catch_unwind(AssertUnwindSafe(|| registrar(&mut registry))) {
+            Ok(result) => result?,
+            Err(panic) => return Err(schedule_registrar_panic_error(panic)),
+        }
+    }
+    Ok(registry)
+}
+
+fn schedule_registrar_panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.scheduler",
+        panic = %message,
+        "Schedule registrar panicked"
+    );
+    Error::message(format!("schedule registrar panicked: {message}"))
+}
 
 #[derive(Clone)]
 pub struct ScheduleInvocation {
@@ -371,9 +394,10 @@ pub(crate) fn cron_due(schedule: &CronExpression, previous: DateTime, now: DateT
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{CronExpression, ScheduleOptions, ScheduleRegistry};
+    use super::{CronExpression, ScheduleOptions, ScheduleRegistrar, ScheduleRegistry};
     use crate::support::ScheduleId;
 
     #[test]
@@ -402,6 +426,23 @@ mod tests {
     fn parses_cron_expressions_before_registration() {
         let expression = CronExpression::parse("*/5 * * * * *").unwrap();
         assert_eq!(expression.as_str(), "*/5 * * * * *");
+    }
+
+    #[test]
+    fn schedule_registrar_panic_becomes_error() {
+        let registrars: Vec<ScheduleRegistrar> = vec![Arc::new(|_| {
+            panic!("schedule registrar explode");
+        })];
+
+        let error = match super::build_registry(&registrars) {
+            Ok(_) => panic!("expected schedule registrar panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "schedule registrar panicked: schedule registrar explode"
+        );
     }
 
     #[test]

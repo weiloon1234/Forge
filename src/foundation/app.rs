@@ -885,10 +885,7 @@ impl AppBuilder {
 
     pub async fn build_scheduler_kernel(self) -> Result<SchedulerKernel> {
         let boot = self.bootstrap().await?;
-        let mut registry = crate::scheduler::ScheduleRegistry::new();
-        for registrar in boot.schedules {
-            registrar(&mut registry)?;
-        }
+        let registry = crate::scheduler::build_registry(&boot.schedules)?;
         SchedulerKernel::new(boot.app, registry)
     }
 
@@ -1193,10 +1190,7 @@ impl AppBuilder {
         let mut boot_websocket_routes = prepared_plugins.websocket_routes;
         boot_websocket_routes.extend(websocket_routes);
 
-        let mut ws_registrar = crate::websocket::WebSocketRegistrar::new();
-        for route in &boot_websocket_routes {
-            route(&mut ws_registrar)?;
-        }
+        let ws_registrar = crate::websocket::build_registrar(&boot_websocket_routes)?;
         let ws_registry = crate::websocket::WebSocketChannelRegistry::from_registrar(ws_registrar);
         for descriptor in ws_registry.descriptors() {
             diagnostics.register_websocket_channel(&descriptor.id);

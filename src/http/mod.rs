@@ -35,13 +35,47 @@ pub type HttpAuthorizeCallback = Arc<
 pub(crate) fn build_registrar(registrars: &[RouteRegistrar]) -> Result<HttpRegistrar> {
     let mut registrar = HttpRegistrar::new();
     for routes in registrars {
-        routes(&mut registrar)?;
+        let result = run_route_registrar(routes, &mut registrar);
+        registrar.take_registration_error()?;
+        result?;
     }
     Ok(registrar)
 }
 
 pub(crate) fn collect_named_routes(registrars: &[RouteRegistrar]) -> Result<routes::RouteRegistry> {
     Ok(build_registrar(registrars)?.named_routes)
+}
+
+fn run_route_registrar(registrar: &RouteRegistrar, routes: &mut HttpRegistrar) -> Result<()> {
+    match catch_unwind(AssertUnwindSafe(|| registrar(routes))) {
+        Ok(result) => result,
+        Err(panic) => Err(http_registration_panic_error("route registrar", panic)),
+    }
+}
+
+fn run_http_registration_callback<T>(
+    subject: &'static str,
+    target: &mut T,
+    callback: impl FnOnce(&mut T) -> Result<()>,
+) -> Result<()> {
+    match catch_unwind(AssertUnwindSafe(|| callback(target))) {
+        Ok(result) => result,
+        Err(panic) => Err(http_registration_panic_error(subject, panic)),
+    }
+}
+
+fn http_registration_panic_error(
+    subject: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.http",
+        subject = subject,
+        panic = %message,
+        "HTTP registration callback panicked"
+    );
+    Error::message(format!("{subject} panicked: {message}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -643,7 +677,15 @@ impl<'a> HttpScope<'a> {
         configure: impl FnOnce(&mut HttpRouteBuilder),
     ) -> &mut Self {
         let mut route = HttpRouteBuilder::from_scope(&self.state, method);
-        configure(&mut route);
+        if let Err(error) =
+            run_http_registration_callback("http route configure callback", &mut route, |route| {
+                configure(route);
+                Ok(())
+            })
+        {
+            self.registrar.record_registration_error(error);
+            return self;
+        }
 
         self.registrar.route_named_resolved(
             RouteId::owned(self.state.route_name(name)),
@@ -865,6 +907,7 @@ pub struct HttpRegistrar {
     registrations: Vec<HttpRegistration>,
     pub(crate) named_routes: routes::RouteRegistry,
     default_route_options: HttpRouteOptions,
+    registration_error: Option<Error>,
 }
 
 impl Default for HttpRegistrar {
@@ -879,6 +922,7 @@ impl HttpRegistrar {
             registrations: Vec::new(),
             named_routes: routes::RouteRegistry::new(),
             default_route_options: HttpRouteOptions::default(),
+            registration_error: None,
         }
     }
 
@@ -944,8 +988,9 @@ impl HttpRegistrar {
         let state = ResolvedHttpScopeState::root(path, &self.default_route_options);
         let result = {
             let mut scope = HttpScope::new(self, state);
-            f(&mut scope)
+            run_http_registration_callback("http scope callback", &mut scope, f)
         };
+        self.take_registration_error()?;
         result?;
         Ok(self)
     }
@@ -981,7 +1026,9 @@ impl HttpRegistrar {
     ) -> Result<&mut Self> {
         let mut sub = HttpRegistrar::new();
         sub.default_route_options = self.default_route_options.clone();
-        f(&mut sub)?;
+        let result = run_http_registration_callback("http group callback", &mut sub, f);
+        sub.take_registration_error()?;
+        result?;
         self.merge_group(prefix, sub)
     }
 
@@ -997,8 +1044,23 @@ impl HttpRegistrar {
     ) -> Result<&mut Self> {
         let mut sub = HttpRegistrar::new();
         sub.default_route_options = options.with_defaults(&self.default_route_options);
-        f(&mut sub)?;
+        let result = run_http_registration_callback("http group callback", &mut sub, f);
+        sub.take_registration_error()?;
+        result?;
         self.merge_group(prefix, sub)
+    }
+
+    fn record_registration_error(&mut self, error: Error) {
+        if self.registration_error.is_none() {
+            self.registration_error = Some(error);
+        }
+    }
+
+    fn take_registration_error(&mut self) -> Result<()> {
+        match self.registration_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn merge_group(&mut self, prefix: &str, sub: HttpRegistrar) -> Result<&mut Self> {
@@ -1622,10 +1684,13 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
 mod tests {
     use std::collections::BTreeSet;
     use std::future::ready;
+    use std::sync::Arc;
 
     use axum::routing::{delete, get, post, put};
 
-    use super::{HttpRegistrar, HttpRegistration, HttpResourceRoutes, HttpRouteOptions};
+    use super::{
+        HttpRegistrar, HttpRegistration, HttpResourceRoutes, HttpRouteOptions, RouteRegistrar,
+    };
     use crate::auth::Actor;
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
@@ -1689,6 +1754,79 @@ mod tests {
         assert!(error
             .to_string()
             .contains("http authorizer panicked: route auth factory boom"));
+    }
+
+    #[test]
+    fn route_registrar_panic_becomes_error() {
+        let registrars: Vec<RouteRegistrar> = vec![Arc::new(|_| {
+            panic!("route registrar explode");
+        })];
+
+        let error = match super::build_registrar(&registrars) {
+            Ok(_) => panic!("expected route registrar panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "route registrar panicked: route registrar explode"
+        );
+    }
+
+    #[test]
+    fn group_callback_panic_becomes_error() {
+        let mut registrar = HttpRegistrar::new();
+
+        let error = match registrar.group("/api", |_| -> crate::Result<()> {
+            panic!("group explode");
+        }) {
+            Ok(_) => panic!("expected group callback panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "http group callback panicked: group explode"
+        );
+    }
+
+    #[test]
+    fn scope_callback_panic_becomes_error() {
+        let mut registrar = HttpRegistrar::new();
+
+        let error = match registrar.scope("/api", |_| -> crate::Result<()> {
+            panic!("scope explode");
+        }) {
+            Ok(_) => panic!("expected scope callback panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "http scope callback panicked: scope explode"
+        );
+    }
+
+    #[test]
+    fn route_configure_callback_panic_becomes_error_without_registering_route() {
+        let mut registrar = HttpRegistrar::new();
+
+        let error = match registrar.scope("/api", |routes| {
+            routes.get("/users", "users.index", ok, |_| {
+                panic!("configure explode");
+            });
+            Ok(())
+        }) {
+            Ok(_) => panic!("expected route configure callback panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "http route configure callback panicked: configure explode"
+        );
+        assert!(registrar.registrations.is_empty());
+        assert!(!registrar.named_routes.has(RouteId::new("users.index")));
     }
 
     #[test]

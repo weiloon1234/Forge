@@ -2,7 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::IpAddr;
-use std::panic::AssertUnwindSafe;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -248,7 +248,10 @@ where
     F: Fn(&E) -> J + Send + Sync + 'static,
 {
     async fn handle(&self, context: &EventContext, event: &E) -> Result<()> {
-        context.app().jobs()?.dispatch((self.mapper)(event)).await
+        let job = run_event_mapper("event dispatch_job mapper", event, |event| {
+            (self.mapper)(event)
+        })?;
+        context.app().jobs()?.dispatch(job).await
     }
 }
 
@@ -275,12 +278,40 @@ where
     F: Fn(&E) -> ServerMessage + Send + Sync + 'static,
 {
     async fn handle(&self, context: &EventContext, event: &E) -> Result<()> {
-        context
-            .app()
-            .websocket()?
-            .publish_message((self.mapper)(event))
-            .await
+        let message = run_event_mapper("event publish_websocket mapper", event, |event| {
+            (self.mapper)(event)
+        })?;
+        context.app().websocket()?.publish_message(message).await
     }
+}
+
+fn run_event_mapper<E, T>(
+    subject: &'static str,
+    event: &E,
+    mapper: impl FnOnce(&E) -> T,
+) -> Result<T>
+where
+    E: Event,
+{
+    match catch_unwind(AssertUnwindSafe(|| mapper(event))) {
+        Ok(value) => Ok(value),
+        Err(panic) => Err(event_mapper_panic_error::<E>(subject, panic)),
+    }
+}
+
+fn event_mapper_panic_error<E: Event>(
+    subject: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.events",
+        event = %E::ID,
+        subject = subject,
+        panic = %message,
+        "Event helper mapper panicked"
+    );
+    Error::message(format!("{subject} panicked: {message}"))
 }
 
 #[cfg(test)]
@@ -295,8 +326,9 @@ mod tests {
     use crate::auth::Actor;
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
-    use crate::support::EventId;
+    use crate::jobs::{Job, JobContext};
     use crate::support::GuardId;
+    use crate::support::{ChannelEventId, ChannelId, EventId, JobId};
     use crate::validation::RuleRegistry;
 
     type OriginSnapshot = Option<(String, Option<String>, Option<IpAddr>)>;
@@ -306,6 +338,18 @@ mod tests {
 
     impl Event for TestEvent {
         const ID: EventId = EventId::new("test.event");
+    }
+
+    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+    struct TestJob;
+
+    #[async_trait]
+    impl Job for TestJob {
+        const ID: JobId = JobId::new("test.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            Ok(())
+        }
     }
 
     struct PushListener {
@@ -453,6 +497,55 @@ mod tests {
 
         bus.dispatch(TestEvent).await.unwrap();
         assert_eq!(target.lock().unwrap().as_slice(), ["recovered"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_mapper_panic_becomes_helper_error() {
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let context = EventContext::new(app, None);
+        let listener = super::dispatch_job::<TestEvent, TestJob, _>(|_| {
+            panic!("job mapper explode");
+        });
+
+        let error = listener.handle(&context, &TestEvent).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "event dispatch_job mapper panicked: job mapper explode"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_websocket_mapper_panic_becomes_helper_error() {
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let context = EventContext::new(app, None);
+        let listener = super::publish_websocket::<TestEvent, _>(|_| {
+            panic!("websocket mapper explode");
+            #[allow(unreachable_code)]
+            crate::websocket::ServerMessage {
+                channel: ChannelId::new("chat"),
+                event: ChannelEventId::new("created"),
+                room: None,
+                payload: serde_json::Value::Null,
+            }
+        });
+
+        let error = listener.handle(&context, &TestEvent).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "event publish_websocket mapper panicked: websocket mapper explode"
+        );
     }
 
     struct OriginListener {

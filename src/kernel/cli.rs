@@ -19,11 +19,7 @@ impl CliKernel {
     }
 
     pub fn build_registry(&self) -> Result<CommandRegistry> {
-        let mut registry = CommandRegistry::new();
-        for registrar in &self.registrars {
-            registrar(&mut registry)?;
-        }
-        Ok(registry)
+        crate::cli::build_registry(&self.registrars)
     }
 
     pub fn app(&self) -> &AppContext {
@@ -153,6 +149,23 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.to_string(), "command failed");
+    }
+
+    #[test]
+    fn command_registrar_panic_becomes_error() {
+        let registrar: CommandRegistrar = Arc::new(|_| {
+            panic!("command registrar explode");
+        });
+
+        let error = match kernel_with_registrar(registrar).build_registry() {
+            Ok(_) => panic!("expected command registrar panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "cli registrar panicked: command registrar explode"
+        );
     }
 
     #[tokio::test]

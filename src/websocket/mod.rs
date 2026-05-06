@@ -29,6 +29,29 @@ pub(crate) fn presence_member_value(actor_id: &str, channel: &ChannelId, joined_
 
 pub type WebSocketRouteRegistrar = Arc<dyn Fn(&mut WebSocketRegistrar) -> Result<()> + Send + Sync>;
 
+pub(crate) fn build_registrar(
+    registrars: &[WebSocketRouteRegistrar],
+) -> Result<WebSocketRegistrar> {
+    let mut registrar = WebSocketRegistrar::new();
+    for route in registrars {
+        match catch_unwind(AssertUnwindSafe(|| route(&mut registrar))) {
+            Ok(result) => result?,
+            Err(panic) => return Err(websocket_registrar_panic_error(panic)),
+        }
+    }
+    Ok(registrar)
+}
+
+fn websocket_registrar_panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.websocket",
+        panic = %message,
+        "websocket registrar panicked"
+    );
+    Error::message(format!("websocket registrar panicked: {message}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceInfo {
     pub actor_id: String,
@@ -607,10 +630,11 @@ impl WebSocketChannelRegistry {
 #[cfg(test)]
 mod tests {
     use std::future::ready;
+    use std::sync::Arc;
 
     use super::{
         ChannelId, GuardId, PermissionId, WebSocketChannelOptions, WebSocketChannelRegistry,
-        WebSocketRegistrar,
+        WebSocketRegistrar, WebSocketRouteRegistrar,
     };
     use crate::auth::Actor;
     use crate::config::ConfigRepository;
@@ -649,6 +673,23 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn websocket_registrar_panic_becomes_error() {
+        let registrars: Vec<WebSocketRouteRegistrar> = vec![Arc::new(|_| {
+            panic!("websocket registrar explode");
+        })];
+
+        let error = match super::build_registrar(&registrars) {
+            Ok(_) => panic!("expected websocket registrar panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "websocket registrar panicked: websocket registrar explode"
+        );
     }
 
     #[tokio::test]

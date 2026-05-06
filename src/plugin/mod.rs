@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Arg, ArgAction, Command};
+use futures_util::FutureExt;
 use semver::{Version, VersionReq};
 use toml::Value;
 
@@ -13,6 +15,7 @@ pub use crate::support::{PluginAssetId, PluginId, PluginScaffoldId};
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::foundation::{AppContext, Error, Result, ServiceProvider, ServiceRegistrar};
 use crate::http::RouteRegistrar;
+use crate::logging::panic_payload_message;
 use crate::scheduler::ScheduleRegistrar;
 use crate::support::ValidationRuleId;
 use crate::validation::ValidationRule;
@@ -391,6 +394,67 @@ pub trait Plugin: Send + Sync + 'static {
     /// Use for cleanup: flush buffers, close external connections, etc.
     async fn shutdown(&self, _app: &AppContext) -> Result<()> {
         Ok(())
+    }
+}
+
+pub(crate) async fn boot_plugin(plugin: &Arc<dyn Plugin>, app: &AppContext) -> Result<()> {
+    let manifest = plugin_manifest(plugin)?;
+    match AssertUnwindSafe(plugin.boot(app)).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(plugin_panic_error(Some(manifest.id()), "boot", panic)),
+    }
+}
+
+pub(crate) async fn shutdown_plugin(plugin: &Arc<dyn Plugin>, app: &AppContext) -> Result<()> {
+    let manifest = plugin_manifest(plugin)?;
+    match AssertUnwindSafe(plugin.shutdown(app)).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(plugin_panic_error(Some(manifest.id()), "shutdown", panic)),
+    }
+}
+
+fn plugin_manifest(plugin: &Arc<dyn Plugin>) -> Result<PluginManifest> {
+    match catch_unwind(AssertUnwindSafe(|| plugin.manifest())) {
+        Ok(manifest) => Ok(manifest),
+        Err(panic) => Err(plugin_panic_error(None, "manifest", panic)),
+    }
+}
+
+fn register_plugin(plugin: &Arc<dyn Plugin>, manifest: &PluginManifest) -> Result<PluginRegistrar> {
+    let mut registrar = PluginRegistrar::new();
+    match catch_unwind(AssertUnwindSafe(|| plugin.register(&mut registrar))) {
+        Ok(Ok(())) => Ok(registrar),
+        Ok(Err(error)) => Err(error),
+        Err(panic) => Err(plugin_panic_error(Some(manifest.id()), "register", panic)),
+    }
+}
+
+fn plugin_panic_error(
+    id: Option<&PluginId>,
+    phase: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> Error {
+    let message = panic_payload_message(panic);
+    match id {
+        Some(id) => {
+            tracing::error!(
+                target: "forge.plugin",
+                plugin = %id,
+                phase = phase,
+                panic = %message,
+                "plugin lifecycle panicked"
+            );
+            Error::message(format!("plugin `{id}` {phase} panicked: {message}"))
+        }
+        None => {
+            tracing::error!(
+                target: "forge.plugin",
+                phase = phase,
+                panic = %message,
+                "plugin lifecycle panicked"
+            );
+            Error::message(format!("plugin {phase} panicked: {message}"))
+        }
     }
 }
 
@@ -941,7 +1005,7 @@ fn resolve_plugin_order(plugins: &[Arc<dyn Plugin>]) -> Result<Vec<ResolvedPlugi
     let mut by_id = HashMap::new();
 
     for (index, plugin) in plugins.iter().enumerate() {
-        let manifest = plugin.manifest();
+        let manifest = plugin_manifest(plugin)?;
         if !manifest.forge_version().matches(&forge_version) {
             return Err(Error::message(format!(
                 "plugin `{}` requires Forge `{}` but this build is `{forge_version}`",
@@ -1006,8 +1070,7 @@ fn resolve_plugin_order(plugins: &[Arc<dyn Plugin>]) -> Result<Vec<ResolvedPlugi
     let mut resolved = Vec::with_capacity(ordered_indexes.len());
     for index in ordered_indexes {
         let (instance, manifest) = nodes[index].clone();
-        let mut registrar = PluginRegistrar::new();
-        instance.register(&mut registrar)?;
+        let registrar = register_plugin(&instance, &manifest)?;
         let manifest = manifest.with_assets_and_scaffolds(registrar.assets, registrar.scaffolds);
         resolved.push(ResolvedPlugin {
             instance,
@@ -1326,6 +1389,12 @@ mod tests {
         manifest: PluginManifest,
     }
 
+    struct RegisterPanicPlugin {
+        manifest: PluginManifest,
+    }
+
+    struct ManifestPanicPlugin;
+
     impl EmptyPlugin {
         fn new(manifest: PluginManifest) -> Self {
             Self { manifest }
@@ -1336,6 +1405,28 @@ mod tests {
     impl Plugin for EmptyPlugin {
         fn manifest(&self) -> PluginManifest {
             self.manifest.clone()
+        }
+
+        fn register(&self, _registrar: &mut PluginRegistrar) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Plugin for RegisterPanicPlugin {
+        fn manifest(&self) -> PluginManifest {
+            self.manifest.clone()
+        }
+
+        fn register(&self, _registrar: &mut PluginRegistrar) -> Result<()> {
+            panic!("register boom")
+        }
+    }
+
+    #[async_trait]
+    impl Plugin for ManifestPanicPlugin {
+        fn manifest(&self) -> PluginManifest {
+            panic!("manifest boom")
         }
 
         fn register(&self, _registrar: &mut PluginRegistrar) -> Result<()> {
@@ -1454,6 +1545,34 @@ mod tests {
 
         let error = prepare_plugins(&plugins).err().unwrap();
         assert!(error.to_string().contains("requires Forge"));
+    }
+
+    #[test]
+    fn plugin_manifest_panic_becomes_prepare_error() {
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(ManifestPanicPlugin)];
+
+        let error = prepare_plugins(&plugins).err().unwrap();
+
+        assert!(error.to_string().contains("plugin manifest panicked"));
+        assert!(error.to_string().contains("manifest boom"));
+    }
+
+    #[test]
+    fn plugin_register_panic_becomes_prepare_error() {
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(RegisterPanicPlugin {
+            manifest: PluginManifest::new(
+                PluginId::new("forge.panic.register"),
+                Version::parse("1.0.0").unwrap(),
+                VersionReq::parse("^0.1").unwrap(),
+            ),
+        })];
+
+        let error = prepare_plugins(&plugins).err().unwrap();
+
+        assert!(error
+            .to_string()
+            .contains("plugin `forge.panic.register` register panicked"));
+        assert!(error.to_string().contains("register boom"));
     }
 
     #[test]

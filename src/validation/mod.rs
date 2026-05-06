@@ -60,6 +60,8 @@ mod tests {
 
     struct MobileRule;
 
+    struct PanickingRule;
+
     #[async_trait]
     impl ValidationRule for MobileRule {
         async fn validate(
@@ -72,6 +74,17 @@ mod tests {
             } else {
                 Err(ValidationError::new("mobile", "invalid mobile number"))
             }
+        }
+    }
+
+    #[async_trait]
+    impl ValidationRule for PanickingRule {
+        async fn validate(
+            &self,
+            _context: &RuleContext,
+            _value: &str,
+        ) -> std::result::Result<(), ValidationError> {
+            panic!("validation boom")
         }
     }
 
@@ -95,6 +108,29 @@ mod tests {
         let errors = validator.finish().unwrap_err();
         assert_eq!(errors.errors.len(), 1);
         assert_eq!(errors.errors[0].code, "mobile");
+    }
+
+    #[tokio::test]
+    async fn custom_rule_panic_becomes_framework_error() {
+        let rules = RuleRegistry::new();
+        rules
+            .register(ValidationRuleId::new("panic"), PanickingRule)
+            .unwrap();
+        let app = AppContext::new(Container::new(), ConfigRepository::empty(), rules).unwrap();
+        let mut validator = Validator::new(app);
+
+        let error = validator
+            .field("phone", "123")
+            .rule(ValidationRuleId::new("panic"))
+            .apply()
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("validation rule `panic` panicked"));
+        assert!(error.to_string().contains("validation boom"));
+        assert!(validator.finish().is_ok());
     }
 
     #[test]

@@ -1,9 +1,12 @@
+use std::any::Any;
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 
 use crate::audit::AuditManager;
 use crate::auth::{
@@ -30,7 +33,7 @@ use crate::kernel::{
     worker::WorkerKernel,
 };
 use crate::logging::{
-    ErrorReporter, ErrorReporterRegistry, ObservabilityOptions, ProbeResult,
+    panic_payload_message, ErrorReporter, ErrorReporterRegistry, ObservabilityOptions, ProbeResult,
     ReadinessRegistryBuilder, ReadinessRegistryHandle, RuntimeBackendKind, RuntimeDiagnostics,
     FRAMEWORK_BOOTSTRAP_PROBE, REDIS_PING_PROBE, RUNTIME_BACKEND_PROBE,
 };
@@ -314,9 +317,8 @@ impl AppContext {
             Err(_) => return Ok(()), // no plugins registered
         };
         for plugin in &list.0 {
-            if let Err(e) = plugin.shutdown(self).await {
+            if let Err(e) = crate::plugin::shutdown_plugin(plugin, self).await {
                 tracing::warn!(
-                    plugin = %plugin.manifest().id(),
                     error = %e,
                     "plugin shutdown failed"
                 );
@@ -438,11 +440,7 @@ impl AppTransaction {
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        for callback in callbacks {
-            if let Err(error) = callback(self.app.clone()).await {
-                tracing::error!(error = %error, "after-commit dispatch failed");
-            }
-        }
+        run_after_commit_callbacks(&self.app, callbacks).await;
 
         Ok(())
     }
@@ -452,6 +450,80 @@ impl AppTransaction {
         // `self.after_commit` is dropped — callbacks never execute.
         self.transaction.rollback().await
     }
+}
+
+async fn run_after_commit_callbacks(app: &AppContext, callbacks: Vec<AfterCommitCallback>) {
+    for callback in callbacks {
+        if let Err(error) = run_after_commit_callback(app, callback).await {
+            tracing::error!(error = %error, "after-commit dispatch failed");
+        }
+    }
+}
+
+async fn run_after_commit_callback(app: &AppContext, callback: AfterCommitCallback) -> Result<()> {
+    let future = match catch_unwind(AssertUnwindSafe(|| callback(app.clone()))) {
+        Ok(future) => future,
+        Err(panic) => return Err(after_commit_panic_error(panic, "factory")),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(after_commit_panic_error(panic, "future")),
+    }
+}
+
+fn after_commit_panic_error(panic: Box<dyn Any + Send>, phase: &'static str) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        phase = phase,
+        panic = %message,
+        "after-commit callback panicked"
+    );
+    Error::message(format!("after-commit callback panicked: {message}"))
+}
+
+async fn register_service_provider(
+    provider: &dyn ServiceProvider,
+    registrar: &mut ServiceRegistrar,
+) -> Result<()> {
+    match AssertUnwindSafe(provider.register(registrar))
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => result,
+        Err(panic) => Err(service_provider_panic_error("register", panic)),
+    }
+}
+
+async fn boot_service_provider(provider: &dyn ServiceProvider, app: &AppContext) -> Result<()> {
+    let future = match catch_unwind(AssertUnwindSafe(|| provider.boot(app))) {
+        Ok(future) => future,
+        Err(panic) => return Err(service_provider_panic_error("boot", panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(service_provider_panic_error("boot", panic)),
+    }
+}
+
+fn registrar_action_panic_error(panic: Box<dyn Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        panic = %message,
+        "plugin registrar action panicked"
+    );
+    Error::message(format!("plugin registrar action panicked: {message}"))
+}
+
+fn service_provider_panic_error(phase: &'static str, panic: Box<dyn Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        phase = phase,
+        panic = %message,
+        "service provider panicked"
+    );
+    Error::message(format!("service provider {phase} panicked: {message}"))
 }
 
 #[async_trait]
@@ -860,14 +932,17 @@ impl AppBuilder {
             registries.clone(),
         );
         for provider in &prepared_plugins.providers {
-            provider.register(&mut registrar).await?;
+            register_service_provider(provider.as_ref(), &mut registrar).await?;
         }
         // Apply plugin direct registrations (guards, jobs, events, etc.)
         for action in prepared_plugins.registrar_actions {
-            action(&registrar)?;
+            match catch_unwind(AssertUnwindSafe(|| action(&registrar))) {
+                Ok(result) => result?,
+                Err(panic) => return Err(registrar_action_panic_error(panic)),
+            }
         }
         for provider in &providers {
-            provider.register(&mut registrar).await?;
+            register_service_provider(provider.as_ref(), &mut registrar).await?;
         }
 
         // Register framework-internal jobs
@@ -1123,10 +1198,10 @@ impl AppBuilder {
             .singleton_arc(std::sync::Arc::new(ws_registry))?;
 
         for provider in &prepared_plugins.providers {
-            provider.boot(&app).await?;
+            boot_service_provider(provider.as_ref(), &app).await?;
         }
         for plugin in &prepared_plugins.instances {
-            plugin.boot(&app).await?;
+            crate::plugin::boot_plugin(plugin, &app).await?;
         }
         // Store plugin instances in reverse dependency order for shutdown
         let mut shutdown_order = prepared_plugins.instances.clone();
@@ -1135,7 +1210,7 @@ impl AppBuilder {
             .singleton(PluginShutdownList(shutdown_order))?;
 
         for provider in &providers {
-            provider.boot(&app).await?;
+            boot_service_provider(provider.as_ref(), &app).await?;
         }
 
         diagnostics.mark_bootstrap_complete();
@@ -1297,6 +1372,8 @@ fn register_builtin_readiness_checks(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1304,7 +1381,8 @@ mod tests {
     use serde::Serialize;
     use tempfile::tempdir;
 
-    use super::{finish_kernel_run, App};
+    use super::{finish_kernel_run, run_after_commit_callbacks, App};
+    use crate::database::AfterCommitCallback;
     use crate::events::{Event, EventContext, EventListener};
     use crate::foundation::{AppContext, Error, Result, ServiceProvider, ServiceRegistrar};
     use crate::support::{EventId, RouteId};
@@ -1365,8 +1443,20 @@ mod tests {
         urls: Arc<Mutex<Vec<String>>>,
     }
 
+    struct RegisterPanicProvider;
+
+    struct BootPanicProvider;
+
     async fn route_url_health() -> &'static str {
         "ok"
+    }
+
+    fn after_commit_callback<F, Fut>(callback: F) -> AfterCommitCallback
+    where
+        F: FnOnce(AppContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        Box::new(move |app| Box::pin(callback(app)))
     }
 
     #[async_trait]
@@ -1434,6 +1524,20 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ServiceProvider for RegisterPanicProvider {
+        async fn register(&self, _registrar: &mut ServiceRegistrar) -> Result<()> {
+            panic!("provider register boom")
+        }
+    }
+
+    #[async_trait]
+    impl ServiceProvider for BootPanicProvider {
+        async fn boot(&self, _app: &AppContext) -> Result<()> {
+            panic!("provider boot boom")
+        }
+    }
+
     #[tokio::test]
     async fn providers_register_before_boot() {
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -1494,6 +1598,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(urls.lock().unwrap().as_slice(), ["/boot/a%20b"]);
+    }
+
+    #[tokio::test]
+    async fn provider_register_panic_becomes_bootstrap_error() {
+        let error = match App::builder()
+            .register_provider(RegisterPanicProvider)
+            .build_cli_kernel()
+            .await
+        {
+            Ok(_) => panic!("expected provider register panic to fail bootstrap"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("service provider register panicked"));
+        assert!(error.to_string().contains("provider register boom"));
+    }
+
+    #[tokio::test]
+    async fn provider_boot_panic_becomes_bootstrap_error() {
+        let error = match App::builder()
+            .register_provider(BootPanicProvider)
+            .build_cli_kernel()
+            .await
+        {
+            Ok(_) => panic!("expected provider boot panic to fail bootstrap"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("service provider boot panicked"));
+        assert!(error.to_string().contains("provider boot boom"));
     }
 
     #[tokio::test]
@@ -1615,6 +1751,59 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn after_commit_future_panic_isolated_and_remaining_callbacks_continue() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+
+        let callbacks = vec![
+            after_commit_callback({
+                let log = log.clone();
+                move |_| async move {
+                    log.lock().unwrap().push("first");
+                    Ok(())
+                }
+            }),
+            after_commit_callback(|_| async { panic!("future boom") }),
+            after_commit_callback({
+                let log = log.clone();
+                move |_| async move {
+                    log.lock().unwrap().push("after-panic");
+                    Ok(())
+                }
+            }),
+        ];
+
+        run_after_commit_callbacks(kernel.app(), callbacks).await;
+
+        assert_eq!(log.lock().unwrap().as_slice(), ["first", "after-panic"]);
+    }
+
+    #[tokio::test]
+    async fn after_commit_factory_panic_isolated_and_remaining_callbacks_continue() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+
+        let panic_callback: AfterCommitCallback =
+            Box::new(|_| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+                panic!("factory boom")
+            });
+        let callbacks = vec![
+            panic_callback,
+            after_commit_callback({
+                let log = log.clone();
+                move |_| async move {
+                    log.lock().unwrap().push("after-factory-panic");
+                    Ok(())
+                }
+            }),
+        ];
+
+        run_after_commit_callbacks(kernel.app(), callbacks).await;
+
+        assert_eq!(log.lock().unwrap().as_slice(), ["after-factory-panic"]);
     }
 
     #[tokio::test]

@@ -1,5 +1,8 @@
 use std::net::IpAddr;
 
+use std::panic::AssertUnwindSafe;
+
+use futures_util::FutureExt;
 use regex::Regex;
 use url::Url;
 use uuid::Uuid;
@@ -7,8 +10,10 @@ use validator::ValidateEmail;
 
 use crate::database::Query;
 use crate::foundation::{AppContext, Error, Result};
+use crate::logging::panic_payload_message;
+use crate::support::ValidationRuleId;
 use crate::support::{Date, DateTime, LocalDateTime, Time, Timezone};
-use crate::validation::context::RuleContext;
+use crate::validation::context::{RuleContext, ValidationRule};
 use crate::validation::rules::{FieldRule, FieldStep};
 use crate::validation::types::{FieldError, ValidationError};
 use crate::validation::validator::Validator;
@@ -235,7 +240,7 @@ pub(crate) async fn execute_steps(
                     )));
                 };
                 let context = RuleContext::new(validator.app.clone(), field.to_string());
-                if let Err(error) = rule.validate(&context, value).await {
+                if let Err(error) = run_named_rule(&id, rule.as_ref(), &context, value).await? {
                     let msg = match message.as_deref() {
                         Some(custom) => custom.to_string(),
                         None => validator.resolve_message(field, &error.code, &[], None),
@@ -688,4 +693,31 @@ pub(crate) async fn execute_steps(
         }
     }
     Ok(())
+}
+
+async fn run_named_rule(
+    id: &ValidationRuleId,
+    rule: &dyn ValidationRule,
+    context: &RuleContext,
+    value: &str,
+) -> Result<std::result::Result<(), ValidationError>> {
+    match AssertUnwindSafe(rule.validate(context, value))
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(panic) => {
+            let message = panic_payload_message(panic);
+            tracing::error!(
+                target: "forge.validation",
+                rule = %id,
+                field = %context.field(),
+                panic = %message,
+                "validation rule panicked"
+            );
+            Err(Error::message(format!(
+                "validation rule `{id}` panicked: {message}"
+            )))
+        }
+    }
 }

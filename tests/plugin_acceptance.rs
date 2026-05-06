@@ -699,8 +699,21 @@ async fn plugin_direct_registration_works_without_provider_wrapper() {
 // ---------------------------------------------------------------------------
 
 const SHUTDOWN_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.shutdown_test");
+const BOOT_PANIC_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.boot_panic");
+const SHUTDOWN_PANIC_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.shutdown_panic");
+const SHUTDOWN_FOLLOWER_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.shutdown_follower");
 
 struct ShutdownPlugin {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+struct BootPanicPlugin;
+
+struct ShutdownPanicPlugin {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+struct ShutdownFollowerPlugin {
     log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -729,6 +742,68 @@ impl forge::plugin::Plugin for ShutdownPlugin {
     }
 }
 
+#[async_trait]
+impl forge::plugin::Plugin for BootPanicPlugin {
+    fn manifest(&self) -> forge::plugin::PluginManifest {
+        forge::plugin::PluginManifest::new(
+            BOOT_PANIC_PLUGIN_ID,
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1.0").unwrap(),
+        )
+    }
+
+    fn register(&self, _registrar: &mut forge::plugin::PluginRegistrar) -> Result<()> {
+        Ok(())
+    }
+
+    async fn boot(&self, _app: &AppContext) -> Result<()> {
+        panic!("boot boom")
+    }
+}
+
+#[async_trait]
+impl forge::plugin::Plugin for ShutdownPanicPlugin {
+    fn manifest(&self) -> forge::plugin::PluginManifest {
+        forge::plugin::PluginManifest::new(
+            SHUTDOWN_PANIC_PLUGIN_ID,
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1.0").unwrap(),
+        )
+    }
+
+    fn register(&self, _registrar: &mut forge::plugin::PluginRegistrar) -> Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&self, _app: &AppContext) -> Result<()> {
+        self.log.lock().unwrap().push("panic-shutdown".to_string());
+        panic!("shutdown boom")
+    }
+}
+
+#[async_trait]
+impl forge::plugin::Plugin for ShutdownFollowerPlugin {
+    fn manifest(&self) -> forge::plugin::PluginManifest {
+        forge::plugin::PluginManifest::new(
+            SHUTDOWN_FOLLOWER_PLUGIN_ID,
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1.0").unwrap(),
+        )
+    }
+
+    fn register(&self, _registrar: &mut forge::plugin::PluginRegistrar) -> Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&self, _app: &AppContext) -> Result<()> {
+        self.log
+            .lock()
+            .unwrap()
+            .push("follower-shutdown".to_string());
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn plugin_shutdown_called_in_reverse_dependency_order() {
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -745,4 +820,39 @@ async fn plugin_shutdown_called_in_reverse_dependency_order() {
     kernel.app().shutdown_plugins().await.unwrap();
 
     assert_eq!(log.lock().unwrap().as_slice(), &["booted", "shutdown"]);
+}
+
+#[tokio::test]
+async fn plugin_boot_panic_becomes_bootstrap_error() {
+    let error = match App::builder()
+        .register_plugin(BootPanicPlugin)
+        .build_cli_kernel()
+        .await
+    {
+        Ok(_) => panic!("expected plugin boot panic to fail bootstrap"),
+        Err(error) => error,
+    };
+
+    assert!(error
+        .to_string()
+        .contains("plugin `forge.plugin.boot_panic` boot panicked"));
+    assert!(error.to_string().contains("boot boom"));
+}
+
+#[tokio::test]
+async fn plugin_shutdown_panic_isolated_and_later_plugins_still_shutdown() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let kernel = App::builder()
+        .register_plugin(ShutdownFollowerPlugin { log: log.clone() })
+        .register_plugin(ShutdownPanicPlugin { log: log.clone() })
+        .build_cli_kernel()
+        .await
+        .unwrap();
+
+    kernel.app().shutdown_plugins().await.unwrap();
+
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        &["panic-shutdown", "follower-shutdown"]
+    );
 }

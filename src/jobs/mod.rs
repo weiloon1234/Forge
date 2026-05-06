@@ -734,9 +734,7 @@ impl Worker {
                         .record_job_outcome(RecordedJobOutcome::Leased);
                     let w = worker.clone();
                     let handle = tokio::spawn(async move {
-                        if let Err(error) = w.process_claimed_job(lease).await {
-                            tracing::error!(target: "forge.worker", error = %error, "job processing failed");
-                        }
+                        let _ = w.process_claimed_job(lease).await;
                         drop(permit);
                     });
                     active_jobs.track(handle);
@@ -794,6 +792,23 @@ impl Worker {
     }
 
     async fn process_claimed_job(&self, lease: ClaimedJobLease) -> Result<()> {
+        let heartbeat = self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
+        let result = self.process_claimed_job_with_active_lease(lease).await;
+        heartbeat.shutdown().await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                error.log_recovery();
+                let ClaimedJobInfraError { error, .. } = *error;
+                Err(error)
+            }
+        }
+    }
+
+    async fn process_claimed_job_with_active_lease(
+        &self,
+        lease: ClaimedJobLease,
+    ) -> ClaimedJobProcessingResult<()> {
         self.diagnostics
             .record_job_outcome(RecordedJobOutcome::Started);
 
@@ -821,12 +836,26 @@ impl Worker {
                     middleware: middleware.as_deref(),
                     job_context: Some(&job_context),
                 })
-                .await?;
+                .await
+                .map_err(|error| {
+                    ClaimedJobInfraError::new(
+                        ClaimedJobPhase::PoisonDeadLetter,
+                        ClaimedJobContext::new(
+                            Some(INVALID_JOB_ENVELOPE_ID.to_string()),
+                            lease.queue.to_string(),
+                            lease.token.clone(),
+                            Some(1),
+                        ),
+                        error,
+                    )
+                })?;
                 return Ok(());
             }
         };
+        let context = ClaimedJobContext::from_envelope(&lease, &envelope, envelope.attempts + 1);
         let Some(registration) = self.runtime.registry.jobs.get(&envelope.job) else {
             let attempts = envelope.attempts + 1;
+            let context = ClaimedJobContext::from_envelope(&lease, &envelope, attempts);
             let job_context = JobContext::new(self.app.clone(), envelope.queue.clone(), attempts);
             let error = format!("job `{}` is not registered", envelope.job);
             self.dead_letter_claimed_job(DeadLetterClaimedJob {
@@ -838,7 +867,10 @@ impl Worker {
                 middleware: middleware.as_deref(),
                 job_context: Some(&job_context),
             })
-            .await?;
+            .await
+            .map_err(|error| {
+                ClaimedJobInfraError::new(ClaimedJobPhase::UnknownJobDeadLetter, context, error)
+            })?;
             return Ok(());
         };
 
@@ -847,11 +879,14 @@ impl Worker {
             let window_secs = window.as_secs().max(1);
             let window_bucket = Utc::now().timestamp() / window_secs as i64;
             let rate_key = format!("jobs:rate:{}:{}", envelope.job, window_bucket);
-            let current_count = self
-                .runtime
-                .backend
-                .incr_with_ttl(&rate_key, window_secs)
-                .await?;
+            let current_count = claimed_job_result(
+                ClaimedJobPhase::RateLimitCheck,
+                &context,
+                self.runtime
+                    .backend
+                    .incr_with_ttl(&rate_key, window_secs)
+                    .await,
+            )?;
             if current_count > max_per_window as u64 {
                 // Over the rate limit — requeue with the same attempt count
                 // and a short delay so it retries soon without counting as a failure.
@@ -861,19 +896,30 @@ impl Worker {
                     scheduled_at: requeue_at,
                     ..envelope
                 };
-                let payload = serde_json::to_string(&requeue_envelope).map_err(Error::other)?;
+                let context = ClaimedJobContext::from_envelope(
+                    &lease,
+                    &requeue_envelope,
+                    requeue_envelope.attempts + 1,
+                );
+                let payload = claimed_job_result(
+                    ClaimedJobPhase::RateLimitPayload,
+                    &context,
+                    serde_json::to_string(&requeue_envelope).map_err(Error::other),
+                )?;
                 let requeue_token = next_delivery_token();
-                if !self
-                    .runtime
-                    .retry_job(
-                        &lease.queue,
-                        &lease.token,
-                        &requeue_token,
-                        &payload,
-                        requeue_at,
-                    )
-                    .await?
-                {
+                if !claimed_job_result(
+                    ClaimedJobPhase::RateLimitRequeue,
+                    &context,
+                    self.runtime
+                        .retry_job(
+                            &lease.queue,
+                            &lease.token,
+                            &requeue_token,
+                            &payload,
+                            requeue_at,
+                        )
+                        .await,
+                )? {
                     tracing::warn!(
                         target: "forge.worker",
                         queue = %lease.queue,
@@ -904,7 +950,6 @@ impl Worker {
             mw.run_before(&envelope.job, &job_context).await;
         }
 
-        let heartbeat = self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
         let default_timeout = Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
         let execution = crate::logging::scope_current_execution(
             crate::logging::ExecutionContext::Job {
@@ -919,31 +964,36 @@ impl Worker {
             ),
         )
         .await;
-        heartbeat.shutdown().await;
-        let execution = execution?;
+        let execution = claimed_job_result(ClaimedJobPhase::ExecuteJob, &context, execution)?;
 
         match execution {
             JobExecutionOutcome::Success => {
                 if let Some(ref mw) = middleware {
                     mw.run_after(&envelope.job, &job_context).await;
                 }
-                let chain_effect =
-                    Self::build_chain_continuation(envelope.chain_remaining.clone())?;
-                let success = self
-                    .runtime
-                    .complete_successful_job(
-                        &lease.queue,
-                        &lease.token,
-                        SuccessfulJobEffects {
-                            chain: chain_effect,
-                            batch_id: envelope.batch_id.clone(),
-                            batch_callback_token: envelope
-                                .batch_id
-                                .as_ref()
-                                .map(|_| next_delivery_token()),
-                        },
-                    )
-                    .await?;
+                let chain_effect = claimed_job_result(
+                    ClaimedJobPhase::BuildChainContinuation,
+                    &context,
+                    Self::build_chain_continuation(envelope.chain_remaining.clone()),
+                )?;
+                let success = claimed_job_result(
+                    ClaimedJobPhase::SuccessFinalization,
+                    &context,
+                    self.runtime
+                        .complete_successful_job(
+                            &lease.queue,
+                            &lease.token,
+                            SuccessfulJobEffects {
+                                chain: chain_effect,
+                                batch_id: envelope.batch_id.clone(),
+                                batch_callback_token: envelope
+                                    .batch_id
+                                    .as_ref()
+                                    .map(|_| next_delivery_token()),
+                            },
+                        )
+                        .await,
+                )?;
                 if !success.lease_released {
                     tracing::warn!(
                         target: "forge.worker",
@@ -1037,19 +1087,27 @@ impl Worker {
                     scheduled_at: run_at_millis,
                     ..envelope
                 };
-                let payload = serde_json::to_string(&retry_envelope).map_err(Error::other)?;
+                let retry_context =
+                    ClaimedJobContext::from_envelope(&lease, &retry_envelope, attempts);
+                let payload = claimed_job_result(
+                    ClaimedJobPhase::RetryPayload,
+                    &retry_context,
+                    serde_json::to_string(&retry_envelope).map_err(Error::other),
+                )?;
                 let retry_token = next_delivery_token();
-                if !self
-                    .runtime
-                    .retry_job(
-                        &lease.queue,
-                        &lease.token,
-                        &retry_token,
-                        &payload,
-                        run_at_millis,
-                    )
-                    .await?
-                {
+                if !claimed_job_result(
+                    ClaimedJobPhase::RetrySchedule,
+                    &retry_context,
+                    self.runtime
+                        .retry_job(
+                            &lease.queue,
+                            &lease.token,
+                            &retry_token,
+                            &payload,
+                            run_at_millis,
+                        )
+                        .await,
+                )? {
                     tracing::warn!(
                         target: "forge.worker",
                         queue = %lease.queue,
@@ -1090,12 +1148,24 @@ impl Worker {
                         ..envelope
                     },
                 };
-                let payload = serde_json::to_string(&dead_letter).map_err(Error::other)?;
-                if !self
-                    .runtime
-                    .dead_letter_job(&lease.queue, &lease.token, &payload)
-                    .await?
-                {
+                let dead_letter_context = ClaimedJobContext::new(
+                    Some(job_name.to_string()),
+                    queue_name.to_string(),
+                    lease.token.clone(),
+                    Some(attempts),
+                );
+                let payload = claimed_job_result(
+                    ClaimedJobPhase::DeadLetterPayload,
+                    &dead_letter_context,
+                    serde_json::to_string(&dead_letter).map_err(Error::other),
+                )?;
+                if !claimed_job_result(
+                    ClaimedJobPhase::DeadLetterTransition,
+                    &dead_letter_context,
+                    self.runtime
+                        .dead_letter_job(&lease.queue, &lease.token, &payload)
+                        .await,
+                )? {
                     tracing::warn!(
                         target: "forge.worker",
                         queue = %lease.queue,
@@ -1726,6 +1796,115 @@ impl JobRuntime {
     }
 }
 
+type ClaimedJobProcessingResult<T> = std::result::Result<T, Box<ClaimedJobInfraError>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimedJobPhase {
+    PoisonDeadLetter,
+    UnknownJobDeadLetter,
+    RateLimitCheck,
+    RateLimitPayload,
+    RateLimitRequeue,
+    ExecuteJob,
+    BuildChainContinuation,
+    SuccessFinalization,
+    RetryPayload,
+    RetrySchedule,
+    DeadLetterPayload,
+    DeadLetterTransition,
+}
+
+impl ClaimedJobPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PoisonDeadLetter => "poison_dead_letter",
+            Self::UnknownJobDeadLetter => "unknown_job_dead_letter",
+            Self::RateLimitCheck => "rate_limit_check",
+            Self::RateLimitPayload => "rate_limit_payload",
+            Self::RateLimitRequeue => "rate_limit_requeue",
+            Self::ExecuteJob => "execute_job",
+            Self::BuildChainContinuation => "build_chain_continuation",
+            Self::SuccessFinalization => "success_finalization",
+            Self::RetryPayload => "retry_payload",
+            Self::RetrySchedule => "retry_schedule",
+            Self::DeadLetterPayload => "dead_letter_payload",
+            Self::DeadLetterTransition => "dead_letter_transition",
+        }
+    }
+}
+
+impl std::fmt::Display for ClaimedJobPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClaimedJobContext {
+    job: Option<String>,
+    queue: String,
+    token: String,
+    attempt: Option<u32>,
+}
+
+impl ClaimedJobContext {
+    fn new(job: Option<String>, queue: String, token: String, attempt: Option<u32>) -> Self {
+        Self {
+            job,
+            queue,
+            token,
+            attempt,
+        }
+    }
+
+    fn from_envelope(lease: &ClaimedJobLease, envelope: &JobEnvelope, attempt: u32) -> Self {
+        Self::new(
+            Some(envelope.job.to_string()),
+            lease.queue.to_string(),
+            lease.token.clone(),
+            Some(attempt),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct ClaimedJobInfraError {
+    phase: ClaimedJobPhase,
+    context: ClaimedJobContext,
+    error: Error,
+}
+
+impl ClaimedJobInfraError {
+    fn new(phase: ClaimedJobPhase, context: ClaimedJobContext, error: Error) -> Box<Self> {
+        Box::new(Self {
+            phase,
+            context,
+            error,
+        })
+    }
+
+    fn log_recovery(&self) {
+        tracing::error!(
+            target: "forge.worker",
+            phase = %self.phase,
+            job = self.context.job.as_deref().unwrap_or("unknown"),
+            queue = %self.context.queue,
+            token = %self.context.token,
+            attempt = ?self.context.attempt,
+            error = %self.error,
+            "Claimed job processing errored; lease left for expiry recovery"
+        );
+    }
+}
+
+fn claimed_job_result<T>(
+    phase: ClaimedJobPhase,
+    context: &ClaimedJobContext,
+    result: Result<T>,
+) -> ClaimedJobProcessingResult<T> {
+    result.map_err(|error| ClaimedJobInfraError::new(phase, context.clone(), error))
+}
+
 pub(crate) struct JobRegistrySnapshot {
     jobs: HashMap<JobId, JobRegistration>,
     queues: Vec<QueueId>,
@@ -1900,6 +2079,7 @@ mod tests {
 
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
+    use tokio::sync::Notify;
 
     use super::{
         ChainedJob, Job, JobContext, JobDeadLetterContext, JobDispatcher, JobEnvelope,
@@ -1912,6 +2092,28 @@ mod tests {
     use crate::support::runtime::RuntimeBackend;
     use crate::support::{JobId, QueueId};
     use crate::validation::RuleRegistry;
+
+    #[test]
+    fn claimed_job_infra_error_preserves_phase_and_context() {
+        let context = super::ClaimedJobContext::new(
+            Some("email.job".to_string()),
+            "critical".to_string(),
+            "token-1".to_string(),
+            Some(3),
+        );
+
+        let error = super::claimed_job_result::<()>(
+            super::ClaimedJobPhase::RetrySchedule,
+            &context,
+            Err(Error::message("redis unavailable")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.phase, super::ClaimedJobPhase::RetrySchedule);
+        assert_eq!(error.phase.to_string(), "retry_schedule");
+        assert_eq!(error.context, context);
+        assert_eq!(error.error.to_string(), "redis unavailable");
+    }
 
     #[derive(Debug, Serialize, Deserialize)]
     struct FailingJob;
@@ -2544,6 +2746,37 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SlowMiddleware {
+        before_started: Option<Arc<Notify>>,
+        before_delay: Option<Duration>,
+        after_started: Option<Arc<Notify>>,
+        after_delay: Option<Duration>,
+    }
+
+    #[async_trait]
+    impl JobMiddleware for SlowMiddleware {
+        async fn before(&self, _job_id: &JobId, _context: &JobContext) -> crate::Result<()> {
+            if let Some(started) = &self.before_started {
+                started.notify_one();
+            }
+            if let Some(delay) = self.before_delay {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(())
+        }
+
+        async fn after(&self, _job_id: &JobId, _context: &JobContext) -> crate::Result<()> {
+            if let Some(started) = &self.after_started {
+                started.notify_one();
+            }
+            if let Some(delay) = self.after_delay {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(())
+        }
+    }
+
     fn register_job_middleware(app: &AppContext, middleware: Arc<dyn JobMiddleware>) {
         let mut middleware_builder = JobMiddlewareRegistryBuilder::default();
         middleware_builder.register(middleware);
@@ -2650,6 +2883,86 @@ mod tests {
             .unwrap();
         assert_eq!(dead_letters.len(), 1);
         assert_eq!(diagnostics.snapshot().jobs.dead_lettered_total, 1);
+    }
+
+    #[tokio::test]
+    async fn lease_heartbeat_covers_slow_before_middleware() {
+        let tag = "middleware-before-heartbeat";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("middleware-before-heartbeat");
+        let slow_app = build_app(runtime.clone(), diagnostics.clone());
+        let competing_app = build_app(runtime, diagnostics.clone());
+        let before_started = Arc::new(Notify::new());
+        register_job_middleware(
+            &slow_app,
+            Arc::new(SlowMiddleware {
+                before_started: Some(before_started.clone()),
+                before_delay: Some(Duration::from_millis(120)),
+                ..SlowMiddleware::default()
+            }),
+        );
+
+        dispatcher
+            .dispatch(StepJob {
+                tag: tag.into(),
+                name: "ok".into(),
+            })
+            .await
+            .unwrap();
+        let slow_worker = Worker::from_app(slow_app).unwrap();
+        let competing_worker = Worker::from_app(competing_app).unwrap();
+
+        let slow_handle = tokio::spawn(async move { slow_worker.run_once().await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(1), before_started.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(70)).await;
+
+        assert!(!competing_worker.run_once().await.unwrap());
+        assert!(slow_handle.await.unwrap());
+        assert!(!competing_worker.run_once().await.unwrap());
+        assert_eq!(read_log_filtered(&format!("{tag}:")), vec!["ok"]);
+        assert_eq!(diagnostics.snapshot().jobs.succeeded_total, 1);
+    }
+
+    #[tokio::test]
+    async fn lease_heartbeat_covers_slow_after_middleware() {
+        let tag = "middleware-after-heartbeat";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("middleware-after-heartbeat");
+        let slow_app = build_app(runtime.clone(), diagnostics.clone());
+        let competing_app = build_app(runtime, diagnostics.clone());
+        let after_started = Arc::new(Notify::new());
+        register_job_middleware(
+            &slow_app,
+            Arc::new(SlowMiddleware {
+                after_started: Some(after_started.clone()),
+                after_delay: Some(Duration::from_millis(120)),
+                ..SlowMiddleware::default()
+            }),
+        );
+
+        dispatcher
+            .dispatch(StepJob {
+                tag: tag.into(),
+                name: "ok".into(),
+            })
+            .await
+            .unwrap();
+        let slow_worker = Worker::from_app(slow_app).unwrap();
+        let competing_worker = Worker::from_app(competing_app).unwrap();
+
+        let slow_handle = tokio::spawn(async move { slow_worker.run_once().await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(1), after_started.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(70)).await;
+
+        assert!(!competing_worker.run_once().await.unwrap());
+        assert!(slow_handle.await.unwrap());
+        assert!(!competing_worker.run_once().await.unwrap());
+        assert_eq!(read_log_filtered(&format!("{tag}:")), vec!["ok"]);
+        assert_eq!(diagnostics.snapshot().jobs.succeeded_total, 1);
     }
 
     // --- Batch & chain test helpers ---

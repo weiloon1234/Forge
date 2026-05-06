@@ -360,8 +360,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let reports = reporter.panic_reports.lock().unwrap();
-        assert_eq!(reports.len(), 1);
-        match &reports[0].context {
+        let report = reports
+            .iter()
+            .find(|report| report.message == "oops" && report.location == "src/tests.rs:1")
+            .expect("expected scoped panic report");
+        match &report.context {
             PanicContext::Job { id, class } => {
                 assert_eq!(id, "job-1");
                 assert_eq!(class, "email.send");

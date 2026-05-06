@@ -1170,13 +1170,76 @@ mod tests {
     use std::time::Duration;
 
     use super::{JobToEnqueue, RuntimeBackend, SuccessfulJobEffects};
-    use crate::support::runtime::{LeasedJobToken, MemoryRuntime, ScheduledJobToken};
+    use crate::support::runtime::{LeasedJobToken, MemoryRuntime, RedisRuntime, ScheduledJobToken};
     use crate::support::QueueId;
 
     fn memory_runtime(backend: &RuntimeBackend) -> Arc<MemoryRuntime> {
         match backend {
             RuntimeBackend::Memory(runtime) => Arc::clone(runtime),
             RuntimeBackend::Redis(_) => unreachable!("test backend should use memory runtime"),
+        }
+    }
+
+    fn redis_runtime(backend: &RuntimeBackend) -> &RedisRuntime {
+        match backend {
+            RuntimeBackend::Redis(runtime) => runtime,
+            RuntimeBackend::Memory(_) => unreachable!("test backend should use redis runtime"),
+        }
+    }
+
+    async fn redis_backend(test_name: &str) -> Option<RuntimeBackend> {
+        let url = std::env::var("FORGE_REDIS_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379/15".to_string());
+        let client = match ::redis::Client::open(url.as_str()) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("skipping redis backend test `{test_name}`: {error}");
+                return None;
+            }
+        };
+        let namespace = format!(
+            "forge-tests:{}:{}:{}",
+            test_name,
+            std::process::id(),
+            chrono::Utc::now().timestamp_micros()
+        );
+        let backend = RuntimeBackend::Redis(RedisRuntime { client, namespace });
+        if let Err(error) = redis_ping(&backend).await {
+            eprintln!("skipping redis backend test `{test_name}`: {error}");
+            return None;
+        }
+        cleanup_redis_backend(&backend).await;
+        Some(backend)
+    }
+
+    async fn redis_ping(backend: &RuntimeBackend) -> std::result::Result<(), String> {
+        let runtime = redis_runtime(backend);
+        let mut conn = runtime
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|error| error.to_string())?;
+        let _: String = ::redis::cmd("PING")
+            .query_async(&mut conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn cleanup_redis_backend(backend: &RuntimeBackend) {
+        let runtime = redis_runtime(backend);
+        let Ok(mut conn) = runtime.client.get_multiplexed_async_connection().await else {
+            return;
+        };
+        let keys: Vec<String> = ::redis::cmd("KEYS")
+            .arg(format!("{}:*", runtime.namespace))
+            .query_async(&mut conn)
+            .await
+            .unwrap_or_default();
+        if !keys.is_empty() {
+            let _: std::result::Result<i64, _> =
+                ::redis::cmd("DEL").arg(keys).query_async(&mut conn).await;
         }
     }
 
@@ -1207,6 +1270,76 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn redis_backend_claim_fences_stale_and_duplicate_ready_tokens() {
+        let Some(backend) = redis_backend("job-backend-redis-claim-fencing").await else {
+            return;
+        };
+        let runtime = redis_runtime(&backend);
+        let queue = QueueId::new("default");
+        let mut conn = runtime
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+
+        let _: i64 = ::redis::cmd("RPUSH")
+            .arg(super::ready_key(runtime, &queue))
+            .arg("missing-payload")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        backend
+            .enqueue_job(&queue, "token-1", "{\"job\":\"first\"}")
+            .await
+            .unwrap();
+        let _: i64 = ::redis::cmd("RPUSH")
+            .arg(super::ready_key(runtime, &queue))
+            .arg("token-1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        backend
+            .enqueue_job(&queue, "token-2", "{\"job\":\"second\"}")
+            .await
+            .unwrap();
+        drop(conn);
+
+        let first = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.token, "token-1");
+
+        let second = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.token, "token-2");
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut conn = runtime
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let leased_tokens: Vec<String> = ::redis::cmd("ZRANGE")
+            .arg(super::leased_key(runtime, &queue))
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(leased_tokens, vec!["token-1", "token-2"]);
+        cleanup_redis_backend(&backend).await;
     }
 
     #[tokio::test]
@@ -1290,6 +1423,116 @@ mod tests {
             .unwrap();
         assert_eq!(callback.token, "callback-token-2");
         assert_eq!(callback.payload, "{\"job\":\"callback\"}");
+    }
+
+    #[tokio::test]
+    async fn redis_backend_dispatch_batch_enqueues_all_jobs_with_callback_once() {
+        let Some(backend) = redis_backend("job-backend-redis-dispatch-batch").await else {
+            return;
+        };
+        let queue = QueueId::new("default");
+        let batch_id = "batch-atomic";
+
+        let enqueued = backend
+            .dispatch_batch(
+                batch_id,
+                Some("{\"job\":\"callback\"}"),
+                Some(queue.as_str()),
+                vec![
+                    JobToEnqueue {
+                        queue: queue.clone(),
+                        token: "token-1".to_string(),
+                        payload: "{\"job\":\"one\"}".to_string(),
+                    },
+                    JobToEnqueue {
+                        queue: queue.clone(),
+                        token: "token-2".to_string(),
+                        payload: "{\"job\":\"two\"}".to_string(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(enqueued, 2);
+
+        let first = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.token, "token-1");
+        let first_complete = backend
+            .complete_successful_job(
+                &queue,
+                &first.token,
+                &queue,
+                SuccessfulJobEffects {
+                    batch_id: Some(batch_id.to_string()),
+                    batch_callback_token: Some("callback-token-1".to_string()),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(first_complete.lease_released);
+        let first_batch = first_complete.batch.unwrap();
+        assert_eq!(first_batch.completed, 1);
+        assert_eq!(first_batch.total, 2);
+        assert!(!first_batch.on_complete_enqueued);
+
+        let second = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.token, "token-2");
+        let second_complete = backend
+            .complete_successful_job(
+                &queue,
+                &second.token,
+                &queue,
+                SuccessfulJobEffects {
+                    batch_id: Some(batch_id.to_string()),
+                    batch_callback_token: Some("callback-token-2".to_string()),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        let second_batch = second_complete.batch.unwrap();
+        assert_eq!(second_batch.completed, 2);
+        assert_eq!(second_batch.total, 2);
+        assert!(second_batch.on_complete_enqueued);
+
+        let duplicate_complete = backend
+            .complete_successful_job(
+                &queue,
+                &second.token,
+                &queue,
+                SuccessfulJobEffects {
+                    batch_id: Some(batch_id.to_string()),
+                    batch_callback_token: Some("callback-token-duplicate".to_string()),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!duplicate_complete.lease_released);
+        assert!(duplicate_complete.batch.is_none());
+
+        let callback = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback.token, "callback-token-2");
+        assert_eq!(callback.payload, "{\"job\":\"callback\"}");
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+        cleanup_redis_backend(&backend).await;
     }
 
     #[tokio::test]
@@ -1492,6 +1735,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_backend_requeues_expired_leases_and_skips_missing_payloads() {
+        let Some(backend) = redis_backend("job-backend-redis-requeue").await else {
+            return;
+        };
+        let runtime = redis_runtime(&backend);
+        let queue = QueueId::new("default");
+        let now_millis = chrono::Utc::now().timestamp_millis();
+
+        backend
+            .enqueue_job(&queue, "token-1", "{\"job\":\"recover\"}")
+            .await
+            .unwrap();
+        let claimed = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.token, "token-1");
+
+        let mut conn = runtime
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let _: i64 = ::redis::cmd("ZADD")
+            .arg(super::leased_key(runtime, &queue))
+            .arg(now_millis - 1)
+            .arg("token-1")
+            .arg(now_millis - 1)
+            .arg("missing-payload")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        drop(conn);
+
+        let requeued = backend
+            .requeue_expired_jobs(std::slice::from_ref(&queue), now_millis, 8)
+            .await
+            .unwrap();
+        assert_eq!(requeued, 1);
+
+        let reclaimed = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reclaimed.token, "token-1");
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+        cleanup_redis_backend(&backend).await;
+    }
+
+    #[tokio::test]
     async fn memory_backend_requeue_expired_jobs_skips_tokens_without_payload() {
         let backend = RuntimeBackend::memory("job-backend-requeue-stale-leased");
         let runtime = memory_runtime(&backend);
@@ -1538,5 +1837,167 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn redis_backend_retry_and_dead_letter_require_active_lease() {
+        let Some(backend) = redis_backend("job-backend-redis-lease-transitions").await else {
+            return;
+        };
+        let runtime = redis_runtime(&backend);
+        let queue = QueueId::new("default");
+
+        backend
+            .enqueue_job(&queue, "retry-token", "{\"job\":\"retry\"}")
+            .await
+            .unwrap();
+        let retry_claim = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry_claim.token, "retry-token");
+        let completed = backend
+            .complete_successful_job(
+                &queue,
+                &retry_claim.token,
+                &queue,
+                SuccessfulJobEffects::default(),
+            )
+            .await
+            .unwrap();
+        assert!(completed.lease_released);
+        assert!(!backend
+            .retry_job(
+                &queue,
+                &retry_claim.token,
+                "retry-token-2",
+                "{\"job\":\"retry-again\"}",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            backend
+                .promote_due_jobs(
+                    std::slice::from_ref(&queue),
+                    chrono::Utc::now().timestamp_millis() + 1,
+                    8,
+                )
+                .await
+                .unwrap(),
+            0
+        );
+
+        backend
+            .enqueue_job(&queue, "dead-token", "{\"job\":\"dead\"}")
+            .await
+            .unwrap();
+        let dead_claim = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dead_claim.token, "dead-token");
+        let completed = backend
+            .complete_successful_job(
+                &queue,
+                &dead_claim.token,
+                &queue,
+                SuccessfulJobEffects::default(),
+            )
+            .await
+            .unwrap();
+        assert!(completed.lease_released);
+        assert!(!backend
+            .dead_letter_job(&queue, &dead_claim.token, "{\"failed\":true}")
+            .await
+            .unwrap());
+
+        let mut conn = runtime
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let dead_letters: Vec<String> = ::redis::cmd("LRANGE")
+            .arg(super::dead_letter_key(runtime, &queue))
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(dead_letters.is_empty());
+        cleanup_redis_backend(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn redis_backend_success_finalization_requires_lease_and_dispatches_chain_once() {
+        let Some(backend) = redis_backend("job-backend-redis-success-finalization").await else {
+            return;
+        };
+        let queue = QueueId::new("default");
+
+        backend
+            .enqueue_job(&queue, "parent-token", "{\"job\":\"parent\"}")
+            .await
+            .unwrap();
+        let parent = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parent.token, "parent-token");
+
+        let completed = backend
+            .complete_successful_job(
+                &queue,
+                &parent.token,
+                &queue,
+                SuccessfulJobEffects {
+                    chain: Some(JobToEnqueue {
+                        queue: queue.clone(),
+                        token: "chain-token".to_string(),
+                        payload: "{\"job\":\"chain\"}".to_string(),
+                    }),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(completed.lease_released);
+        assert!(completed.chain_enqueued);
+
+        let duplicate = backend
+            .complete_successful_job(
+                &queue,
+                &parent.token,
+                &queue,
+                SuccessfulJobEffects {
+                    chain: Some(JobToEnqueue {
+                        queue: queue.clone(),
+                        token: "chain-token-duplicate".to_string(),
+                        payload: "{\"job\":\"chain-duplicate\"}".to_string(),
+                    }),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!duplicate.lease_released);
+        assert!(!duplicate.chain_enqueued);
+
+        let chain = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(chain.token, "chain-token");
+        assert_eq!(chain.payload, "{\"job\":\"chain\"}");
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+        cleanup_redis_backend(&backend).await;
     }
 }

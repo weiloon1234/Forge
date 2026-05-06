@@ -1,6 +1,5 @@
 mod backend;
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::future::Future;
@@ -22,7 +21,7 @@ use crate::foundation::shutdown_drain::{
     drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
 };
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{JobOutcome as RecordedJobOutcome, RuntimeDiagnostics};
+use crate::logging::{panic_payload_message, JobOutcome as RecordedJobOutcome, RuntimeDiagnostics};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{JobId, QueueId};
 
@@ -2049,16 +2048,6 @@ where
     fn check_rate_limit(&self, envelope: &JobEnvelope) -> Option<(u32, Duration)> {
         let job: J = serde_json::from_value(envelope.payload.clone()).ok()?;
         job.rate_limit()
-    }
-}
-
-fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
     }
 }
 

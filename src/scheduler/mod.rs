@@ -11,8 +11,8 @@ use crate::support::{boxed, BoxFuture};
 use crate::support::{DateTime, ScheduleId};
 
 pub type ScheduleRegistrar = Arc<dyn Fn(&mut ScheduleRegistry) -> Result<()> + Send + Sync>;
-type ScheduleHandler = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
-type ScheduleHook = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
+pub(crate) type ScheduleHandler = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
+pub(crate) type ScheduleHook = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ScheduleInvocation {

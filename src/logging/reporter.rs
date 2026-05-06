@@ -1,8 +1,12 @@
+use std::any::Any;
 use std::backtrace::Backtrace;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use axum::response::Response;
+use futures_util::FutureExt;
 use serde_json::Value;
 
 use crate::auth::Actor;
@@ -92,22 +96,58 @@ impl ErrorReporterRegistry {
             return;
         }
 
-        for reporter in &self.reporters {
-            reporter.report_handler_error(report.clone()).await;
+        for (index, reporter) in self.reporters.iter().enumerate() {
+            report_with_panic_boundary(
+                "handler_error",
+                index,
+                reporter.report_handler_error(report.clone()),
+            )
+            .await;
         }
     }
 
     pub(crate) async fn report_panic(&self, report: PanicReport) {
-        for reporter in &self.reporters {
-            reporter.report_panic(report.clone()).await;
+        for (index, reporter) in self.reporters.iter().enumerate() {
+            report_with_panic_boundary("panic", index, reporter.report_panic(report.clone())).await;
         }
     }
 
     pub(crate) async fn report_job_dead_lettered(&self, report: JobDeadLetteredReport) {
-        for reporter in &self.reporters {
-            reporter.report_job_dead_lettered(report.clone()).await;
+        for (index, reporter) in self.reporters.iter().enumerate() {
+            report_with_panic_boundary(
+                "job_dead_lettered",
+                index,
+                reporter.report_job_dead_lettered(report.clone()),
+            )
+            .await;
         }
     }
+}
+
+async fn report_with_panic_boundary<F>(report: &'static str, reporter_index: usize, future: F)
+where
+    F: Future<Output = ()>,
+{
+    let result = ERROR_REPORTER_DELIVERY
+        .scope((), AssertUnwindSafe(future).catch_unwind())
+        .await;
+    if let Err(panic) = result {
+        tracing::warn!(
+            target: "forge::logging::reporter",
+            report = report,
+            reporter_index = reporter_index,
+            panic = %panic_payload_message(panic),
+            "Error reporter panicked"
+        );
+    }
+}
+
+fn error_reporter_delivery_active() -> bool {
+    ERROR_REPORTER_DELIVERY.try_with(|_| ()).is_ok()
+}
+
+tokio::task_local! {
+    static ERROR_REPORTER_DELIVERY: ();
 }
 
 pub(crate) fn mark_handler_error_response(
@@ -185,12 +225,30 @@ pub(crate) async fn report_job_dead_lettered(app: &AppContext, report: JobDeadLe
     registry.report_job_dead_lettered(report).await;
 }
 
+pub(crate) fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 pub(crate) fn set_global_panic_reporters(registry: Arc<ErrorReporterRegistry>) {
     let slot = GLOBAL_PANIC_REPORTERS.get_or_init(|| Mutex::new(None));
     *slot.lock().expect("panic reporter registry lock poisoned") = Some(registry);
 }
 
 pub(crate) fn report_panic_from_hook(message: String, location: String) {
+    if error_reporter_delivery_active() {
+        tracing::warn!(
+            target: "forge::logging::reporter",
+            "Skipping panic reporter delivery while already delivering an error report"
+        );
+        return;
+    }
+
     let registry = GLOBAL_PANIC_REPORTERS
         .get()
         .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
@@ -290,22 +348,66 @@ mod tests {
         }
     }
 
-    fn test_app_with_reporters(reporter: Arc<StubReporter>) -> AppContext {
+    struct RecursivePanicReporter {
+        panic_messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ErrorReporter for RecursivePanicReporter {
+        async fn report_handler_error(&self, _report: HandlerErrorReport) {}
+
+        async fn report_panic(&self, report: PanicReport) {
+            self.panic_messages.lock().unwrap().push(report.message);
+            report_panic_from_hook(
+                "recursive reporter panic".to_string(),
+                "src/tests.rs:2".to_string(),
+            );
+            panic!("recursive reporter explode")
+        }
+
+        async fn report_job_dead_lettered(&self, _report: JobDeadLetteredReport) {}
+    }
+
+    struct PanickingReporter;
+
+    #[async_trait]
+    impl ErrorReporter for PanickingReporter {
+        async fn report_handler_error(&self, _report: HandlerErrorReport) {
+            panic!("handler reporter explode")
+        }
+
+        async fn report_panic(&self, _report: PanicReport) {
+            panic!("panic reporter explode")
+        }
+
+        async fn report_job_dead_lettered(&self, _report: JobDeadLetteredReport) {
+            panic!("dead-letter reporter explode")
+        }
+    }
+
+    fn test_app_with_stub_reporter(reporter: Arc<StubReporter>) -> AppContext {
+        test_app_with_reporters(vec![reporter])
+    }
+
+    fn test_app_with_reporters(reporters: Vec<Arc<dyn ErrorReporter>>) -> AppContext {
         let app = AppContext::new(
             Container::new(),
             ConfigRepository::empty(),
             RuleRegistry::new(),
         )
         .unwrap();
-        let registry = Arc::new(ErrorReporterRegistry::new(vec![reporter]));
+        let registry = Arc::new(ErrorReporterRegistry::new(reporters));
         app.container().singleton_arc(registry).unwrap();
         app
     }
 
+    static GLOBAL_REPORTER_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     #[tokio::test]
     async fn reports_handler_errors_with_origin() {
         let reporter = Arc::new(StubReporter::default());
-        let app = test_app_with_reporters(reporter.clone());
+        let app = test_app_with_stub_reporter(reporter.clone());
         let request = CurrentRequest {
             request_id: Some("req-handler".to_string()),
             ip: Some("203.0.113.5".parse().unwrap()),
@@ -343,6 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_panics_using_execution_context() {
+        let _guard = GLOBAL_REPORTER_TEST_LOCK.lock().await;
         let reporter = Arc::new(StubReporter::default());
         let registry = Arc::new(ErrorReporterRegistry::new(vec![reporter.clone()]));
         set_global_panic_reporters(registry);
@@ -374,9 +477,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn panic_reporter_recursion_is_skipped_during_reporter_delivery() {
+        let _guard = GLOBAL_REPORTER_TEST_LOCK.lock().await;
+        let recursive_messages = Arc::new(Mutex::new(Vec::new()));
+        let later_reporter = Arc::new(StubReporter::default());
+        let registry = Arc::new(ErrorReporterRegistry::new(vec![
+            Arc::new(RecursivePanicReporter {
+                panic_messages: recursive_messages.clone(),
+            }) as Arc<dyn ErrorReporter>,
+            later_reporter.clone() as Arc<dyn ErrorReporter>,
+        ]));
+        set_global_panic_reporters(registry.clone());
+
+        registry
+            .report_panic(PanicReport {
+                message: "outer panic".to_string(),
+                location: "src/tests.rs:1".to_string(),
+                backtrace: None,
+                context: PanicContext::Other,
+            })
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert_eq!(
+            recursive_messages.lock().unwrap().as_slice(),
+            &["outer panic"]
+        );
+        let reports = later_reporter.panic_reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].message, "outer panic");
+    }
+
+    #[tokio::test]
     async fn reports_dead_lettered_jobs() {
         let reporter = Arc::new(StubReporter::default());
-        let app = test_app_with_reporters(reporter.clone());
+        let app = test_app_with_stub_reporter(reporter.clone());
 
         report_job_dead_lettered(
             &app,
@@ -394,5 +529,47 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].job_class, "email.send");
         assert_eq!(reports[0].job_id, "job-1");
+    }
+
+    #[tokio::test]
+    async fn reporter_panics_do_not_block_later_reporters() {
+        let reporter = Arc::new(StubReporter::default());
+        let registry = ErrorReporterRegistry::new(vec![
+            Arc::new(PanickingReporter) as Arc<dyn ErrorReporter>,
+            reporter.clone() as Arc<dyn ErrorReporter>,
+        ]);
+
+        registry
+            .report_handler_error(HandlerErrorReport {
+                method: "GET".to_string(),
+                path: "/boom".to_string(),
+                status: 500,
+                error: "boom".to_string(),
+                chain: Vec::new(),
+                origin: None,
+                request_id: Some("req-reporter-panic".to_string()),
+            })
+            .await;
+        registry
+            .report_panic(PanicReport {
+                message: "panic".to_string(),
+                location: "src/tests.rs:1".to_string(),
+                backtrace: None,
+                context: PanicContext::Other,
+            })
+            .await;
+        registry
+            .report_job_dead_lettered(JobDeadLetteredReport {
+                job_class: "email.send".to_string(),
+                job_id: "job-1".to_string(),
+                attempts: 3,
+                last_error: "boom".to_string(),
+                payload: serde_json::json!({ "email": "hello@example.com" }),
+            })
+            .await;
+
+        assert_eq!(reporter.handler_reports.lock().unwrap().len(), 1);
+        assert_eq!(reporter.panic_reports.lock().unwrap().len(), 1);
+        assert_eq!(reporter.dead_letter_reports.lock().unwrap().len(), 1);
     }
 }

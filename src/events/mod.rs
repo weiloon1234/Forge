@@ -2,14 +2,17 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::IpAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use serde::Serialize;
 
 use crate::auth::Actor;
 use crate::foundation::{AppContext, Error, Result};
 use crate::jobs::Job;
+use crate::logging::panic_payload_message;
 use crate::support::EventId;
 use crate::websocket::ServerMessage;
 
@@ -127,7 +130,23 @@ where
         let event = event
             .downcast_ref::<E>()
             .ok_or_else(|| Error::message(format!("failed to downcast event `{}`", E::ID)))?;
-        self.listener.handle(context, event).await
+        match AssertUnwindSafe(self.listener.handle(context, event))
+            .catch_unwind()
+            .await
+        {
+            Ok(result) => result,
+            Err(panic) => {
+                let message = panic_payload_message(panic);
+                tracing::error!(
+                    event = %E::ID,
+                    panic = %message,
+                    "Event listener panicked"
+                );
+                Err(Error::message(format!(
+                    "event listener panicked: {message}"
+                )))
+            }
+        }
     }
 }
 
@@ -267,6 +286,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -301,6 +321,36 @@ mod tests {
         }
     }
 
+    struct PanicListener {
+        target: Arc<Mutex<Vec<&'static str>>>,
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl EventListener<TestEvent> for PanicListener {
+        async fn handle(&self, _context: &EventContext, _event: &TestEvent) -> crate::Result<()> {
+            self.target.lock().unwrap().push(self.name);
+            panic!("listener explode")
+        }
+    }
+
+    struct PanicOnceListener {
+        panicked: Arc<AtomicBool>,
+        target: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl EventListener<TestEvent> for PanicOnceListener {
+        async fn handle(&self, _context: &EventContext, _event: &TestEvent) -> crate::Result<()> {
+            if !self.panicked.swap(true, Ordering::SeqCst) {
+                panic!("one-time listener explode");
+            }
+
+            self.target.lock().unwrap().push("recovered");
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn dispatches_listeners_in_registration_order() {
         let target = Arc::new(Mutex::new(Vec::new()));
@@ -330,6 +380,79 @@ mod tests {
         bus.dispatch(TestEvent).await.unwrap();
 
         assert_eq!(target.lock().unwrap().as_slice(), ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn listener_panic_becomes_dispatch_error_and_stops_later_listeners() {
+        let target = Arc::new(Mutex::new(Vec::new()));
+        let registry = EventRegistryBuilder::shared();
+        registry
+            .lock()
+            .unwrap()
+            .listen::<TestEvent, _>(PushListener {
+                target: target.clone(),
+                name: "first",
+            });
+        registry
+            .lock()
+            .unwrap()
+            .listen::<TestEvent, _>(PanicListener {
+                target: target.clone(),
+                name: "panic",
+            });
+        registry
+            .lock()
+            .unwrap()
+            .listen::<TestEvent, _>(PushListener {
+                target: target.clone(),
+                name: "after",
+            });
+
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let bus = EventBus::new(app, EventRegistryBuilder::freeze_shared(registry));
+        let error = bus.dispatch(TestEvent).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "event listener panicked: listener explode"
+        );
+        assert_eq!(target.lock().unwrap().as_slice(), ["first", "panic"]);
+    }
+
+    #[tokio::test]
+    async fn bus_remains_healthy_after_caught_listener_panic() {
+        let panicked = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(Vec::new()));
+        let registry = EventRegistryBuilder::shared();
+        registry
+            .lock()
+            .unwrap()
+            .listen::<TestEvent, _>(PanicOnceListener {
+                panicked,
+                target: target.clone(),
+            });
+
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let bus = EventBus::new(app, EventRegistryBuilder::freeze_shared(registry));
+
+        let error = bus.dispatch(TestEvent).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "event listener panicked: one-time listener explode"
+        );
+
+        bus.dispatch(TestEvent).await.unwrap();
+        assert_eq!(target.lock().unwrap().as_slice(), ["recovered"]);
     }
 
     struct OriginListener {

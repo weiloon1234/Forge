@@ -1,18 +1,24 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use futures_util::FutureExt;
+use tokio::task::JoinHandle;
 
 use crate::foundation::shutdown_drain::{
     drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
 };
-use crate::foundation::{AppContext, Result};
-use crate::logging::SchedulerLeadershipState;
-use crate::scheduler::{cron_due, ScheduleKind, ScheduleRegistry, ScheduledTask};
+use crate::foundation::{AppContext, Error, Result};
+use crate::logging::{panic_payload_message, RuntimeDiagnostics, SchedulerLeadershipState};
+use crate::scheduler::{
+    cron_due, ScheduleHandler, ScheduleHook, ScheduleKind, ScheduleOptions, ScheduleRegistry,
+    ScheduledTask,
+};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{DateTime, ScheduleId};
-use tokio::task::JoinHandle;
 
 pub struct SchedulerKernel {
     app: AppContext,
@@ -123,109 +129,34 @@ impl SchedulerKernel {
 
             // Spawn each task independently — no blocking the tick loop
             let diagnostics = self.app.diagnostics().ok();
-            let spawned_id = task_id.clone();
+            let schedule_id = task_id.clone();
+            let panic_schedule_id = schedule_id.clone();
             let handle = tokio::spawn(async move {
-                let task_id = spawned_id;
-                // Overlap prevention via distributed lock (Drop guard releases on panic too)
-                let _lock_guard = if options.without_overlapping {
-                    let lock_key = format!("schedule:{task_id}");
-                    match backend.set_nx_value(&lock_key, "1", 3600).await {
-                        Ok(true) => Some(ScheduleLockGuard {
-                            backend: backend.clone(),
-                            key: lock_key,
-                        }),
-                        Ok(false) => {
-                            tracing::debug!(
-                                target: "forge.scheduler",
-                                schedule = %task_id,
-                                "Skipped (previous invocation still running)"
-                            );
-                            return;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "forge.scheduler",
-                                schedule = %task_id,
-                                error = %e,
-                                "Failed to acquire overlap lock, running anyway"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                // Before hook
-                if let Some(ref before) = options.before_hook {
-                    if let Err(e) = before(app.clone()).await {
-                        tracing::warn!(
-                            target: "forge.scheduler",
-                            schedule = %task_id,
-                            error = %e,
-                            "Before hook failed"
-                        );
-                    }
-                }
-
-                // Execute the task with error isolation
-                let result = crate::logging::scope_current_execution(
+                let result = AssertUnwindSafe(crate::logging::scope_current_execution(
                     crate::logging::ExecutionContext::Scheduler {
-                        id: task_id.to_string(),
+                        id: schedule_id.to_string(),
                     },
-                    handler(app.clone()),
-                )
+                    run_spawned_schedule_task(
+                        schedule_id,
+                        kind_label,
+                        app,
+                        handler,
+                        options,
+                        backend,
+                        diagnostics,
+                    ),
+                ))
+                .catch_unwind()
                 .await;
 
-                match &result {
-                    Ok(()) => {
-                        tracing::info!(
-                            target: "forge.scheduler",
-                            schedule = %task_id,
-                            kind = kind_label,
-                            "Schedule executed"
-                        );
-                        if let Some(ref diagnostics) = diagnostics {
-                            diagnostics.record_schedule_executed();
-                        }
-
-                        // After hook (success)
-                        if let Some(ref after) = options.after_hook {
-                            if let Err(e) = after(app.clone()).await {
-                                tracing::warn!(
-                                    target: "forge.scheduler",
-                                    schedule = %task_id,
-                                    error = %e,
-                                    "After hook failed"
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            target: "forge.scheduler",
-                            schedule = %task_id,
-                            kind = kind_label,
-                            error = %error,
-                            "Schedule failed"
-                        );
-
-                        // On failure hook
-                        if let Some(ref on_failure) = options.on_failure {
-                            if let Err(e) = on_failure(app.clone()).await {
-                                tracing::warn!(
-                                    target: "forge.scheduler",
-                                    schedule = %task_id,
-                                    error = %e,
-                                    "On-failure hook failed"
-                                );
-                            }
-                        }
-                    }
+                if let Err(panic) = result {
+                    tracing::error!(
+                        target: "forge.scheduler",
+                        schedule = %panic_schedule_id,
+                        panic = %panic_payload_message(panic),
+                        "Schedule task panicked outside scheduler execution boundary"
+                    );
                 }
-
-                // _lock_guard releases via Drop (safe on panic too)
-                drop(_lock_guard);
             });
             self.track_active_task(handle);
 
@@ -379,6 +310,123 @@ impl SchedulerKernel {
     }
 }
 
+async fn run_spawned_schedule_task(
+    task_id: ScheduleId,
+    kind_label: &'static str,
+    app: AppContext,
+    handler: ScheduleHandler,
+    options: ScheduleOptions,
+    backend: RuntimeBackend,
+    diagnostics: Option<Arc<RuntimeDiagnostics>>,
+) {
+    let _lock_guard = if options.without_overlapping {
+        let lock_key = format!("schedule:{task_id}");
+        match backend.set_nx_value(&lock_key, "1", 3600).await {
+            Ok(true) => Some(ScheduleLockGuard {
+                backend: backend.clone(),
+                key: lock_key,
+            }),
+            Ok(false) => {
+                tracing::debug!(
+                    target: "forge.scheduler",
+                    schedule = %task_id,
+                    "Skipped (previous invocation still running)"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "forge.scheduler",
+                    schedule = %task_id,
+                    error = %error,
+                    "Failed to acquire overlap lock, running anyway"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref before) = options.before_hook {
+        run_schedule_hook(&task_id, &app, "before", before).await;
+    }
+
+    let result = run_schedule_handler(&app, &handler).await;
+
+    match &result {
+        Ok(()) => {
+            tracing::info!(
+                target: "forge.scheduler",
+                schedule = %task_id,
+                kind = kind_label,
+                "Schedule executed"
+            );
+            if let Some(ref diagnostics) = diagnostics {
+                diagnostics.record_schedule_executed();
+            }
+
+            if let Some(ref after) = options.after_hook {
+                run_schedule_hook(&task_id, &app, "after", after).await;
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "forge.scheduler",
+                schedule = %task_id,
+                kind = kind_label,
+                error = %error,
+                "Schedule failed"
+            );
+
+            if let Some(ref on_failure) = options.on_failure {
+                run_schedule_hook(&task_id, &app, "on_failure", on_failure).await;
+            }
+        }
+    }
+
+    drop(_lock_guard);
+}
+
+async fn run_schedule_handler(app: &AppContext, handler: &ScheduleHandler) -> Result<()> {
+    match AssertUnwindSafe(handler(app.clone())).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(Error::message(format!(
+            "schedule panicked: {}",
+            panic_payload_message(panic)
+        ))),
+    }
+}
+
+async fn run_schedule_hook(
+    task_id: &ScheduleId,
+    app: &AppContext,
+    hook: &'static str,
+    callback: &ScheduleHook,
+) {
+    match AssertUnwindSafe(callback(app.clone())).catch_unwind().await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "forge.scheduler",
+                schedule = %task_id,
+                hook = hook,
+                error = %error,
+                "Schedule hook failed"
+            );
+        }
+        Err(panic) => {
+            tracing::warn!(
+                target: "forge.scheduler",
+                schedule = %task_id,
+                hook = hook,
+                panic = %panic_payload_message(panic),
+                "Schedule hook panicked"
+            );
+        }
+    }
+}
+
 impl Drop for SchedulerKernel {
     fn drop(&mut self) {
         let backend = self.backend.clone();
@@ -477,11 +525,58 @@ impl Drop for ScheduleLockGuard {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
     use tempfile::tempdir;
+
+    use crate::foundation::Error;
+    use crate::logging::ExecutionContext;
+    use crate::scheduler::{CronExpression, ScheduleOptions};
+    use crate::support::runtime::RuntimeBackend;
+    use crate::support::{DateTime, ScheduleId};
+
+    fn panic_result(message: &'static str) -> crate::Result<()> {
+        panic!("{message}")
+    }
+
+    async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+        for _ in 0..100 {
+            if counter.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "counter did not reach {expected}; latest={}",
+            counter.load(Ordering::SeqCst)
+        );
+    }
+
+    async fn wait_for_flag(flag: &AtomicBool) {
+        for _ in 0..100 {
+            if flag.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("flag was not set");
+    }
+
+    async fn wait_for_missing_key(backend: &RuntimeBackend, key: &str) {
+        for _ in 0..100 {
+            if !backend.key_exists(key).await.unwrap() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("key `{key}` was not released");
+    }
+
+    fn schedule_time(value: &str) -> DateTime {
+        DateTime::parse(value).unwrap()
+    }
 
     #[tokio::test]
     async fn scheduler_run_exits_when_shutdown_future_completes() {
@@ -542,5 +637,343 @@ mod tests {
             .unwrap();
 
         assert!(!completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn panicking_schedule_handler_runs_failure_path_without_success_diagnostics() {
+        let failure_count = Arc::new(AtomicUsize::new(0));
+        let schedule_failure_count = failure_count.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let failure_count = schedule_failure_count.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.panic.failure"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().on_failure(move |_| {
+                        let failure_count = failure_count.clone();
+                        async move {
+                            failure_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    }),
+                    |_| async { panic_result("schedule explode") },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        let executed = kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        assert_eq!(executed, vec![ScheduleId::new("scheduler.panic.failure")]);
+        wait_for_count(&failure_count, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_schedule_does_not_stop_other_due_schedules() {
+        let failure_count = Arc::new(AtomicUsize::new(0));
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let schedule_failure_count = failure_count.clone();
+        let schedule_success_count = success_count.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let failure_count = schedule_failure_count.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.panic.first"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().on_failure(move |_| {
+                        let failure_count = failure_count.clone();
+                        async move {
+                            failure_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    }),
+                    |_| async { panic_result("first schedule explode") },
+                )?;
+
+                let success_count = schedule_success_count.clone();
+                registry.cron(
+                    ScheduleId::new("scheduler.success.second"),
+                    CronExpression::every_minute()?,
+                    move |_| {
+                        let success_count = success_count.clone();
+                        async move {
+                            success_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        let executed = kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            executed,
+            vec![
+                ScheduleId::new("scheduler.panic.first"),
+                ScheduleId::new("scheduler.success.second")
+            ]
+        );
+        wait_for_count(&failure_count, 1).await;
+        wait_for_count(&success_count, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn before_hook_panic_isolated_and_handler_still_runs() {
+        let handled = Arc::new(AtomicUsize::new(0));
+        let schedule_handled = handled.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let handled = schedule_handled.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.before.panic"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().before(|_| async { panic_result("before explode") }),
+                    move |_| {
+                        let handled = handled.clone();
+                        async move {
+                            handled.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        wait_for_count(&handled, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn after_hook_panic_isolated_after_success_diagnostics() {
+        let handled = Arc::new(AtomicUsize::new(0));
+        let after_entered = Arc::new(AtomicUsize::new(0));
+        let schedule_handled = handled.clone();
+        let schedule_after_entered = after_entered.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let handled = schedule_handled.clone();
+                let after_entered = schedule_after_entered.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.after.panic"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().after(move |_| {
+                        let after_entered = after_entered.clone();
+                        async move {
+                            after_entered.fetch_add(1, Ordering::SeqCst);
+                            panic_result("after explode")
+                        }
+                    }),
+                    move |_| {
+                        let handled = handled.clone();
+                        async move {
+                            handled.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        wait_for_count(&handled, 1).await;
+        wait_for_count(&after_entered, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn on_failure_hook_panic_isolated_after_handler_failure() {
+        let failure_hook_entered = Arc::new(AtomicUsize::new(0));
+        let schedule_failure_hook_entered = failure_hook_entered.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let failure_hook_entered = schedule_failure_hook_entered.clone();
+                registry.cron_with_options(
+                    ScheduleId::new("scheduler.failure-hook.panic"),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new().on_failure(move |_| {
+                        let failure_hook_entered = failure_hook_entered.clone();
+                        async move {
+                            failure_hook_entered.fetch_add(1, Ordering::SeqCst);
+                            panic_result("failure hook explode")
+                        }
+                    }),
+                    |_| async { Err(Error::message("handler failed")) },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        wait_for_count(&failure_hook_entered, 1).await;
+        kernel.prune_finished_tasks().await;
+        assert_eq!(
+            kernel
+                .app()
+                .diagnostics()
+                .unwrap()
+                .snapshot()
+                .scheduler
+                .executed_schedules_total,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn overlap_lock_releases_after_schedule_handler_panic() {
+        let failure_count = Arc::new(AtomicUsize::new(0));
+        let schedule_failure_count = failure_count.clone();
+        let schedule_id = ScheduleId::new("scheduler.overlap.panic");
+        let lock_key = format!("schedule:{schedule_id}");
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let failure_count = schedule_failure_count.clone();
+                registry.cron_with_options(
+                    schedule_id.clone(),
+                    CronExpression::every_minute()?,
+                    ScheduleOptions::new()
+                        .without_overlapping()
+                        .on_failure(move |_| {
+                            let failure_count = failure_count.clone();
+                            async move {
+                                failure_count.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            }
+                        }),
+                    |_| async { panic_result("overlap panic") },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+        let backend = kernel.app().resolve::<RuntimeBackend>().unwrap();
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+        wait_for_count(&failure_count, 1).await;
+        wait_for_missing_key(&backend, &lock_key).await;
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:01:00Z"))
+            .await
+            .unwrap();
+        wait_for_count(&failure_count, 2).await;
+        kernel.prune_finished_tasks().await;
+    }
+
+    #[tokio::test]
+    async fn scheduler_execution_context_is_scoped_for_schedule_lifecycle() {
+        let saw_context = Arc::new(AtomicBool::new(false));
+        let schedule_saw_context = saw_context.clone();
+        let kernel = crate::App::builder()
+            .register_schedule(move |registry| {
+                let saw_context = schedule_saw_context.clone();
+                registry.cron(
+                    ScheduleId::new("scheduler.context.visible"),
+                    CronExpression::every_minute()?,
+                    move |_| {
+                        let saw_context = saw_context.clone();
+                        async move {
+                            if matches!(
+                                crate::logging::current_execution(),
+                                Some(ExecutionContext::Scheduler { id })
+                                    if id == "scheduler.context.visible"
+                            ) {
+                                saw_context.store(true, Ordering::SeqCst);
+                            }
+                            Ok(())
+                        }
+                    },
+                )?;
+                Ok(())
+            })
+            .build_scheduler_kernel()
+            .await
+            .unwrap();
+
+        kernel
+            .tick_at(schedule_time("2026-04-08T12:00:00Z"))
+            .await
+            .unwrap();
+
+        wait_for_flag(&saw_context).await;
+        kernel.prune_finished_tasks().await;
     }
 }

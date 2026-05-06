@@ -54,8 +54,8 @@ pub(crate) use middleware::{request_context_middleware, request_origin_middlewar
 pub(crate) use observability::register_observability_routes;
 pub(crate) use observability::{register_openapi_route, set_openapi_spec};
 pub(crate) use reporter::{
-    mark_handler_error_response, report_handler_error_response, set_global_panic_reporters,
-    ErrorReporterJobMiddleware, ErrorReporterRegistry,
+    mark_handler_error_response, panic_payload_message, report_handler_error_response,
+    set_global_panic_reporters, ErrorReporterJobMiddleware, ErrorReporterRegistry,
 };
 
 /// Timer that formats timestamps using the framework's configured timezone.

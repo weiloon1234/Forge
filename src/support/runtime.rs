@@ -643,6 +643,7 @@ pub(crate) struct MemoryBatchMeta {
     pub completed: u64,
     pub on_complete_job: Option<String>,
     pub on_complete_queue: Option<String>,
+    pub on_complete_dispatched: bool,
 }
 
 pub(crate) struct MemoryRuntime {

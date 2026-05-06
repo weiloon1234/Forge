@@ -71,14 +71,6 @@ end
 return 0
 "#;
 
-const ACK_JOB_SCRIPT: &str = r#"
-if redis.call('ZREM', KEYS[1], ARGV[1]) == 0 then
-  return 0
-end
-redis.call('HDEL', KEYS[2], ARGV[1])
-return 1
-"#;
-
 const RETRY_JOB_SCRIPT: &str = r#"
 if redis.call('ZREM', KEYS[1], ARGV[1]) == 0 then
   return 0
@@ -98,11 +90,129 @@ redis.call('RPUSH', KEYS[3], ARGV[2])
 return 1
 "#;
 
+const COMPLETE_SUCCESSFUL_JOB_SCRIPT: &str = r#"
+local function namespaced(suffix)
+  if ARGV[1] == '' then
+    return suffix
+  end
+  return ARGV[1] .. ':' .. suffix
+end
+
+if redis.call('ZREM', KEYS[1], ARGV[2]) == 0 then
+  return {0, 0, 0, 0, 0, 0}
+end
+redis.call('HDEL', KEYS[2], ARGV[2])
+
+local chain_enqueued = 0
+if ARGV[3] ~= '' then
+  local chain_queue = ARGV[5]
+  redis.call('HSET', namespaced('jobs:payload:' .. chain_queue), ARGV[3], ARGV[4])
+  redis.call('RPUSH', namespaced('jobs:ready:' .. chain_queue), ARGV[3])
+  chain_enqueued = 1
+end
+
+local batch_found = 0
+local batch_completed = 0
+local batch_total = 0
+local batch_callback_enqueued = 0
+if ARGV[6] ~= '' then
+  local batch_key = namespaced('jobs:batch:' .. ARGV[6])
+  local total = redis.call('HGET', batch_key, 'total')
+  if total then
+    batch_found = 1
+    batch_total = tonumber(total) or 0
+    batch_completed = redis.call('HINCRBY', batch_key, 'completed', 1)
+
+    local callback_payload = redis.call('HGET', batch_key, 'on_complete_payload') or ''
+    local callback_dispatched = redis.call('HGET', batch_key, 'on_complete_dispatched') or '0'
+    if batch_total > 0
+      and batch_completed >= batch_total
+      and callback_payload ~= ''
+      and callback_dispatched ~= '1'
+      and ARGV[8] ~= ''
+    then
+      local callback_queue = redis.call('HGET', batch_key, 'on_complete_queue') or ARGV[7]
+      if callback_queue == '' then
+        callback_queue = ARGV[7]
+      end
+      redis.call('HSET', namespaced('jobs:payload:' .. callback_queue), ARGV[8], callback_payload)
+      redis.call('RPUSH', namespaced('jobs:ready:' .. callback_queue), ARGV[8])
+      redis.call('HSET', batch_key, 'on_complete_dispatched', '1')
+      batch_callback_enqueued = 1
+    end
+  end
+end
+
+return {1, chain_enqueued, batch_found, batch_completed, batch_total, batch_callback_enqueued}
+"#;
+
+const DISPATCH_BATCH_SCRIPT: &str = r#"
+local function namespaced(suffix)
+  if ARGV[1] == '' then
+    return suffix
+  end
+  return ARGV[1] .. ':' .. suffix
+end
+
+local batch_id = ARGV[2]
+local total = tonumber(ARGV[3]) or 0
+local batch_key = namespaced('jobs:batch:' .. batch_id)
+redis.call('HSET', batch_key, 'total', total, 'completed', '0', 'on_complete_dispatched', '0')
+if ARGV[4] ~= '' then
+  redis.call('HSET', batch_key, 'on_complete_payload', ARGV[4])
+end
+if ARGV[5] ~= '' then
+  redis.call('HSET', batch_key, 'on_complete_queue', ARGV[5])
+end
+redis.call('EXPIRE', batch_key, 86400)
+
+local count = tonumber(ARGV[6]) or 0
+local index = 7
+for _ = 1, count do
+  local queue = ARGV[index]
+  local token = ARGV[index + 1]
+  local payload = ARGV[index + 2]
+  redis.call('HSET', namespaced('jobs:payload:' .. queue), token, payload)
+  redis.call('RPUSH', namespaced('jobs:ready:' .. queue), token)
+  index = index + 3
+end
+
+return count
+"#;
+
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedJobLease {
     pub queue: QueueId,
     pub token: String,
     pub payload: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct JobToEnqueue {
+    pub queue: QueueId,
+    pub token: String,
+    pub payload: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SuccessfulJobEffects {
+    pub chain: Option<JobToEnqueue>,
+    pub batch_id: Option<String>,
+    pub batch_callback_token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SuccessfulJobCompletion {
+    pub lease_released: bool,
+    pub chain_enqueued: bool,
+    pub batch: Option<BatchCompletion>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BatchCompletion {
+    pub completed: u64,
+    pub total: u64,
+    pub on_complete_enqueued: bool,
 }
 
 impl RuntimeBackend {
@@ -190,13 +300,6 @@ impl RuntimeBackend {
         }
     }
 
-    pub(crate) async fn ack_job(&self, queue: &QueueId, token: &str) -> Result<bool> {
-        match self {
-            Self::Redis(runtime) => ack_job_redis(runtime, queue, token).await,
-            Self::Memory(runtime) => ack_job_memory(runtime, queue, token).await,
-        }
-    }
-
     pub(crate) async fn retry_job(
         &self,
         queue: &QueueId,
@@ -227,46 +330,51 @@ impl RuntimeBackend {
         }
     }
 
-    /// Create batch metadata. Returns nothing; the batch_id is caller-generated.
-    pub(crate) async fn create_batch(
+    pub(crate) async fn complete_successful_job(
         &self,
-        batch_id: &str,
-        total: u64,
-        on_complete_payload: Option<&str>,
-        on_complete_queue: Option<&str>,
-    ) -> Result<()> {
+        queue: &QueueId,
+        token: &str,
+        default_queue: &QueueId,
+        effects: SuccessfulJobEffects,
+    ) -> Result<SuccessfulJobCompletion> {
         match self {
             Self::Redis(runtime) => {
-                create_batch_redis(
-                    runtime,
-                    batch_id,
-                    total,
-                    on_complete_payload,
-                    on_complete_queue,
-                )
-                .await
+                complete_successful_job_redis(runtime, queue, token, default_queue, effects).await
             }
             Self::Memory(runtime) => {
-                create_batch_memory(
-                    runtime,
-                    batch_id,
-                    total,
-                    on_complete_payload,
-                    on_complete_queue,
-                )
-                .await
+                complete_successful_job_memory(runtime, queue, token, default_queue, effects).await
             }
         }
     }
 
-    /// Increment completed count for a batch. Returns `(completed, total, on_complete_payload, on_complete_queue)`.
-    pub(crate) async fn increment_batch_completed(
+    pub(crate) async fn dispatch_batch(
         &self,
         batch_id: &str,
-    ) -> Result<(u64, u64, Option<String>, Option<String>)> {
+        on_complete_payload: Option<&str>,
+        on_complete_queue: Option<&str>,
+        jobs: Vec<JobToEnqueue>,
+    ) -> Result<usize> {
         match self {
-            Self::Redis(runtime) => increment_batch_completed_redis(runtime, batch_id).await,
-            Self::Memory(runtime) => increment_batch_completed_memory(runtime, batch_id).await,
+            Self::Redis(runtime) => {
+                dispatch_batch_redis(
+                    runtime,
+                    batch_id,
+                    on_complete_payload,
+                    on_complete_queue,
+                    jobs,
+                )
+                .await
+            }
+            Self::Memory(runtime) => {
+                dispatch_batch_memory(
+                    runtime,
+                    batch_id,
+                    on_complete_payload,
+                    on_complete_queue,
+                    jobs,
+                )
+                .await
+            }
         }
     }
 
@@ -490,24 +598,6 @@ async fn renew_job_lease_redis(
     Ok(renewed == 1)
 }
 
-async fn ack_job_redis(runtime: &RedisRuntime, queue: &QueueId, token: &str) -> Result<bool> {
-    let mut conn = runtime
-        .client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(Error::other)?;
-    let acknowledged: i64 = ::redis::cmd("EVAL")
-        .arg(ACK_JOB_SCRIPT)
-        .arg(2)
-        .arg(leased_key(runtime, queue))
-        .arg(payload_key(runtime, queue))
-        .arg(token)
-        .query_async(&mut conn)
-        .await
-        .map_err(Error::other)?;
-    Ok(acknowledged == 1)
-}
-
 async fn retry_job_redis(
     runtime: &RedisRuntime,
     queue: &QueueId,
@@ -560,6 +650,71 @@ async fn dead_letter_job_redis(
         .await
         .map_err(Error::other)?;
     Ok(dead_lettered == 1)
+}
+
+async fn complete_successful_job_redis(
+    runtime: &RedisRuntime,
+    queue: &QueueId,
+    token: &str,
+    default_queue: &QueueId,
+    effects: SuccessfulJobEffects,
+) -> Result<SuccessfulJobCompletion> {
+    let chain_token = effects
+        .chain
+        .as_ref()
+        .map(|job| job.token.as_str())
+        .unwrap_or("");
+    let chain_payload = effects
+        .chain
+        .as_ref()
+        .map(|job| job.payload.as_str())
+        .unwrap_or("");
+    let chain_queue = effects
+        .chain
+        .as_ref()
+        .map(|job| job.queue.as_str())
+        .unwrap_or("");
+    let batch_id = effects.batch_id.as_deref().unwrap_or("");
+    let batch_callback_token = effects.batch_callback_token.as_deref().unwrap_or("");
+
+    let mut conn = runtime
+        .client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(Error::other)?;
+    let result: Vec<i64> = ::redis::cmd("EVAL")
+        .arg(COMPLETE_SUCCESSFUL_JOB_SCRIPT)
+        .arg(2)
+        .arg(leased_key(runtime, queue))
+        .arg(payload_key(runtime, queue))
+        .arg(&runtime.namespace)
+        .arg(token)
+        .arg(chain_token)
+        .arg(chain_payload)
+        .arg(chain_queue)
+        .arg(batch_id)
+        .arg(default_queue.as_str())
+        .arg(batch_callback_token)
+        .query_async(&mut conn)
+        .await
+        .map_err(Error::other)?;
+
+    let lease_released = result.first().copied().unwrap_or(0) == 1;
+    let batch = if result.get(2).copied().unwrap_or(0) == 1 {
+        Some(BatchCompletion {
+            completed: result.get(3).copied().unwrap_or(0).max(0) as u64,
+            total: result.get(4).copied().unwrap_or(0).max(0) as u64,
+            on_complete_enqueued: result.get(5).copied().unwrap_or(0) == 1,
+        })
+    } else {
+        None
+    };
+
+    Ok(SuccessfulJobCompletion {
+        lease_released,
+        chain_enqueued: result.get(1).copied().unwrap_or(0) == 1,
+        batch,
+    })
 }
 
 async fn enqueue_job_memory(
@@ -777,21 +932,6 @@ async fn renew_job_lease_memory(
     Ok(false)
 }
 
-async fn ack_job_memory(runtime: &MemoryRuntime, queue: &QueueId, token: &str) -> Result<bool> {
-    let mut leased = runtime.leased_jobs.lock().await;
-    let mut removed = false;
-    if let Some(items) = leased.get_mut(queue) {
-        let before = items.len();
-        items.retain(|item| item.token != token);
-        removed = items.len() != before;
-    }
-    drop(leased);
-    if removed {
-        runtime.payloads.lock().await.remove(token);
-    }
-    Ok(removed)
-}
-
 async fn retry_job_memory(
     runtime: &MemoryRuntime,
     queue: &QueueId,
@@ -844,6 +984,95 @@ async fn dead_letter_job_memory(
     Ok(true)
 }
 
+async fn complete_successful_job_memory(
+    runtime: &MemoryRuntime,
+    queue: &QueueId,
+    token: &str,
+    default_queue: &QueueId,
+    effects: SuccessfulJobEffects,
+) -> Result<SuccessfulJobCompletion> {
+    let mut leased = runtime.leased_jobs.lock().await;
+    let mut released = false;
+    if let Some(items) = leased.get_mut(queue) {
+        let before = items.len();
+        items.retain(|item| item.token != token);
+        released = items.len() != before;
+    }
+    if !released {
+        return Ok(SuccessfulJobCompletion {
+            lease_released: false,
+            chain_enqueued: false,
+            batch: None,
+        });
+    }
+
+    let mut payloads = runtime.payloads.lock().await;
+    payloads.remove(token);
+
+    let mut batch = None;
+    let mut callback_job = None;
+    if let Some(batch_id) = effects.batch_id.as_deref() {
+        let mut batches = runtime.batches.lock().await;
+        if let Some(meta) = batches.get_mut(batch_id) {
+            meta.completed += 1;
+            let should_enqueue_callback = meta.total > 0
+                && meta.completed >= meta.total
+                && meta.on_complete_job.is_some()
+                && !meta.on_complete_dispatched;
+            if should_enqueue_callback {
+                if let (Some(payload), Some(token)) = (
+                    meta.on_complete_job.clone(),
+                    effects.batch_callback_token.as_deref(),
+                ) {
+                    let queue = meta
+                        .on_complete_queue
+                        .as_deref()
+                        .map(QueueId::owned)
+                        .unwrap_or_else(|| default_queue.clone());
+                    callback_job = Some(JobToEnqueue {
+                        queue,
+                        token: token.to_string(),
+                        payload,
+                    });
+                    meta.on_complete_dispatched = true;
+                }
+            }
+            batch = Some(BatchCompletion {
+                completed: meta.completed,
+                total: meta.total,
+                on_complete_enqueued: callback_job.is_some(),
+            });
+        }
+    }
+
+    let chain_enqueued = effects.chain.is_some();
+    let mut ready = runtime.ready_queues.lock().await;
+    if let Some(chain) = effects.chain {
+        payloads.insert(chain.token.clone(), chain.payload);
+        ready.entry(chain.queue).or_default().push_back(chain.token);
+    }
+    if let Some(callback) = callback_job {
+        payloads.insert(callback.token.clone(), callback.payload);
+        ready
+            .entry(callback.queue)
+            .or_default()
+            .push_back(callback.token);
+    }
+    drop(ready);
+    drop(payloads);
+    drop(leased);
+
+    if chain_enqueued || batch.as_ref().is_some_and(|b| b.on_complete_enqueued) {
+        runtime.notify.notify_waiters();
+    }
+
+    Ok(SuccessfulJobCompletion {
+        lease_released: true,
+        chain_enqueued,
+        batch,
+    })
+}
+
 async fn ack_like_memory(runtime: &MemoryRuntime, queue: &QueueId, token: &str) -> Result<bool> {
     let mut leased = runtime.leased_jobs.lock().await;
     let mut removed = false;
@@ -859,130 +1088,74 @@ async fn ack_like_memory(runtime: &MemoryRuntime, queue: &QueueId, token: &str) 
     Ok(removed)
 }
 
-// ---------------------------------------------------------------------------
-// Batch tracking — Redis
-// ---------------------------------------------------------------------------
-
-fn batch_key(runtime: &RedisRuntime, batch_id: &str) -> String {
-    namespaced_value(&runtime.namespace, &format!("jobs:batch:{batch_id}"))
-}
-
-const CREATE_BATCH_SCRIPT: &str = r#"
-redis.call('HSET', KEYS[1], 'total', ARGV[1], 'completed', '0')
-if ARGV[2] ~= '' then
-  redis.call('HSET', KEYS[1], 'on_complete_payload', ARGV[2])
-end
-if ARGV[3] ~= '' then
-  redis.call('HSET', KEYS[1], 'on_complete_queue', ARGV[3])
-end
-redis.call('EXPIRE', KEYS[1], 86400)
-return 1
-"#;
-
-const INCREMENT_BATCH_SCRIPT: &str = r#"
-local completed = redis.call('HINCRBY', KEYS[1], 'completed', 1)
-local total = tonumber(redis.call('HGET', KEYS[1], 'total'))
-local payload = redis.call('HGET', KEYS[1], 'on_complete_payload') or ''
-local queue = redis.call('HGET', KEYS[1], 'on_complete_queue') or ''
-return {completed, total, payload, queue}
-"#;
-
-async fn create_batch_redis(
+async fn dispatch_batch_redis(
     runtime: &RedisRuntime,
     batch_id: &str,
-    total: u64,
     on_complete_payload: Option<&str>,
     on_complete_queue: Option<&str>,
-) -> Result<()> {
+    jobs: Vec<JobToEnqueue>,
+) -> Result<usize> {
+    let job_count = jobs.len();
     let mut conn = runtime
         .client
         .get_multiplexed_async_connection()
         .await
         .map_err(Error::other)?;
-    let _: i64 = ::redis::cmd("EVAL")
-        .arg(CREATE_BATCH_SCRIPT)
-        .arg(1)
-        .arg(batch_key(runtime, batch_id))
-        .arg(total)
+    let mut command = ::redis::cmd("EVAL");
+    command
+        .arg(DISPATCH_BATCH_SCRIPT)
+        .arg(0)
+        .arg(&runtime.namespace)
+        .arg(batch_id)
+        .arg(job_count as i64)
         .arg(on_complete_payload.unwrap_or(""))
         .arg(on_complete_queue.unwrap_or(""))
-        .query_async(&mut conn)
-        .await
-        .map_err(Error::other)?;
-    Ok(())
+        .arg(job_count as i64);
+    for job in jobs {
+        command
+            .arg(job.queue.as_str())
+            .arg(job.token)
+            .arg(job.payload);
+    }
+    let enqueued: i64 = command.query_async(&mut conn).await.map_err(Error::other)?;
+    Ok(enqueued.max(0) as usize)
 }
 
-async fn increment_batch_completed_redis(
-    runtime: &RedisRuntime,
-    batch_id: &str,
-) -> Result<(u64, u64, Option<String>, Option<String>)> {
-    let mut conn = runtime
-        .client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(Error::other)?;
-    let result: Vec<String> = ::redis::cmd("EVAL")
-        .arg(INCREMENT_BATCH_SCRIPT)
-        .arg(1)
-        .arg(batch_key(runtime, batch_id))
-        .query_async(&mut conn)
-        .await
-        .map_err(Error::other)?;
-
-    let completed = result
-        .first()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
-    let total = result
-        .get(1)
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
-    let payload = result.get(2).filter(|s| !s.is_empty()).cloned();
-    let queue = result.get(3).filter(|s| !s.is_empty()).cloned();
-    Ok((completed, total, payload, queue))
-}
-
-// ---------------------------------------------------------------------------
-// Batch tracking — Memory
-// ---------------------------------------------------------------------------
-
-async fn create_batch_memory(
+async fn dispatch_batch_memory(
     runtime: &MemoryRuntime,
     batch_id: &str,
-    total: u64,
     on_complete_payload: Option<&str>,
     on_complete_queue: Option<&str>,
-) -> Result<()> {
+    jobs: Vec<JobToEnqueue>,
+) -> Result<usize> {
     use crate::support::runtime::MemoryBatchMeta;
+    let total = jobs.len();
+    let mut payloads = runtime.payloads.lock().await;
     let mut batches = runtime.batches.lock().await;
+    let mut ready = runtime.ready_queues.lock().await;
     batches.insert(
         batch_id.to_string(),
         MemoryBatchMeta {
-            total,
+            total: total as u64,
             completed: 0,
             on_complete_job: on_complete_payload.map(|s| s.to_string()),
             on_complete_queue: on_complete_queue.map(|s| s.to_string()),
+            on_complete_dispatched: false,
         },
     );
-    Ok(())
-}
+    for job in jobs {
+        payloads.insert(job.token.clone(), job.payload);
+        ready.entry(job.queue).or_default().push_back(job.token);
+    }
+    drop(ready);
+    drop(batches);
+    drop(payloads);
 
-async fn increment_batch_completed_memory(
-    runtime: &MemoryRuntime,
-    batch_id: &str,
-) -> Result<(u64, u64, Option<String>, Option<String>)> {
-    let mut batches = runtime.batches.lock().await;
-    let meta = batches
-        .get_mut(batch_id)
-        .ok_or_else(|| Error::message(format!("batch `{batch_id}` not found")))?;
-    meta.completed += 1;
-    let result = (
-        meta.completed,
-        meta.total,
-        meta.on_complete_job.clone(),
-        meta.on_complete_queue.clone(),
-    );
-    Ok(result)
+    if total > 0 {
+        runtime.notify.notify_waiters();
+    }
+
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -996,7 +1169,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::RuntimeBackend;
+    use super::{JobToEnqueue, RuntimeBackend, SuccessfulJobEffects};
     use crate::support::runtime::{LeasedJobToken, MemoryRuntime, ScheduledJobToken};
     use crate::support::QueueId;
 
@@ -1008,7 +1181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_backend_claims_and_acks_leased_jobs() {
+    async fn memory_backend_claims_and_completes_leased_jobs() {
         let backend = RuntimeBackend::memory("job-backend-ack");
         let queue = QueueId::new("default");
         backend
@@ -1024,12 +1197,99 @@ mod tests {
         assert_eq!(claimed.queue, queue);
         assert_eq!(claimed.token, "token-1");
 
-        assert!(backend.ack_job(&queue, "token-1").await.unwrap());
+        let completed = backend
+            .complete_successful_job(&queue, "token-1", &queue, SuccessfulJobEffects::default())
+            .await
+            .unwrap();
+        assert!(completed.lease_released);
         assert!(backend
             .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_backend_dispatch_batch_enqueues_all_jobs_with_callback_metadata() {
+        let backend = RuntimeBackend::memory("job-backend-dispatch-batch");
+        let queue = QueueId::new("default");
+        let batch_id = "batch-atomic";
+
+        let enqueued = backend
+            .dispatch_batch(
+                batch_id,
+                Some("{\"job\":\"callback\"}"),
+                Some(queue.as_str()),
+                vec![
+                    JobToEnqueue {
+                        queue: queue.clone(),
+                        token: "token-1".to_string(),
+                        payload: "{\"job\":\"one\"}".to_string(),
+                    },
+                    JobToEnqueue {
+                        queue: queue.clone(),
+                        token: "token-2".to_string(),
+                        payload: "{\"job\":\"two\"}".to_string(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(enqueued, 2);
+
+        let first = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.token, "token-1");
+        let first_complete = backend
+            .complete_successful_job(
+                &queue,
+                &first.token,
+                &queue,
+                SuccessfulJobEffects {
+                    batch_id: Some(batch_id.to_string()),
+                    batch_callback_token: Some("callback-token-1".to_string()),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(first_complete.lease_released);
+        assert_eq!(first_complete.batch.unwrap().completed, 1);
+
+        let second = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.token, "token-2");
+        let second_complete = backend
+            .complete_successful_job(
+                &queue,
+                &second.token,
+                &queue,
+                SuccessfulJobEffects {
+                    batch_id: Some(batch_id.to_string()),
+                    batch_callback_token: Some("callback-token-2".to_string()),
+                    ..SuccessfulJobEffects::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batch = second_complete.batch.unwrap();
+        assert_eq!(batch.completed, 2);
+        assert_eq!(batch.total, 2);
+        assert!(batch.on_complete_enqueued);
+
+        let callback = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback.token, "callback-token-2");
+        assert_eq!(callback.payload, "{\"job\":\"callback\"}");
     }
 
     #[tokio::test]
@@ -1137,7 +1397,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(claimed.token, "token-1");
-        assert!(backend.ack_job(&queue, "token-1").await.unwrap());
+        let completed = backend
+            .complete_successful_job(&queue, "token-1", &queue, SuccessfulJobEffects::default())
+            .await
+            .unwrap();
+        assert!(completed.lease_released);
 
         assert!(backend
             .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))

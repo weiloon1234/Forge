@@ -487,7 +487,6 @@ mod tests {
             }) as Arc<dyn ErrorReporter>,
             later_reporter.clone() as Arc<dyn ErrorReporter>,
         ]));
-        set_global_panic_reporters(registry.clone());
 
         registry
             .report_panic(PanicReport {

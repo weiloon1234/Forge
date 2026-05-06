@@ -1,13 +1,16 @@
+use std::panic::AssertUnwindSafe;
+
 use axum::extract::{Request, State};
 use axum::http::header::HeaderName;
 use axum::http::HeaderValue;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt;
 use tracing::Instrument;
 
 use super::context::CurrentRequest;
 use super::request_id::{generate_request_id, RequestId, REQUEST_ID_HEADER};
-use super::scope_current_request;
+use super::{panic_payload_message, scope_current_request};
 use crate::foundation::AppContext;
 
 pub(crate) async fn request_context_middleware(
@@ -48,13 +51,27 @@ pub(crate) async fn request_context_middleware(
         path: path.clone(),
         request_id: Some(request_id.clone()),
     };
-    let mut response = super::scope_current_execution(
+    let response = super::scope_current_execution(
         execution_context,
         crate::database::scope_model_extensions(
             crate::translations::CURRENT_LOCALE.scope(locale, next.run(request).instrument(span)),
         ),
-    )
-    .await;
+    );
+    let mut response = match AssertUnwindSafe(response).catch_unwind().await {
+        Ok(response) => response,
+        Err(panic) => {
+            let message = panic_payload_message(panic);
+            tracing::error!(
+                method = %method,
+                path = %path,
+                request_id = %request_id,
+                panic = %message,
+                "HTTP request panicked"
+            );
+            crate::foundation::Error::message(format!("http handler panicked: {message}"))
+                .into_response()
+        }
+    };
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
@@ -134,5 +151,176 @@ fn resolve_request_locale(request: &Request, app: &AppContext) -> String {
             .map(|s| manager.resolve_locale(s))
             .unwrap_or_else(|| manager.default_locale().to_string()),
         Err(_) => "en".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::middleware;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    use super::request_context_middleware;
+    use crate::config::ConfigRepository;
+    use crate::foundation::{AppContext, Container};
+    use crate::logging::{
+        current_execution, ErrorReporter, ErrorReporterRegistry, ExecutionContext,
+        HandlerErrorReport, JobDeadLetteredReport, PanicReport, RuntimeDiagnostics,
+        REQUEST_ID_HEADER,
+    };
+    use crate::validation::RuleRegistry;
+
+    #[derive(Default)]
+    struct StubReporter {
+        handler_reports: Mutex<Vec<HandlerErrorReport>>,
+    }
+
+    #[async_trait]
+    impl ErrorReporter for StubReporter {
+        async fn report_handler_error(&self, report: HandlerErrorReport) {
+            self.handler_reports.lock().unwrap().push(report);
+        }
+
+        async fn report_panic(&self, _report: PanicReport) {}
+
+        async fn report_job_dead_lettered(&self, _report: JobDeadLetteredReport) {}
+    }
+
+    fn test_app_with_reporter(
+        reporter: Arc<StubReporter>,
+    ) -> (AppContext, Arc<RuntimeDiagnostics>) {
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let diagnostics = Arc::new(RuntimeDiagnostics::default());
+        let reporters: Vec<Arc<dyn ErrorReporter>> = vec![reporter];
+        app.container().singleton_arc(diagnostics.clone()).unwrap();
+        app.container()
+            .singleton_arc(Arc::new(ErrorReporterRegistry::new(reporters)))
+            .unwrap();
+        (app, diagnostics)
+    }
+
+    #[tokio::test]
+    async fn panicking_http_handler_returns_structured_500_and_records_error_path() {
+        let reporter = Arc::new(StubReporter::default());
+        let (app, diagnostics) = test_app_with_reporter(reporter.clone());
+        let seen_context = Arc::new(Mutex::new(None));
+        let handler_context = seen_context.clone();
+        let router = axum::Router::new()
+            .route(
+                "/panic",
+                get(move || {
+                    let handler_context = handler_context.clone();
+                    async move {
+                        *handler_context.lock().unwrap() = current_execution();
+                        panic!("http explode");
+                        #[allow(unreachable_code)]
+                        "unreachable"
+                    }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                request_context_middleware,
+            ));
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/panic")
+                    .header(REQUEST_ID_HEADER, "req-http-panic")
+                    .header(axum::http::header::USER_AGENT, "ForgeHTTP/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "req-http-panic"
+        );
+
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["message"], "Internal server error");
+        assert_eq!(payload["status"], 500);
+
+        assert_eq!(
+            *seen_context.lock().unwrap(),
+            Some(ExecutionContext::Http {
+                method: "GET".to_string(),
+                path: "/panic".to_string(),
+                request_id: Some("req-http-panic".to_string()),
+            })
+        );
+
+        let reports = reporter.handler_reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].method, "GET");
+        assert_eq!(reports[0].path, "/panic");
+        assert_eq!(reports[0].status, 500);
+        assert_eq!(reports[0].error, "http handler panicked: http explode");
+        assert_eq!(reports[0].request_id.as_deref(), Some("req-http-panic"));
+        assert_eq!(
+            reports[0]
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.user_agent.as_deref()),
+            Some("ForgeHTTP/1.0")
+        );
+
+        let snapshot = diagnostics.snapshot().http;
+        assert_eq!(snapshot.requests_total, 1);
+        assert_eq!(snapshot.server_error_total, 1);
+        assert_eq!(snapshot.success_total, 0);
+        assert_eq!(snapshot.duration_ms.count, 1);
+    }
+
+    #[tokio::test]
+    async fn request_context_middleware_preserves_normal_responses() {
+        let reporter = Arc::new(StubReporter::default());
+        let (app, diagnostics) = test_app_with_reporter(reporter.clone());
+        let router = axum::Router::new()
+            .route("/ok", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                app,
+                request_context_middleware,
+            ));
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/ok")
+                    .header(REQUEST_ID_HEADER, "req-http-ok")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "req-http-ok"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"ok");
+        assert!(reporter.handler_reports.lock().unwrap().is_empty());
+
+        let snapshot = diagnostics.snapshot().http;
+        assert_eq!(snapshot.requests_total, 1);
+        assert_eq!(snapshot.success_total, 1);
+        assert_eq!(snapshot.server_error_total, 0);
     }
 }

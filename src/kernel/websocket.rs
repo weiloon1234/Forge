@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,14 +12,16 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::auth::{Actor, AuthError, AuthErrorCode};
 use crate::config::WebSocketConfig;
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{AuthOutcome, RuntimeDiagnostics, WebSocketConnectionState};
+use crate::logging::{
+    panic_payload_message, AuthOutcome, RuntimeDiagnostics, WebSocketConnectionState,
+};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{ChannelEventId, ChannelId, GuardId};
 use crate::websocket::{
@@ -877,10 +880,12 @@ async fn process_client_message(
                 message.channel.clone(),
                 message.room.clone(),
             );
-            let result = channel
-                .handler
-                .handle(context, message.payload.unwrap_or(serde_json::Value::Null))
-                .await;
+            let result = run_channel_handler(
+                channel,
+                context,
+                message.payload.unwrap_or(serde_json::Value::Null),
+            )
+            .await;
 
             // Send ACK if requested.
             if let Some(ack_id) = message.ack_id {
@@ -961,6 +966,31 @@ async fn process_client_message(
     }
 
     Ok(())
+}
+
+async fn run_channel_handler(
+    channel: &RegisteredChannel,
+    context: WebSocketContext,
+    payload: serde_json::Value,
+) -> Result<()> {
+    match AssertUnwindSafe(channel.handler.handle(context, payload))
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => result,
+        Err(panic) => {
+            let message = panic_payload_message(panic);
+            tracing::error!(
+                target: "forge.websocket",
+                channel = %channel.id,
+                panic = %message,
+                "WebSocket channel handler panicked"
+            );
+            Err(Error::message(format!(
+                "websocket handler panicked: {message}"
+            )))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1478,6 +1508,11 @@ fn auth_outcome_from_error(error: &AuthError) -> AuthOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigRepository;
+    use crate::foundation::{AppContext, Container};
+    use crate::support::runtime::RuntimeBackend;
+    use crate::validation::RuleRegistry;
+    use crate::websocket::WebSocketRegistrar;
 
     #[test]
     fn message_routing_matches_room_contract() {
@@ -1537,6 +1572,203 @@ mod tests {
             hub.send(connection_id, WriterCommand::Json(message)).await,
             Err(HubSendError::Full)
         ));
+    }
+
+    fn test_app() -> AppContext {
+        AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap()
+    }
+
+    fn websocket_state(
+        channels: Vec<RegisteredChannel>,
+        namespace: &'static str,
+    ) -> WebSocketServerState {
+        WebSocketServerState::new(
+            test_app(),
+            channels,
+            RuntimeBackend::memory(namespace),
+            WebSocketConfig::default(),
+        )
+    }
+
+    async fn next_json(outbound: &mut mpsc::Receiver<WriterCommand>) -> ServerMessage {
+        match outbound
+            .recv()
+            .await
+            .expect("expected outbound websocket frame")
+        {
+            WriterCommand::Json(message) => message,
+            WriterCommand::Ping | WriterCommand::Pong(_) | WriterCommand::Close => {
+                panic!("expected JSON websocket frame")
+            }
+        }
+    }
+
+    async fn subscribe(
+        state: &WebSocketServerState,
+        connection_id: u64,
+        outbound: &mut mpsc::Receiver<WriterCommand>,
+        channel: &'static str,
+    ) {
+        process_client_message(
+            state,
+            connection_id,
+            serde_json::json!({
+                "action": "subscribe",
+                "channel": channel,
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let subscribed = next_json(outbound).await;
+        assert_eq!(subscribed.event, SUBSCRIBED_EVENT);
+        assert_eq!(subscribed.channel, ChannelId::new(channel));
+    }
+
+    #[tokio::test]
+    async fn channel_handler_success_sends_ok_ack() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(
+                ChannelId::new("chat"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+            )
+            .unwrap();
+        let state = websocket_state(registrar.into_channels(), "ws-handler-success");
+        let (connection_id, mut outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+        subscribe(&state, connection_id, &mut outbound, "chat").await;
+
+        process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "chat",
+                "ack_id": "ack-ok",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let ack = next_json(&mut outbound).await;
+        assert_eq!(ack.event, ACK_EVENT);
+        assert_eq!(ack.payload["ack_id"], "ack-ok");
+        assert_eq!(ack.payload["status"], "ok");
+        assert!(ack.payload["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn channel_handler_error_sends_error_ack() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(
+                ChannelId::new("fail"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async {
+                    Err(Error::message("handler failed"))
+                },
+            )
+            .unwrap();
+        let state = websocket_state(registrar.into_channels(), "ws-handler-error");
+        let (connection_id, mut outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+        subscribe(&state, connection_id, &mut outbound, "fail").await;
+
+        let error = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "fail",
+                "ack_id": "ack-error",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "handler failed");
+        let ack = next_json(&mut outbound).await;
+        assert_eq!(ack.event, ACK_EVENT);
+        assert_eq!(ack.payload["ack_id"], "ack-error");
+        assert_eq!(ack.payload["status"], "error");
+        assert_eq!(ack.payload["error"], "handler failed");
+    }
+
+    #[tokio::test]
+    async fn channel_handler_panic_sends_error_ack_and_connection_can_continue() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(
+                ChannelId::new("panic"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async {
+                    panic!("handler explode");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                },
+            )
+            .unwrap();
+        registrar
+            .channel(
+                ChannelId::new("chat"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+            )
+            .unwrap();
+        let state = websocket_state(registrar.into_channels(), "ws-handler-panic");
+        let (connection_id, mut outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+        subscribe(&state, connection_id, &mut outbound, "panic").await;
+        subscribe(&state, connection_id, &mut outbound, "chat").await;
+
+        let error = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "panic",
+                "ack_id": "ack-panic",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "websocket handler panicked: handler explode"
+        );
+        let ack = next_json(&mut outbound).await;
+        assert_eq!(ack.event, ACK_EVENT);
+        assert_eq!(ack.payload["ack_id"], "ack-panic");
+        assert_eq!(ack.payload["status"], "error");
+        assert_eq!(
+            ack.payload["error"],
+            "websocket handler panicked: handler explode"
+        );
+
+        process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "chat",
+                "ack_id": "ack-after-panic",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let ack = next_json(&mut outbound).await;
+        assert_eq!(ack.event, ACK_EVENT);
+        assert_eq!(ack.payload["ack_id"], "ack-after-panic");
+        assert_eq!(ack.payload["status"], "ok");
     }
 
     #[tokio::test]

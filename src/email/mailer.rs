@@ -30,8 +30,13 @@ impl EmailMailer {
         let outbound = self
             .resolve_message(message, manager.from_address())
             .await?;
+        let mailer_name = self
+            .mailer_name
+            .as_deref()
+            .unwrap_or(manager.default_mailer_name())
+            .to_string();
         let driver = manager.driver(self.mailer_name.as_deref())?;
-        driver.send(&outbound).await
+        super::callback::send_driver(&mailer_name, driver.as_ref(), &outbound).await
     }
 
     /// Queue for async delivery via Forge jobs.

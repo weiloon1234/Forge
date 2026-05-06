@@ -1,3 +1,5 @@
+mod callback;
+
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -963,7 +965,7 @@ async fn store_model_attachment<M>(
 where
     M: HasAttachments,
 {
-    let resolved = resolve_attachment_spec::<M>(collection);
+    let resolved = resolve_attachment_spec::<M>(collection)?;
 
     if let Some(resolved) = &resolved {
         run_before_store_hooks(resolved, app, model, collection, &file).await?;
@@ -1034,13 +1036,16 @@ where
     M: Send + Sync,
 {
     for hook in resolved.spec.hooks() {
-        hook.before_store(AttachmentBeforeStoreContext {
-            app,
-            model,
-            spec: &resolved.spec,
-            collection,
-            locale: resolved.locale.as_deref(),
-            file,
+        let subject = format!("before_store hook for collection `{collection}`");
+        callback::run_attachment_callback(&subject, || {
+            hook.before_store(AttachmentBeforeStoreContext {
+                app,
+                model,
+                spec: &resolved.spec,
+                collection,
+                locale: resolved.locale.as_deref(),
+                file,
+            })
         })
         .await?;
     }
@@ -1060,14 +1065,17 @@ where
     M: Send + Sync,
 {
     for hook in resolved.spec.hooks() {
-        hook.after_store(AttachmentAfterStoreContext {
-            app,
-            model,
-            spec: &resolved.spec,
-            collection,
-            locale: resolved.locale.as_deref(),
-            file,
-            attachment,
+        let subject = format!("after_store hook for collection `{collection}`");
+        callback::run_attachment_callback(&subject, || {
+            hook.after_store(AttachmentAfterStoreContext {
+                app,
+                model,
+                spec: &resolved.spec,
+                collection,
+                locale: resolved.locale.as_deref(),
+                file,
+                attachment,
+            })
         })
         .await?;
     }
@@ -1080,7 +1088,9 @@ where
     C: FnOnce() -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    if let Err(cleanup_error) = cleanup().await {
+    if let Err(cleanup_error) =
+        callback::run_attachment_callback("cleanup after after_store failure", cleanup).await
+    {
         return Err(Error::message(format!(
             "attachment after_store hook failed: {error}; cleanup failed: {cleanup_error}"
         )));
@@ -1089,27 +1099,30 @@ where
     Err(error)
 }
 
-fn resolve_attachment_spec<M>(collection: &str) -> Option<ResolvedAttachmentSpec<M>>
+fn resolve_attachment_spec<M>(collection: &str) -> Result<Option<ResolvedAttachmentSpec<M>>>
 where
     M: HasAttachments,
 {
-    let specs = M::attachment_specs();
+    let subject = format!("spec registry for model `{}`", std::any::type_name::<M>());
+    let specs = callback::run_attachment_sync(&subject, M::attachment_specs)?;
     if let Some(spec) = specs
         .iter()
         .find(|spec| spec.collection().trim() == collection.trim())
         .cloned()
     {
-        return Some(ResolvedAttachmentSpec { spec, locale: None });
+        return Ok(Some(ResolvedAttachmentSpec { spec, locale: None }));
     }
 
-    let (base_collection, locale) = split_localized_collection(collection)?;
-    specs
+    let Some((base_collection, locale)) = split_localized_collection(collection) else {
+        return Ok(None);
+    };
+    Ok(specs
         .into_iter()
         .find(|spec| spec.collection().trim() == base_collection)
         .map(|spec| ResolvedAttachmentSpec {
             spec,
             locale: Some(locale.to_string()),
-        })
+        }))
 }
 
 fn split_localized_collection(collection: &str) -> Option<(&str, &str)> {
@@ -1433,6 +1446,22 @@ mod tests {
         }
     }
 
+    struct PanickingSpecAttachable;
+
+    impl HasAttachments for PanickingSpecAttachable {
+        fn attachable_type() -> &'static str {
+            "panicking_spec_attachables"
+        }
+
+        fn attachable_id(&self) -> String {
+            Uuid::now_v7().to_string()
+        }
+
+        fn attachment_specs() -> Vec<AttachmentSpec<Self>> {
+            panic!("attachment specs exploded")
+        }
+    }
+
     struct NoopAttachmentHook;
 
     #[async_trait]
@@ -1465,6 +1494,45 @@ mod tests {
                 .unwrap()
                 .push(format!("after:{}", self.label));
             Ok(())
+        }
+    }
+
+    struct PanickingBeforeStoreHook {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl AttachmentSpecHook<SpecAttachable> for PanickingBeforeStoreHook {
+        async fn before_store(
+            &self,
+            _ctx: AttachmentBeforeStoreContext<'_, SpecAttachable>,
+        ) -> Result<()> {
+            self.events.lock().unwrap().push("before-panic");
+            panic!("before hook exploded")
+        }
+    }
+
+    struct PanickingAfterStoreHook;
+
+    #[async_trait]
+    impl AttachmentSpecHook<SpecAttachable> for PanickingAfterStoreHook {
+        async fn after_store(
+            &self,
+            _ctx: AttachmentAfterStoreContext<'_, SpecAttachable>,
+        ) -> Result<()> {
+            panic!("after hook exploded")
+        }
+    }
+
+    struct FailingAfterStoreHook;
+
+    #[async_trait]
+    impl AttachmentSpecHook<SpecAttachable> for FailingAfterStoreHook {
+        async fn after_store(
+            &self,
+            _ctx: AttachmentAfterStoreContext<'_, SpecAttachable>,
+        ) -> Result<()> {
+            Err(Error::message("after hook failed"))
         }
     }
 
@@ -1549,11 +1617,15 @@ mod tests {
 
     #[test]
     fn attachment_spec_resolves_exact_and_localized_collections() {
-        let exact = resolve_attachment_spec::<SpecAttachable>("main").unwrap();
+        let exact = resolve_attachment_spec::<SpecAttachable>("main")
+            .unwrap()
+            .unwrap();
         assert!(exact.locale.is_none());
         assert!(exact.spec.is_single());
 
-        let localized = resolve_attachment_spec::<SpecAttachable>("main:ms").unwrap();
+        let localized = resolve_attachment_spec::<SpecAttachable>("main:ms")
+            .unwrap()
+            .unwrap();
         assert_eq!(localized.locale.as_deref(), Some("ms"));
         assert_eq!(localized.spec.collection(), "main");
         assert_eq!(
@@ -1610,6 +1682,156 @@ mod tests {
             events.lock().unwrap().as_slice(),
             ["before:one", "before:two", "after:one", "after:two"]
         );
+    }
+
+    #[test]
+    fn attachment_specs_panic_becomes_error() {
+        let error = resolve_attachment_spec::<PanickingSpecAttachable>("main")
+            .err()
+            .expect("attachment_specs panic should become an error");
+
+        let message = error.to_string();
+        assert!(message.contains("attachment spec registry for model"));
+        assert!(message.contains("panicked: attachment specs exploded"));
+    }
+
+    #[tokio::test]
+    async fn before_store_hook_panic_becomes_error_and_stops_later_hooks() {
+        let app = test_app_context();
+        let model = SpecAttachable {
+            id: Uuid::now_v7().to_string(),
+        };
+        let file = test_uploaded_file("voucher.png");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let resolved = ResolvedAttachmentSpec {
+            spec: AttachmentSpec::<SpecAttachable>::image("main")
+                .hook(PanickingBeforeStoreHook {
+                    events: events.clone(),
+                })
+                .hook(RecordingAttachmentHook {
+                    label: "later",
+                    events: Arc::new(Mutex::new(Vec::new())),
+                }),
+            locale: None,
+        };
+
+        let error = run_before_store_hooks(&resolved, &app, &model, "main", &file)
+            .await
+            .expect_err("before_store panic should become an error");
+
+        assert_eq!(
+            error.to_string(),
+            "attachment before_store hook for collection `main` panicked: before hook exploded"
+        );
+        assert_eq!(events.lock().unwrap().as_slice(), ["before-panic"]);
+    }
+
+    #[tokio::test]
+    async fn after_store_hook_panic_becomes_error() {
+        let app = test_app_context();
+        let model = SpecAttachable {
+            id: Uuid::now_v7().to_string(),
+        };
+        let file = test_uploaded_file("voucher.png");
+        let attachment = test_attachment(&model, "main");
+        let resolved = ResolvedAttachmentSpec {
+            spec: AttachmentSpec::<SpecAttachable>::image("main").hook(PanickingAfterStoreHook),
+            locale: None,
+        };
+
+        let error = run_after_store_hooks(&resolved, &app, &model, "main", &file, &attachment)
+            .await
+            .expect_err("after_store panic should become an error");
+
+        assert_eq!(
+            error.to_string(),
+            "attachment after_store hook for collection `main` panicked: after hook exploded"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_store_panic_runs_cleanup_and_returns_hook_error() {
+        let app = test_app_context();
+        let model = SpecAttachable {
+            id: Uuid::now_v7().to_string(),
+        };
+        let file = test_uploaded_file("voucher.png");
+        let attachment = test_attachment(&model, "main");
+        let resolved = ResolvedAttachmentSpec {
+            spec: AttachmentSpec::<SpecAttachable>::image("main").hook(PanickingAfterStoreHook),
+            locale: None,
+        };
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+
+        let error = run_after_store_hooks(&resolved, &app, &model, "main", &file, &attachment)
+            .await
+            .unwrap_err();
+        let result: Result<()> = cleanup_after_store_failure(error, || {
+            let cleanup_count = cleanup_count.clone();
+            async move {
+                cleanup_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await;
+
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "attachment after_store hook for collection `main` panicked: after hook exploded"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_store_failure_reports_cleanup_panic() {
+        let result: Result<()> =
+            cleanup_after_store_failure(Error::message("after hook failed"), || async {
+                panic!("cleanup future exploded")
+            })
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("after hook failed"));
+        assert!(error.contains(
+            "cleanup failed: attachment cleanup after after_store failure panicked: cleanup future exploded"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_store_failure_catches_cleanup_factory_panic() {
+        let result: Result<()> =
+            cleanup_after_store_failure(Error::message("after hook failed"), || {
+                panic!("cleanup factory exploded");
+                #[allow(unreachable_code)]
+                std::future::ready(Ok::<(), Error>(()))
+            })
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("after hook failed"));
+        assert!(error.contains(
+            "cleanup failed: attachment cleanup after after_store failure panicked: cleanup factory exploded"
+        ));
+    }
+
+    #[tokio::test]
+    async fn after_store_hook_error_remains_unchanged() {
+        let app = test_app_context();
+        let model = SpecAttachable {
+            id: Uuid::now_v7().to_string(),
+        };
+        let file = test_uploaded_file("voucher.png");
+        let attachment = test_attachment(&model, "main");
+        let resolved = ResolvedAttachmentSpec {
+            spec: AttachmentSpec::<SpecAttachable>::image("main").hook(FailingAfterStoreHook),
+            locale: None,
+        };
+
+        let error = run_after_store_hooks(&resolved, &app, &model, "main", &file, &attachment)
+            .await
+            .expect_err("hook error should remain unchanged");
+
+        assert_eq!(error.to_string(), "after hook failed");
     }
 
     #[tokio::test]

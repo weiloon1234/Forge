@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::database::Pagination;
 use crate::foundation::{AppContext, Error, Result};
 
+use super::callback::{catch_datatable_callback, catch_datatable_future};
 use super::column::DatatableColumn;
 use super::context::DatatableContext;
 use super::datatable_trait::{Datatable, DatatableQuery};
@@ -23,14 +24,14 @@ where
 {
     let ctx = DatatableContext::new(app, actor, &request);
 
-    let columns = D::columns();
+    let columns = catch_datatable_callback(format!("`{}` columns callback", D::ID), D::columns)?;
     let query = super::query_pipeline::prepare_query::<D>(&ctx, &columns).await?;
 
     let pagination = Pagination::new(request.page, request.per_page);
     let db = app.database()?;
     let paginated = query.paginate(db.as_ref(), pagination).await?;
 
-    let mappings = D::mappings();
+    let mappings = catch_datatable_callback(format!("`{}` mappings callback", D::ID), D::mappings)?;
     let rows = build_rows(&paginated.data, &columns, &mappings, &ctx)?;
 
     let column_meta: Vec<DatatableColumnMeta> = columns
@@ -43,7 +44,13 @@ where
         })
         .collect();
 
-    let filters = D::available_filters(&ctx).await?;
+    let filters = catch_datatable_future(
+        format!("`{}` available_filters callback", D::ID),
+        catch_datatable_callback(format!("`{}` available_filters callback", D::ID), || {
+            D::available_filters(&ctx)
+        })?,
+    )
+    .await?;
 
     let pagination_meta = DatatablePaginationMeta::new(
         paginated.pagination.page,
@@ -84,7 +91,7 @@ where
         if let serde_json::Value::Object(obj) = row_value {
             for col in columns {
                 if let Some(mapping) = mapping_index.get(col.name.as_str()) {
-                    let value: serde_json::Value = mapping.compute(row, ctx).into();
+                    let value: serde_json::Value = mapping.try_compute(row, ctx)?.into();
                     map.insert(col.name.clone(), value);
                 } else if let Some(val) = obj.get(&col.name) {
                     map.insert(col.name.clone(), val.clone());
@@ -94,7 +101,7 @@ where
 
         for mapping in mappings {
             if !map.contains_key(&mapping.name) {
-                let value: serde_json::Value = mapping.compute(row, ctx).into();
+                let value: serde_json::Value = mapping.try_compute(row, ctx)?.into();
                 map.insert(mapping.name.clone(), value);
             }
         }

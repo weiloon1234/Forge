@@ -1,5 +1,6 @@
 pub mod address;
 pub mod attachment;
+pub(crate) mod callback;
 pub mod config;
 pub mod driver;
 pub mod job;
@@ -154,7 +155,7 @@ impl EmailManager {
                     let factory = custom_drivers.get(custom_name).ok_or_else(|| {
                         Error::message(format!("unknown email driver `{custom_name}`"))
                     })?;
-                    factory(config, table)?
+                    callback::build_email_driver(custom_name, factory, config, table)?
                 }
             };
             drivers.insert(name.clone(), driver);
@@ -231,6 +232,7 @@ impl EmailManager {
 mod tests {
     use std::io::Write as _;
 
+    use async_trait::async_trait;
     use tempfile::TempDir;
 
     use super::*;
@@ -252,6 +254,28 @@ mod tests {
             RuleRegistry::new(),
         )
         .unwrap()
+    }
+
+    struct PanickingEmailDriver;
+
+    #[async_trait]
+    impl EmailDriver for PanickingEmailDriver {
+        async fn send(&self, _message: &OutboundEmail) -> Result<()> {
+            panic!("driver send exploded")
+        }
+    }
+
+    fn panic_driver_config() -> ConfigRepository {
+        config_from_toml(
+            r#"
+            [email]
+            default = "panic"
+            from.address = "noreply@example.com"
+
+            [email.mailers.panic]
+            driver = "panic"
+        "#,
+        )
     }
 
     // --- Config-only tests (no AppContext needed) ---
@@ -371,6 +395,42 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("already registered"));
+    }
+
+    #[test]
+    fn email_driver_factory_panic_becomes_error() {
+        let factory: EmailDriverFactory =
+            Arc::new(|_config, _table| panic!("driver factory exploded"));
+        let mut custom = HashMap::new();
+        custom.insert("panic".to_string(), factory);
+
+        let error = EmailManager::from_config(&panic_driver_config(), custom, test_app())
+            .expect_err("panicking driver factory should become an error");
+
+        assert!(error
+            .to_string()
+            .contains("email driver `panic` factory panicked: driver factory exploded"));
+    }
+
+    #[tokio::test]
+    async fn email_driver_send_panic_becomes_error() {
+        let app = test_app();
+        let factory: EmailDriverFactory =
+            Arc::new(|_config, _table| Ok(Arc::new(PanickingEmailDriver)));
+        let mut custom = HashMap::new();
+        custom.insert("panic".to_string(), factory);
+        let manager = EmailManager::from_config(&panic_driver_config(), custom, app.clone())
+            .expect("panic driver should be configured");
+        app.container().singleton_arc(Arc::new(manager)).unwrap();
+
+        let message = EmailMessage::new("Hello")
+            .to("user@example.com")
+            .text_body("Hi");
+        let error = app.email().unwrap().send(message).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("email driver `panic` send panicked: driver send exploded"));
     }
 
     // --- Log driver tests ---

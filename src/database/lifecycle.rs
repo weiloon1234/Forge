@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
+use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -7,10 +9,12 @@ use async_trait::async_trait;
 use chrono::Local;
 use clap::{Arg, ArgAction, Command};
 use forge_build::{discover_migration_sources, discover_seeder_sources};
+use futures_util::FutureExt;
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::DatabaseConfig;
 use crate::foundation::{AppContext, Error, Result};
+use crate::logging::panic_payload_message;
 use crate::support::{CommandId, MigrationId, SeederId};
 
 use super::runtime::{DatabaseSession, QueryExecutionOptions, QueryExecutor};
@@ -982,12 +986,19 @@ async fn run_migration_up(
     session: &DatabaseSession,
     migration: &dyn DynMigration,
 ) -> Result<()> {
-    if !migration.run_in_transaction() {
-        return migration.up(&app, &database, session).await;
+    let id = migration.id();
+    if !migration_run_in_transaction(migration, &id)? {
+        return run_database_lifecycle_callback("migration", &id, "up", || {
+            migration.up(&app, &database, session)
+        })
+        .await;
     }
 
     session.begin_transaction().await?;
-    let result = migration.up(&app, &database, session).await;
+    let result = run_database_lifecycle_callback("migration", &id, "up", || {
+        migration.up(&app, &database, session)
+    })
+    .await;
     match result {
         Ok(()) => session.commit_transaction().await,
         Err(error) => match session.rollback_transaction().await {
@@ -1005,12 +1016,19 @@ async fn run_migration_down(
     session: &DatabaseSession,
     migration: &dyn DynMigration,
 ) -> Result<()> {
-    if !migration.run_in_transaction() {
-        return migration.down(&app, &database, session).await;
+    let id = migration.id();
+    if !migration_run_in_transaction(migration, &id)? {
+        return run_database_lifecycle_callback("migration", &id, "down", || {
+            migration.down(&app, &database, session)
+        })
+        .await;
     }
 
     session.begin_transaction().await?;
-    let result = migration.down(&app, &database, session).await;
+    let result = run_database_lifecycle_callback("migration", &id, "down", || {
+        migration.down(&app, &database, session)
+    })
+    .await;
     match result {
         Ok(()) => session.commit_transaction().await,
         Err(error) => match session.rollback_transaction().await {
@@ -1028,12 +1046,19 @@ async fn run_seeder(
     session: &DatabaseSession,
     seeder: &dyn DynSeeder,
 ) -> Result<()> {
-    if !seeder.run_in_transaction() {
-        return seeder.run(&app, &database, session).await;
+    let id = seeder.id();
+    if !seeder_run_in_transaction(seeder, &id)? {
+        return run_database_lifecycle_callback("seeder", &id, "run", || {
+            seeder.run(&app, &database, session)
+        })
+        .await;
     }
 
     session.begin_transaction().await?;
-    let result = seeder.run(&app, &database, session).await;
+    let result = run_database_lifecycle_callback("seeder", &id, "run", || {
+        seeder.run(&app, &database, session)
+    })
+    .await;
     match result {
         Ok(()) => session.commit_transaction().await,
         Err(error) => match session.rollback_transaction().await {
@@ -1043,6 +1068,60 @@ async fn run_seeder(
             ))),
         },
     }
+}
+
+fn migration_run_in_transaction(migration: &dyn DynMigration, id: &MigrationId) -> Result<bool> {
+    catch_unwind(AssertUnwindSafe(|| migration.run_in_transaction())).map_err(|panic| {
+        database_lifecycle_panic_error("migration", id, "run_in_transaction", panic)
+    })
+}
+
+fn seeder_run_in_transaction(seeder: &dyn DynSeeder, id: &SeederId) -> Result<bool> {
+    catch_unwind(AssertUnwindSafe(|| seeder.run_in_transaction()))
+        .map_err(|panic| database_lifecycle_panic_error("seeder", id, "run_in_transaction", panic))
+}
+
+async fn run_database_lifecycle_callback<I, F, Fut>(
+    kind: &'static str,
+    id: &I,
+    phase: &'static str,
+    run: F,
+) -> Result<()>
+where
+    I: std::fmt::Display,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let future = match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(future) => future,
+        Err(panic) => return Err(database_lifecycle_panic_error(kind, id, phase, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(database_lifecycle_panic_error(kind, id, phase, panic)),
+    }
+}
+
+fn database_lifecycle_panic_error<I>(
+    kind: &'static str,
+    id: &I,
+    phase: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> Error
+where
+    I: std::fmt::Display,
+{
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database.lifecycle",
+        %kind,
+        id = %id,
+        %phase,
+        panic = %message,
+        "database lifecycle callback panicked"
+    );
+    Error::message(format!("{kind} `{id}` {phase} panicked: {message}"))
 }
 
 async fn ensure_ledger_table(config: &DatabaseConfig, executor: &dyn QueryExecutor) -> Result<()> {
@@ -1364,12 +1443,14 @@ mod tests {
     use async_trait::async_trait;
 
     use super::{
-        advisory_lock_key, AppliedMigration, GeneratedDatabasePaths, MigrationContext,
-        MigrationFile, MigrationId, MigrationRegistryBuilder, MigrationStatus, SeederContext,
-        SeederFile, SeederId, SeederRegistryBuilder,
+        advisory_lock_key, migration_run_in_transaction, run_database_lifecycle_callback,
+        seeder_run_in_transaction, AppliedMigration, GeneratedDatabasePaths, MigrationContext,
+        MigrationFile, MigrationFileAdapter, MigrationId, MigrationRegistryBuilder,
+        MigrationStatus, SeederContext, SeederFile, SeederFileAdapter, SeederId,
+        SeederRegistryBuilder,
     };
     use crate::config::DatabaseConfig;
-    use crate::foundation::Result;
+    use crate::foundation::{Error, Result};
 
     struct CreateUsers;
 
@@ -1397,6 +1478,36 @@ mod tests {
 
     #[async_trait]
     impl SeederFile for FileSeedUsers {
+        async fn run(_ctx: &SeederContext<'_>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PanickingTransactionMigration;
+
+    #[async_trait]
+    impl MigrationFile for PanickingTransactionMigration {
+        fn run_in_transaction() -> bool {
+            panic!("migration transaction flag exploded")
+        }
+
+        async fn up(_ctx: &MigrationContext<'_>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn down(_ctx: &MigrationContext<'_>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PanickingTransactionSeeder;
+
+    #[async_trait]
+    impl SeederFile for PanickingTransactionSeeder {
+        fn run_in_transaction() -> bool {
+            panic!("seeder transaction flag exploded")
+        }
+
         async fn run(_ctx: &SeederContext<'_>) -> Result<()> {
             Ok(())
         }
@@ -1444,6 +1555,86 @@ mod tests {
         assert_eq!(
             registry.ids(),
             vec![SeederId::new("users.seed"), SeederId::new("users.file")]
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_callback_future_panic_becomes_error() {
+        let id = MigrationId::new("202604101532_panic_migration");
+        let error = run_database_lifecycle_callback("migration", &id, "up", || async {
+            let should_panic = true;
+            if should_panic {
+                panic!("migration up exploded");
+            }
+            Ok::<(), Error>(())
+        })
+        .await
+        .expect_err("migration panic should become an error");
+
+        assert_eq!(
+            error.to_string(),
+            "migration `202604101532_panic_migration` up panicked: migration up exploded"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeder_callback_factory_panic_becomes_error() {
+        let id = SeederId::new("panic_seed");
+        let error = run_database_lifecycle_callback("seeder", &id, "run", || {
+            panic!("seeder future factory exploded");
+            #[allow(unreachable_code)]
+            std::future::ready(Ok::<(), Error>(()))
+        })
+        .await
+        .expect_err("seeder factory panic should become an error");
+
+        assert_eq!(
+            error.to_string(),
+            "seeder `panic_seed` run panicked: seeder future factory exploded"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_callback_error_remains_unchanged() {
+        let id = SeederId::new("error_seed");
+        let error = run_database_lifecycle_callback("seeder", &id, "run", || async {
+            Err(Error::message("seed returned error"))
+        })
+        .await
+        .expect_err("normal errors should remain unchanged");
+
+        assert_eq!(error.to_string(), "seed returned error");
+    }
+
+    #[test]
+    fn migration_run_in_transaction_panic_becomes_error() {
+        let id = MigrationId::new("202604101533_panic_transaction_flag");
+        let migration = MigrationFileAdapter::<PanickingTransactionMigration> {
+            id: id.clone(),
+            marker: std::marker::PhantomData,
+        };
+        let error = migration_run_in_transaction(&migration, &id)
+            .expect_err("migration transaction flag panic should become an error");
+
+        assert_eq!(
+            error.to_string(),
+            "migration `202604101533_panic_transaction_flag` run_in_transaction panicked: migration transaction flag exploded"
+        );
+    }
+
+    #[test]
+    fn seeder_run_in_transaction_panic_becomes_error() {
+        let id = SeederId::new("panic_transaction_seed");
+        let seeder = SeederFileAdapter::<PanickingTransactionSeeder> {
+            id: id.clone(),
+            marker: std::marker::PhantomData,
+        };
+        let error = seeder_run_in_transaction(&seeder, &id)
+            .expect_err("seeder transaction flag panic should become an error");
+
+        assert_eq!(
+            error.to_string(),
+            "seeder `panic_transaction_seed` run_in_transaction panicked: seeder transaction flag exploded"
         );
     }
 

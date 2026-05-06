@@ -1,3 +1,4 @@
+pub(crate) mod callback;
 pub mod column;
 pub mod context;
 pub mod datatable_trait;

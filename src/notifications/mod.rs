@@ -1,3 +1,4 @@
+pub(crate) mod callback;
 mod channel;
 pub(crate) mod job;
 
@@ -163,13 +164,23 @@ pub async fn notify(
     notification: &dyn Notification,
 ) -> Result<()> {
     let registry = app.resolve::<NotificationChannelRegistry>()?;
+    let channels = callback::notification_channels(notification)?;
+    let notification_type = callback::notification_type(notification)?;
 
-    for channel_id in notification.via() {
+    for channel_id in channels {
         if let Some(channel) = registry.get(&channel_id) {
-            if let Err(error) = channel.send(app, notifiable, notification).await {
+            if let Err(error) = callback::send_channel_adapter(
+                &channel_id,
+                channel.as_ref(),
+                app,
+                notifiable,
+                notification,
+            )
+            .await
+            {
                 tracing::error!(
                     channel = %channel_id,
-                    notification_type = %notification.notification_type(),
+                    notification_type = %notification_type,
                     error = %error,
                     "notification channel delivery failed"
                 );
@@ -199,10 +210,34 @@ pub fn build_notification_job(
     notifiable: &dyn Notifiable,
     notification: &dyn Notification,
 ) -> SendNotificationJob {
-    let channels = notification.via();
-    let email_payload = notification.to_email(notifiable);
-    let database_payload = notification.to_database();
-    let broadcast_payload = notification.to_broadcast();
+    match try_build_notification_job(notifiable, notification) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "notification job payload rendering failed"
+            );
+            SendNotificationJob {
+                notifiable_id: String::new(),
+                notification_type: "unknown".to_string(),
+                channels: Vec::new(),
+                email_payload: None,
+                database_payload: None,
+                broadcast_payload: None,
+                custom_payloads: Vec::new(),
+            }
+        }
+    }
+}
+
+pub(crate) fn try_build_notification_job(
+    notifiable: &dyn Notifiable,
+    notification: &dyn Notification,
+) -> Result<SendNotificationJob> {
+    let channels = callback::notification_channels(notification)?;
+    let email_payload = callback::notification_email(notification, notifiable)?;
+    let database_payload = callback::notification_database(notification)?;
+    let broadcast_payload = callback::notification_broadcast(notification)?;
 
     let mut custom_payloads = Vec::new();
     for channel_id in &channels {
@@ -210,21 +245,25 @@ pub fn build_notification_job(
             && *channel_id != NOTIFY_DATABASE
             && *channel_id != NOTIFY_BROADCAST
         {
-            if let Some(data) = notification.to_channel(channel_id.as_ref(), notifiable) {
+            if let Some(data) = callback::notification_channel_payload(
+                notification,
+                channel_id.as_ref(),
+                notifiable,
+            )? {
                 custom_payloads.push((channel_id.clone(), data));
             }
         }
     }
 
-    SendNotificationJob {
-        notifiable_id: notifiable.notification_id(),
-        notification_type: notification.notification_type().to_string(),
+    Ok(SendNotificationJob {
+        notifiable_id: callback::notifiable_id(notifiable)?,
+        notification_type: callback::notification_type(notification)?,
         channels,
         email_payload,
         database_payload,
         broadcast_payload,
         custom_payloads,
-    }
+    })
 }
 
 pub async fn notify_queued(
@@ -232,6 +271,229 @@ pub async fn notify_queued(
     notifiable: &dyn Notifiable,
     notification: &dyn Notification,
 ) -> Result<()> {
-    let job = build_notification_job(notifiable, notification);
+    let job = try_build_notification_job(notifiable, notification)?;
     app.jobs()?.dispatch(job).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use super::*;
+    use crate::config::ConfigRepository;
+    use crate::foundation::Container;
+    use crate::validation::RuleRegistry;
+
+    fn test_app(
+        channels: Vec<(NotificationChannelId, Arc<dyn NotificationChannel>)>,
+    ) -> AppContext {
+        let container = Container::new();
+        let handle = NotificationChannelRegistryBuilder::shared();
+        {
+            let mut builder = handle.lock().expect("notification registry lock");
+            for (id, channel) in channels {
+                builder.register(id, channel).unwrap();
+            }
+        }
+        let registry = Arc::new(NotificationChannelRegistryBuilder::freeze_shared(handle));
+        container.singleton_arc(registry).unwrap();
+        AppContext::new(container, ConfigRepository::empty(), RuleRegistry::new()).unwrap()
+    }
+
+    struct TestNotifiable;
+
+    impl Notifiable for TestNotifiable {
+        fn notification_id(&self) -> String {
+            "user-1".to_string()
+        }
+
+        fn route_notification_for(&self, channel: &str) -> Option<String> {
+            (channel == "email").then_some("user@example.com".to_string())
+        }
+    }
+
+    struct TestNotification {
+        channels: Vec<NotificationChannelId>,
+    }
+
+    impl TestNotification {
+        fn new(channels: Vec<NotificationChannelId>) -> Self {
+            Self { channels }
+        }
+    }
+
+    impl Notification for TestNotification {
+        fn notification_type(&self) -> &str {
+            "test.notification"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            self.channels.clone()
+        }
+
+        fn to_database(&self) -> Option<serde_json::Value> {
+            Some(json!({ "ok": true }))
+        }
+
+        fn to_channel(
+            &self,
+            channel: &str,
+            _notifiable: &dyn Notifiable,
+        ) -> Option<serde_json::Value> {
+            Some(json!({ "channel": channel }))
+        }
+    }
+
+    struct PanickingViaNotification;
+
+    impl Notification for PanickingViaNotification {
+        fn notification_type(&self) -> &str {
+            "panic.via"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            panic!("via exploded")
+        }
+    }
+
+    struct PanickingDatabaseNotification;
+
+    impl Notification for PanickingDatabaseNotification {
+        fn notification_type(&self) -> &str {
+            "panic.database"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            vec![NOTIFY_DATABASE]
+        }
+
+        fn to_database(&self) -> Option<serde_json::Value> {
+            panic!("database renderer exploded")
+        }
+    }
+
+    struct PanickingCustomPayloadNotification;
+
+    impl Notification for PanickingCustomPayloadNotification {
+        fn notification_type(&self) -> &str {
+            "panic.custom"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            vec![NotificationChannelId::new("sms")]
+        }
+
+        fn to_channel(
+            &self,
+            _channel: &str,
+            _notifiable: &dyn Notifiable,
+        ) -> Option<serde_json::Value> {
+            panic!("custom renderer exploded")
+        }
+    }
+
+    struct PanickingChannel;
+
+    #[async_trait]
+    impl NotificationChannel for PanickingChannel {
+        async fn send(
+            &self,
+            _app: &AppContext,
+            _notifiable: &dyn Notifiable,
+            _notification: &dyn Notification,
+        ) -> Result<()> {
+            panic!("channel exploded")
+        }
+    }
+
+    struct RecordingChannel {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl NotificationChannel for RecordingChannel {
+        async fn send(
+            &self,
+            _app: &AppContext,
+            _notifiable: &dyn Notifiable,
+            _notification: &dyn Notification,
+        ) -> Result<()> {
+            self.log.lock().unwrap().push("sent".to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_channel_panic_isolated_and_later_channels_continue() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let panic_id = NotificationChannelId::new("panic");
+        let ok_id = NotificationChannelId::new("ok");
+        let app = test_app(vec![
+            (panic_id.clone(), Arc::new(PanickingChannel)),
+            (
+                ok_id.clone(),
+                Arc::new(RecordingChannel { log: log.clone() }),
+            ),
+        ]);
+        let notification = TestNotification::new(vec![panic_id, ok_id]);
+
+        notify(&app, &TestNotifiable, &notification).await.unwrap();
+
+        assert_eq!(log.lock().unwrap().as_slice(), ["sent"]);
+    }
+
+    #[tokio::test]
+    async fn notification_via_panic_becomes_error() {
+        let app = test_app(Vec::new());
+
+        let error = notify(&app, &TestNotifiable, &PanickingViaNotification)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification via callback panicked: via exploded"));
+    }
+
+    #[tokio::test]
+    async fn built_in_channel_renderer_panic_becomes_error() {
+        let app = test_app(Vec::new());
+
+        let error = DatabaseNotificationChannel
+            .send(&app, &TestNotifiable, &PanickingDatabaseNotification)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification database renderer panicked: database renderer exploded"));
+    }
+
+    #[tokio::test]
+    async fn notify_queued_renderer_panic_becomes_error_before_dispatch() {
+        let app = test_app(Vec::new());
+
+        let error = notify_queued(&app, &TestNotifiable, &PanickingCustomPayloadNotification)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "notification custom channel `sms` renderer panicked: custom renderer exploded"
+        ));
+    }
+
+    #[test]
+    fn public_notification_job_builder_does_not_panic_on_renderer_panic() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            build_notification_job(&TestNotifiable, &PanickingCustomPayloadNotification)
+        }));
+
+        let job = result.expect("builder should isolate notification renderer panics");
+        assert!(job.channels.is_empty());
+        assert_eq!(job.notification_type, "unknown");
+    }
 }

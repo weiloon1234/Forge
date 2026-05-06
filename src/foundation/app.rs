@@ -414,8 +414,15 @@ impl AppTransaction {
         notifiable: &dyn crate::notifications::Notifiable,
         notification: &dyn crate::notifications::Notification,
     ) {
-        let job = crate::notifications::build_notification_job(notifiable, notification);
-        self.dispatch_after_commit(job);
+        match crate::notifications::try_build_notification_job(notifiable, notification) {
+            Ok(job) => self.dispatch_after_commit(job),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "after-commit notification payload rendering failed"
+                );
+            }
+        }
     }
 
     /// Register an arbitrary async callback to run after a successful `commit()`.
@@ -1435,6 +1442,11 @@ mod tests {
         log: Arc<Mutex<Vec<String>>>,
     }
 
+    struct AppAwareFactoryPanicProvider;
+
+    #[derive(Debug)]
+    struct AppAwarePanicFactoryService;
+
     struct BootServiceProvider {
         resolved: Arc<Mutex<Vec<&'static str>>>,
     }
@@ -1488,6 +1500,16 @@ mod tests {
             })?;
             registrar.listen_event::<AppAwareFactoryEvent, _>(AppAwareFactoryListener {
                 log: self.log.clone(),
+            })?;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ServiceProvider for AppAwareFactoryPanicProvider {
+        async fn register(&self, registrar: &mut ServiceRegistrar) -> Result<()> {
+            registrar.factory::<AppAwarePanicFactoryService, _>(|_, _| {
+                panic!("app-aware factory exploded")
             })?;
             Ok(())
         }
@@ -1876,5 +1898,26 @@ mod tests {
             log.lock().unwrap().as_slice(),
             ["factory-ready:forge:development"]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_factory_panic_isolated_during_resolution() {
+        let kernel = App::builder()
+            .register_provider(AppAwareFactoryPanicProvider)
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        let error = kernel
+            .app()
+            .resolve::<AppAwarePanicFactoryService>()
+            .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(&format!(
+            "service factory `{}`",
+            std::any::type_name::<AppAwarePanicFactoryService>()
+        )));
+        assert!(message.contains("panicked: app-aware factory exploded"));
     }
 }

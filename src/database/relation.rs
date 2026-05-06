@@ -1,10 +1,13 @@
+use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::foundation::{Error, Result};
+use crate::logging::panic_payload_message;
 
 use super::ast::{
     AggregateNode, ColumnRef, ComparisonOp, Condition, DbValue, Expr, JoinKind, JoinNode, QueryAst,
@@ -188,7 +191,8 @@ where
             pivot_record.insert(field.alias.to_string(), value.clone());
         }
         let pivot = self.meta.hydrate_record(&pivot_record)?;
-        (self.attach)(child, pivot);
+        catch_unwind(AssertUnwindSafe(|| (self.attach)(child, pivot)))
+            .map_err(|panic| relation_callback_panic_error("pivot attach callback", panic))?;
         Ok(())
     }
 }
@@ -685,19 +689,18 @@ where
     }
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
-        let keys = collect_relation_keys(parents, &self.parent_key);
+        let keys = collect_relation_keys(parents, |parent| relation_parent_key(self, parent))?;
         let child_entries = fetch_relation_child_entries(executor, self, keys).await?;
-        let mut grouped = group_relation_entries(child_entries, &self.target_column)?;
-        let mut remaining = count_parent_relation_keys(parents, &self.parent_key);
+        let mut grouped = group_relation_entries(child_entries, &self.target_column)
+            .map_err(|error| relation_load_error(self, "group related models", error))?;
+        let mut remaining =
+            count_parent_relation_keys(parents, |parent| relation_parent_key(self, parent))?;
 
         for parent in parents.iter_mut() {
-            let values = (self.parent_key)(parent)
+            let values = relation_parent_key(self, parent)?
                 .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
-            match &self.attach {
-                RelationAttach::Many(attach) => attach(parent, values),
-                RelationAttach::One(attach) => attach(parent, values.into_iter().next()),
-            }
+            attach_relation_values(self, parent, values)?;
         }
 
         Ok(())
@@ -710,12 +713,12 @@ where
         };
 
         // Find indices of parents that need loading
-        let unloaded_indices: Vec<usize> = parents
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !is_loaded_fn(p))
-            .map(|(i, _)| i)
-            .collect();
+        let mut unloaded_indices = Vec::new();
+        for (index, parent) in parents.iter().enumerate() {
+            if !relation_is_loaded(self, is_loaded_fn, parent)? {
+                unloaded_indices.push(index);
+            }
+        }
 
         if unloaded_indices.is_empty() {
             return Ok(());
@@ -725,7 +728,7 @@ where
         let mut keys = Vec::new();
         let mut seen = BTreeSet::new();
         for &i in &unloaded_indices {
-            if let Some(key) = (self.parent_key)(&parents[i]) {
+            if let Some(key) = relation_parent_key(self, &parents[i])? {
                 if seen.insert(key.relation_key()) {
                     keys.push(key);
                 }
@@ -733,20 +736,21 @@ where
         }
 
         let child_entries = fetch_relation_child_entries(executor, self, keys).await?;
-        let mut grouped = group_relation_entries(child_entries, &self.target_column)?;
-        let mut remaining =
-            count_parent_relation_keys_for_indices(parents, &self.parent_key, &unloaded_indices);
+        let mut grouped = group_relation_entries(child_entries, &self.target_column)
+            .map_err(|error| relation_load_error(self, "group related models", error))?;
+        let mut remaining = count_parent_relation_keys_for_indices(
+            parents,
+            |parent| relation_parent_key(self, parent),
+            &unloaded_indices,
+        )?;
 
         // Attach only to unloaded parents
         for &i in &unloaded_indices {
             let parent = &mut parents[i];
-            let values = (self.parent_key)(parent)
+            let values = relation_parent_key(self, parent)?
                 .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
-            match &self.attach {
-                RelationAttach::Many(attach) => attach(parent, values),
-                RelationAttach::One(attach) => attach(parent, values.into_iter().next()),
-            }
+            attach_relation_values(self, parent, values)?;
         }
 
         Ok(())
@@ -765,55 +769,68 @@ where
     }
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
-        let keys = collect_relation_keys(parents, &self.parent_key);
+        let keys = collect_relation_keys(parents, |parent| many_to_many_parent_key(self, parent))?;
         if keys.is_empty() {
             for parent in parents.iter_mut() {
-                (self.attach)(parent, Vec::new());
+                attach_many_to_many_values(self, parent, Vec::new())?;
             }
             return Ok(());
         }
 
-        let records = fetch_many_to_many_records(executor, self, keys).await?;
-        let mut models = records
-            .iter()
-            .map(|record| self.target_table.hydrate_record(record))
-            .collect::<Result<Vec<_>>>()?;
+        let records = fetch_many_to_many_records(executor, self, keys)
+            .await
+            .map_err(|error| many_to_many_load_error(self, "fetch related records", error))?;
+        let mut models = hydrate_many_to_many_models(self, &records)?;
 
         if let Some(pivot_attacher) = &self.pivot_attacher {
             for (record, model) in records.iter().zip(models.iter_mut()) {
-                pivot_attacher.attach(record, model)?;
+                pivot_attacher.attach(record, model).map_err(|error| {
+                    many_to_many_load_error(self, "hydrate pivot projection", error)
+                })?;
             }
         }
 
         register_model_records(self.target_table, &records);
 
         for extension in &self.child_extensions {
-            extension.load(executor, &models).await?;
+            extension.load(executor, &models).await.map_err(|error| {
+                many_to_many_load_error(self, "load child model extensions", error)
+            })?;
         }
 
         for child in &self.children {
-            child.load(executor, &mut models).await?;
+            child
+                .load(executor, &mut models)
+                .await
+                .map_err(|error| many_to_many_load_error(self, "load nested relations", error))?;
         }
 
         for aggregate in &self.child_aggregates {
-            aggregate.load(executor, &mut models).await?;
+            aggregate
+                .load(executor, &mut models)
+                .await
+                .map_err(|error| {
+                    many_to_many_load_error(self, "load nested relation aggregates", error)
+                })?;
         }
 
         let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
         for (record, model) in records.into_iter().zip(models.into_iter()) {
             let key = record
                 .get(RELATION_GROUP_KEY_ALIAS)
-                .ok_or_else(|| Error::message("missing many-to-many group key in record"))?
+                .ok_or_else(|| Error::message("missing many-to-many group key in record"))
+                .map_err(|error| many_to_many_load_error(self, "group related models", error))?
                 .relation_key();
             grouped.entry(key).or_default().push(model);
         }
-        let mut remaining = count_parent_relation_keys(parents, &self.parent_key);
+        let mut remaining =
+            count_parent_relation_keys(parents, |parent| many_to_many_parent_key(self, parent))?;
 
         for parent in parents.iter_mut() {
-            let children = (self.parent_key)(parent)
+            let children = many_to_many_parent_key(self, parent)?
                 .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
-            (self.attach)(parent, children);
+            attach_many_to_many_values(self, parent, children)?;
         }
 
         Ok(())
@@ -825,12 +842,12 @@ where
             None => return self.load(executor, parents).await,
         };
 
-        let unloaded_indices: Vec<usize> = parents
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !is_loaded_fn(p))
-            .map(|(i, _)| i)
-            .collect();
+        let mut unloaded_indices = Vec::new();
+        for (index, parent) in parents.iter().enumerate() {
+            if !many_to_many_is_loaded(self, is_loaded_fn, parent)? {
+                unloaded_indices.push(index);
+            }
+        }
 
         if unloaded_indices.is_empty() {
             return Ok(());
@@ -840,7 +857,7 @@ where
         let mut keys = Vec::new();
         let mut seen = BTreeSet::new();
         for &i in &unloaded_indices {
-            if let Some(key) = (self.parent_key)(&parents[i]) {
+            if let Some(key) = many_to_many_parent_key(self, &parents[i])? {
                 if seen.insert(key.relation_key()) {
                     keys.push(key);
                 }
@@ -850,54 +867,69 @@ where
         if keys.is_empty() {
             for &i in &unloaded_indices {
                 let parent = &mut parents[i];
-                (self.attach)(parent, Vec::new());
+                attach_many_to_many_values(self, parent, Vec::new())?;
             }
             return Ok(());
         }
 
-        let records = fetch_many_to_many_records(executor, self, keys).await?;
-        let mut models = records
-            .iter()
-            .map(|record| self.target_table.hydrate_record(record))
-            .collect::<Result<Vec<_>>>()?;
+        let records = fetch_many_to_many_records(executor, self, keys)
+            .await
+            .map_err(|error| many_to_many_load_error(self, "fetch related records", error))?;
+        let mut models = hydrate_many_to_many_models(self, &records)?;
 
         if let Some(pivot_attacher) = &self.pivot_attacher {
             for (record, model) in records.iter().zip(models.iter_mut()) {
-                pivot_attacher.attach(record, model)?;
+                pivot_attacher.attach(record, model).map_err(|error| {
+                    many_to_many_load_error(self, "hydrate pivot projection", error)
+                })?;
             }
         }
 
         register_model_records(self.target_table, &records);
 
         for extension in &self.child_extensions {
-            extension.load(executor, &models).await?;
+            extension.load(executor, &models).await.map_err(|error| {
+                many_to_many_load_error(self, "load child model extensions", error)
+            })?;
         }
 
         for child in &self.children {
-            child.load(executor, &mut models).await?;
+            child
+                .load(executor, &mut models)
+                .await
+                .map_err(|error| many_to_many_load_error(self, "load nested relations", error))?;
         }
         for aggregate in &self.child_aggregates {
-            aggregate.load(executor, &mut models).await?;
+            aggregate
+                .load(executor, &mut models)
+                .await
+                .map_err(|error| {
+                    many_to_many_load_error(self, "load nested relation aggregates", error)
+                })?;
         }
 
         let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
         for (record, model) in records.into_iter().zip(models.into_iter()) {
             let key = record
                 .get(RELATION_GROUP_KEY_ALIAS)
-                .ok_or_else(|| Error::message("missing many-to-many group key in record"))?
+                .ok_or_else(|| Error::message("missing many-to-many group key in record"))
+                .map_err(|error| many_to_many_load_error(self, "group related models", error))?
                 .relation_key();
             grouped.entry(key).or_default().push(model);
         }
-        let mut remaining =
-            count_parent_relation_keys_for_indices(parents, &self.parent_key, &unloaded_indices);
+        let mut remaining = count_parent_relation_keys_for_indices(
+            parents,
+            |parent| many_to_many_parent_key(self, parent),
+            &unloaded_indices,
+        )?;
 
         // Attach only to unloaded parents
         for &i in &unloaded_indices {
             let parent = &mut parents[i];
-            let children = (self.parent_key)(parent)
+            let children = many_to_many_parent_key(self, parent)?
                 .map(|key| take_grouped_values(&mut grouped, &mut remaining, &key.relation_key()))
                 .unwrap_or_default();
-            (self.attach)(parent, children);
+            attach_many_to_many_values(self, parent, children)?;
         }
 
         Ok(())
@@ -925,16 +957,21 @@ where
     }
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
-        let keys = collect_relation_keys(parents, &self.relation.parent_key);
+        let keys = collect_relation_keys(parents, |parent| {
+            relation_parent_key(&self.relation, parent)
+        })?;
         let grouped =
             execute_relation_aggregate_query(executor, &self.relation, self.kind.clone(), keys)
-                .await?;
+                .await
+                .map_err(|error| {
+                    relation_load_error(&self.relation, "load aggregate values", error)
+                })?;
         for parent in parents.iter_mut() {
-            let value = (self.relation.parent_key)(parent)
+            let value = relation_parent_key(&self.relation, parent)?
                 .and_then(|key| grouped.get(&key.relation_key()))
                 .and_then(|record| record.decode::<i64>(RELATION_AGGREGATE_ALIAS).ok())
                 .unwrap_or(0);
-            (self.attach)(parent, value);
+            attach_relation_aggregate_value(&self.relation, &self.attach, parent, value)?;
         }
         Ok(())
     }
@@ -955,17 +992,25 @@ where
     }
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
-        let keys = collect_relation_keys(parents, &self.relation.parent_key);
+        let keys = collect_relation_keys(parents, |parent| {
+            relation_parent_key(&self.relation, parent)
+        })?;
         let grouped =
             execute_relation_aggregate_query(executor, &self.relation, self.kind.clone(), keys)
-                .await?;
+                .await
+                .map_err(|error| {
+                    relation_load_error(&self.relation, "load aggregate values", error)
+                })?;
         for parent in parents.iter_mut() {
-            let value = (self.relation.parent_key)(parent)
+            let value = relation_parent_key(&self.relation, parent)?
                 .and_then(|key| grouped.get(&key.relation_key()))
                 .map(|record| record.decode::<Option<Value>>(RELATION_AGGREGATE_ALIAS))
-                .transpose()?
+                .transpose()
+                .map_err(|error| {
+                    relation_load_error(&self.relation, "decode aggregate value", error)
+                })?
                 .flatten();
-            (self.attach)(parent, value);
+            attach_relation_aggregate_value(&self.relation, &self.attach, parent, value)?;
         }
         Ok(())
     }
@@ -993,16 +1038,21 @@ where
     }
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
-        let keys = collect_relation_keys(parents, &self.relation.parent_key);
+        let keys = collect_relation_keys(parents, |parent| {
+            many_to_many_parent_key(&self.relation, parent)
+        })?;
         let grouped =
             execute_many_to_many_aggregate_query(executor, &self.relation, self.kind.clone(), keys)
-                .await?;
+                .await
+                .map_err(|error| {
+                    many_to_many_load_error(&self.relation, "load aggregate values", error)
+                })?;
         for parent in parents.iter_mut() {
-            let value = (self.relation.parent_key)(parent)
+            let value = many_to_many_parent_key(&self.relation, parent)?
                 .and_then(|key| grouped.get(&key.relation_key()))
                 .and_then(|record| record.decode::<i64>(RELATION_AGGREGATE_ALIAS).ok())
                 .unwrap_or(0);
-            (self.attach)(parent, value);
+            attach_many_to_many_aggregate_value(&self.relation, &self.attach, parent, value)?;
         }
         Ok(())
     }
@@ -1024,17 +1074,25 @@ where
     }
 
     async fn load(&self, executor: &dyn QueryExecutor, parents: &mut [From]) -> Result<()> {
-        let keys = collect_relation_keys(parents, &self.relation.parent_key);
+        let keys = collect_relation_keys(parents, |parent| {
+            many_to_many_parent_key(&self.relation, parent)
+        })?;
         let grouped =
             execute_many_to_many_aggregate_query(executor, &self.relation, self.kind.clone(), keys)
-                .await?;
+                .await
+                .map_err(|error| {
+                    many_to_many_load_error(&self.relation, "load aggregate values", error)
+                })?;
         for parent in parents.iter_mut() {
-            let value = (self.relation.parent_key)(parent)
+            let value = many_to_many_parent_key(&self.relation, parent)?
                 .and_then(|key| grouped.get(&key.relation_key()))
                 .map(|record| record.decode::<Option<Value>>(RELATION_AGGREGATE_ALIAS))
-                .transpose()?
+                .transpose()
+                .map_err(|error| {
+                    many_to_many_load_error(&self.relation, "decode aggregate value", error)
+                })?
                 .flatten();
-            (self.attach)(parent, value);
+            attach_many_to_many_aggregate_value(&self.relation, &self.attach, parent, value)?;
         }
         Ok(())
     }
@@ -1223,10 +1281,220 @@ where
         for aggregate in &relation.child_aggregates {
             query = query.with_aggregate_boxed(aggregate.clone());
         }
-        entries.extend(query.fetch_entries_dyn(executor).await?);
+        entries.extend(
+            query
+                .fetch_entries_dyn(executor)
+                .await
+                .map_err(|error| relation_load_error(relation, "load related models", error))?,
+        );
     }
 
     Ok(entries)
+}
+
+fn hydrate_many_to_many_models<From, To, Pivot>(
+    relation: &ManyToManyDef<From, To, Pivot>,
+    records: &[DbRecord],
+) -> Result<Vec<To>>
+where
+    To: Model,
+    Pivot: 'static,
+{
+    records
+        .iter()
+        .map(|record| relation.target_table.hydrate_record(record))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|error| many_to_many_load_error(relation, "hydrate related models", error))
+}
+
+fn relation_parent_key<From, To>(
+    relation: &RelationDef<From, To>,
+    parent: &From,
+) -> Result<Option<DbValue>>
+where
+    To: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| (relation.parent_key)(parent))).map_err(|panic| {
+        relation_load_error(
+            relation,
+            "read parent key",
+            relation_callback_panic_error("relation parent key callback", panic),
+        )
+    })
+}
+
+fn many_to_many_parent_key<From, To, Pivot>(
+    relation: &ManyToManyDef<From, To, Pivot>,
+    parent: &From,
+) -> Result<Option<DbValue>>
+where
+    To: 'static,
+    Pivot: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| (relation.parent_key)(parent))).map_err(|panic| {
+        many_to_many_load_error(
+            relation,
+            "read parent key",
+            relation_callback_panic_error("many-to-many parent key callback", panic),
+        )
+    })
+}
+
+fn relation_is_loaded<From, To>(
+    relation: &RelationDef<From, To>,
+    is_loaded: &Arc<IsLoadedFn<From>>,
+    parent: &From,
+) -> Result<bool>
+where
+    To: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| is_loaded(parent))).map_err(|panic| {
+        relation_load_error(
+            relation,
+            "check loaded state",
+            relation_callback_panic_error("relation is_loaded callback", panic),
+        )
+    })
+}
+
+fn many_to_many_is_loaded<From, To, Pivot>(
+    relation: &ManyToManyDef<From, To, Pivot>,
+    is_loaded: &Arc<IsLoadedFn<From>>,
+    parent: &From,
+) -> Result<bool>
+where
+    To: 'static,
+    Pivot: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| is_loaded(parent))).map_err(|panic| {
+        many_to_many_load_error(
+            relation,
+            "check loaded state",
+            relation_callback_panic_error("many-to-many is_loaded callback", panic),
+        )
+    })
+}
+
+fn attach_relation_values<From, To>(
+    relation: &RelationDef<From, To>,
+    parent: &mut From,
+    values: Vec<To>,
+) -> Result<()>
+where
+    To: 'static,
+{
+    let result = match &relation.attach {
+        RelationAttach::Many(attach) => catch_unwind(AssertUnwindSafe(|| attach(parent, values))),
+        RelationAttach::One(attach) => catch_unwind(AssertUnwindSafe(|| {
+            attach(parent, values.into_iter().next())
+        })),
+    };
+
+    result.map_err(|panic| {
+        relation_load_error(
+            relation,
+            "attach related models",
+            relation_callback_panic_error("relation attach callback", panic),
+        )
+    })
+}
+
+fn attach_many_to_many_values<From, To, Pivot>(
+    relation: &ManyToManyDef<From, To, Pivot>,
+    parent: &mut From,
+    children: Vec<To>,
+) -> Result<()>
+where
+    To: 'static,
+    Pivot: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| (relation.attach)(parent, children))).map_err(|panic| {
+        many_to_many_load_error(
+            relation,
+            "attach related models",
+            relation_callback_panic_error("many-to-many attach callback", panic),
+        )
+    })
+}
+
+fn attach_relation_aggregate_value<From, To, Value>(
+    relation: &RelationDef<From, To>,
+    attach: &Arc<AttachAggregateFn<From, Value>>,
+    parent: &mut From,
+    value: Value,
+) -> Result<()>
+where
+    To: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| attach(parent, value))).map_err(|panic| {
+        relation_load_error(
+            relation,
+            "attach aggregate value",
+            relation_callback_panic_error("relation aggregate attach callback", panic),
+        )
+    })
+}
+
+fn attach_many_to_many_aggregate_value<From, To, Pivot, Value>(
+    relation: &ManyToManyDef<From, To, Pivot>,
+    attach: &Arc<AttachAggregateFn<From, Value>>,
+    parent: &mut From,
+    value: Value,
+) -> Result<()>
+where
+    To: 'static,
+    Pivot: 'static,
+{
+    catch_unwind(AssertUnwindSafe(|| attach(parent, value))).map_err(|panic| {
+        many_to_many_load_error(
+            relation,
+            "attach aggregate value",
+            relation_callback_panic_error("many-to-many aggregate attach callback", panic),
+        )
+    })
+}
+
+fn relation_callback_panic_error(callback: &'static str, panic: Box<dyn Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        callback = callback,
+        panic = %message,
+        "relation callback panicked"
+    );
+    Error::message(format!("{callback} panicked: {message}"))
+}
+
+fn relation_load_error<From, To>(
+    relation: &RelationDef<From, To>,
+    action: &str,
+    error: Error,
+) -> Error
+where
+    To: 'static,
+{
+    Error::message(format!(
+        "relation `{}` failed to {action} from target `{}`: {error}",
+        relation.name,
+        relation.target_table.name()
+    ))
+}
+
+fn many_to_many_load_error<From, To, Pivot>(
+    relation: &ManyToManyDef<From, To, Pivot>,
+    action: &str,
+    error: Error,
+) -> Error
+where
+    To: 'static,
+    Pivot: 'static,
+{
+    Error::message(format!(
+        "many-to-many relation `{}` failed to {action} from target `{}` via pivot `{}`: {error}",
+        relation.name,
+        relation.target_table.name(),
+        relation.pivot_table.name
+    ))
 }
 
 fn group_relation_entries<To>(
@@ -1299,29 +1567,29 @@ where
 
 fn count_parent_relation_keys<From>(
     parents: &[From],
-    parent_key: &Arc<ParentKeyFn<From>>,
-) -> HashMap<String, usize> {
+    parent_key: impl Fn(&From) -> Result<Option<DbValue>>,
+) -> Result<HashMap<String, usize>> {
     let mut counts = HashMap::new();
     for parent in parents {
-        if let Some(key) = parent_key(parent) {
+        if let Some(key) = parent_key(parent)? {
             *counts.entry(key.relation_key()).or_insert(0) += 1;
         }
     }
-    counts
+    Ok(counts)
 }
 
 fn count_parent_relation_keys_for_indices<From>(
     parents: &[From],
-    parent_key: &Arc<ParentKeyFn<From>>,
+    parent_key: impl Fn(&From) -> Result<Option<DbValue>>,
     indices: &[usize],
-) -> HashMap<String, usize> {
+) -> Result<HashMap<String, usize>> {
     let mut counts = HashMap::new();
     for &index in indices {
-        if let Some(key) = parent_key(&parents[index]) {
+        if let Some(key) = parent_key(&parents[index])? {
             *counts.entry(key.relation_key()).or_insert(0) += 1;
         }
     }
-    counts
+    Ok(counts)
 }
 
 fn take_grouped_values<To: Clone>(
@@ -1344,20 +1612,20 @@ fn take_grouped_values<To: Clone>(
 
 fn collect_relation_keys<From>(
     parents: &[From],
-    parent_key: &Arc<ParentKeyFn<From>>,
-) -> Vec<DbValue> {
+    parent_key: impl Fn(&From) -> Result<Option<DbValue>>,
+) -> Result<Vec<DbValue>> {
     let mut keys = Vec::new();
     let mut seen = BTreeSet::new();
 
     for parent in parents {
-        if let Some(key) = parent_key(parent) {
+        if let Some(key) = parent_key(parent)? {
             if seen.insert(key.relation_key()) {
                 keys.push(key);
             }
         }
     }
 
-    keys
+    Ok(keys)
 }
 
 async fn execute_relation_aggregate_query<From, To>(
@@ -1468,7 +1736,91 @@ fn merge_condition(existing: Option<Condition>, next: Condition) -> Option<Condi
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_collection_relation_name, infer_singular_relation_name};
+    use async_trait::async_trait;
+
+    use super::{
+        has_many, infer_collection_relation_name, infer_singular_relation_name, many_to_many,
+        RelationLoader, PIVOT_ALIAS_PREFIX, RELATION_AGGREGATE_ALIAS, RELATION_GROUP_KEY_ALIAS,
+    };
+    use crate::database::{
+        DbRecord, DbValue, FromDbValue, Loaded, Projection, QueryExecutionOptions, QueryExecutor,
+    };
+    use crate::foundation::{Error, Result};
+
+    #[derive(Clone)]
+    struct StaticQueryExecutor {
+        records: Vec<DbRecord>,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for StaticQueryExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            Ok(self.records.clone())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct RelationPanicText(String);
+
+    impl FromDbValue for RelationPanicText {
+        fn from_db_value(value: &DbValue) -> Result<Self> {
+            match value {
+                DbValue::Text(value) if value == "panic-child" => {
+                    panic!("relation child hydrate boom")
+                }
+                DbValue::Text(value) if value == "panic-pivot" => {
+                    panic!("relation pivot hydrate boom")
+                }
+                DbValue::Text(value) => Ok(Self(value.clone())),
+                _ => Err(Error::message("expected text value")),
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "relation_context_parents", primary_key_strategy = "manual")]
+    struct RelationContextParent {
+        id: i64,
+        children: Loaded<Vec<RelationContextChild>>,
+        tags: Loaded<Vec<RelationContextTag>>,
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "relation_context_children", primary_key_strategy = "manual")]
+    struct RelationContextChild {
+        id: i64,
+        parent_id: i64,
+        #[forge(db_type = "text")]
+        value: RelationPanicText,
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "relation_context_tags", primary_key_strategy = "manual")]
+    struct RelationContextTag {
+        id: i64,
+        name: String,
+        pivot: Loaded<RelationContextPivot>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, crate::Projection)]
+    struct RelationContextPivot {
+        #[forge(db_type = "text")]
+        role: RelationPanicText,
+    }
 
     #[test]
     fn infers_collection_relation_names_from_table_names() {
@@ -1487,5 +1839,439 @@ mod tests {
             "category"
         );
         assert_eq!(infer_singular_relation_name("products"), "product");
+    }
+
+    #[tokio::test]
+    async fn relation_hydration_errors_include_relation_context() {
+        let mut child_record = DbRecord::new();
+        child_record.insert("id", DbValue::from(2_i64));
+        child_record.insert("parent_id", DbValue::from(1_i64));
+        child_record.insert("value", DbValue::from("panic-child"));
+        let executor = StaticQueryExecutor {
+            records: vec![child_record],
+        };
+        let relation = has_many(
+            RelationContextParent::ID,
+            RelationContextChild::PARENT_ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, children| parent.children = Loaded::new(children),
+        )
+        .named("panic_children");
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "relation `panic_children` failed to load related models from target `relation_context_children`"
+        ));
+        assert!(message.contains("model query failed to hydrate root rows"));
+        assert!(message.contains("hydration panicked: relation child hydrate boom"));
+    }
+
+    #[tokio::test]
+    async fn many_to_many_pivot_hydration_errors_include_relation_context() {
+        let mut tag_record = DbRecord::new();
+        tag_record.insert("id", DbValue::from(7_i64));
+        tag_record.insert("name", DbValue::from("security"));
+        tag_record.insert(RELATION_GROUP_KEY_ALIAS, DbValue::from(1_i64));
+        tag_record.insert(
+            format!("{PIVOT_ALIAS_PREFIX}role"),
+            DbValue::from("panic-pivot"),
+        );
+        let executor = StaticQueryExecutor {
+            records: vec![tag_record],
+        };
+        let relation = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, tags| parent.tags = Loaded::new(tags),
+        )
+        .named("panic_tags")
+        .with_pivot(RelationContextPivot::projection_meta(), |tag, pivot| {
+            tag.pivot = Loaded::new(pivot);
+        });
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_tags` failed to hydrate pivot projection from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message.contains("projection `"));
+        assert!(message.contains("hydration panicked: relation pivot hydrate boom"));
+    }
+
+    #[tokio::test]
+    async fn relation_attach_panics_include_relation_context() {
+        let mut child_record = DbRecord::new();
+        child_record.insert("id", DbValue::from(2_i64));
+        child_record.insert("parent_id", DbValue::from(1_i64));
+        child_record.insert("value", DbValue::from("ok"));
+        let executor = StaticQueryExecutor {
+            records: vec![child_record],
+        };
+        let relation = has_many(
+            RelationContextParent::ID,
+            RelationContextChild::PARENT_ID,
+            |parent: &RelationContextParent| parent.id,
+            |_parent, _children| panic!("relation attach boom"),
+        )
+        .named("panic_attach_children");
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "relation `panic_attach_children` failed to attach related models from target `relation_context_children`"
+        ));
+        assert!(message.contains("relation attach callback panicked: relation attach boom"));
+    }
+
+    #[tokio::test]
+    async fn many_to_many_attach_panics_include_relation_context() {
+        let mut tag_record = DbRecord::new();
+        tag_record.insert("id", DbValue::from(7_i64));
+        tag_record.insert("name", DbValue::from("security"));
+        tag_record.insert(RELATION_GROUP_KEY_ALIAS, DbValue::from(1_i64));
+        let executor = StaticQueryExecutor {
+            records: vec![tag_record],
+        };
+        let relation = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |parent: &RelationContextParent| parent.id,
+            |_parent, _tags| panic!("many attach boom"),
+        )
+        .named("panic_attach_tags");
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_attach_tags` failed to attach related models from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message.contains("many-to-many attach callback panicked: many attach boom"));
+    }
+
+    #[tokio::test]
+    async fn pivot_attach_panics_include_relation_context() {
+        let mut tag_record = DbRecord::new();
+        tag_record.insert("id", DbValue::from(7_i64));
+        tag_record.insert("name", DbValue::from("security"));
+        tag_record.insert(RELATION_GROUP_KEY_ALIAS, DbValue::from(1_i64));
+        tag_record.insert(format!("{PIVOT_ALIAS_PREFIX}role"), DbValue::from("ok"));
+        let executor = StaticQueryExecutor {
+            records: vec![tag_record],
+        };
+        let relation = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, tags| parent.tags = Loaded::new(tags),
+        )
+        .named("panic_pivot_attach_tags")
+        .with_pivot(RelationContextPivot::projection_meta(), |_tag, _pivot| {
+            panic!("pivot attach boom");
+        });
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_pivot_attach_tags` failed to hydrate pivot projection from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message.contains("pivot attach callback panicked: pivot attach boom"));
+    }
+
+    #[tokio::test]
+    async fn aggregate_attach_panics_include_relation_context() {
+        let mut aggregate_record = DbRecord::new();
+        aggregate_record.insert(RELATION_GROUP_KEY_ALIAS, DbValue::from(1_i64));
+        aggregate_record.insert(RELATION_AGGREGATE_ALIAS, DbValue::from(2_i64));
+        let executor = StaticQueryExecutor {
+            records: vec![aggregate_record],
+        };
+        let aggregate = has_many(
+            RelationContextParent::ID,
+            RelationContextChild::PARENT_ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, children| parent.children = Loaded::new(children),
+        )
+        .named("panic_child_count")
+        .count(|_parent, _count| panic!("aggregate attach boom"))
+        .into_loader();
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = aggregate.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "relation `panic_child_count` failed to attach aggregate value from target `relation_context_children`"
+        ));
+        assert!(
+            message.contains("relation aggregate attach callback panicked: aggregate attach boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn many_to_many_aggregate_attach_panics_include_relation_context() {
+        let mut aggregate_record = DbRecord::new();
+        aggregate_record.insert(RELATION_GROUP_KEY_ALIAS, DbValue::from(1_i64));
+        aggregate_record.insert(RELATION_AGGREGATE_ALIAS, DbValue::from(2_i64));
+        let executor = StaticQueryExecutor {
+            records: vec![aggregate_record],
+        };
+        let aggregate = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, tags| parent.tags = Loaded::new(tags),
+        )
+        .named("panic_tag_count")
+        .count(|_parent, _count| panic!("many aggregate attach boom"))
+        .into_loader();
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = aggregate.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_tag_count` failed to attach aggregate value from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message.contains(
+            "many-to-many aggregate attach callback panicked: many aggregate attach boom"
+        ));
+    }
+
+    #[tokio::test]
+    async fn relation_parent_key_panics_include_relation_context() {
+        let executor = StaticQueryExecutor {
+            records: Vec::new(),
+        };
+        let relation = has_many(
+            RelationContextParent::ID,
+            RelationContextChild::PARENT_ID,
+            |_parent: &RelationContextParent| -> i64 { panic!("relation parent key boom") },
+            |parent, children| parent.children = Loaded::new(children),
+        )
+        .named("panic_parent_key_children");
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "relation `panic_parent_key_children` failed to read parent key from target `relation_context_children`"
+        ));
+        assert!(message.contains("relation parent key callback panicked: relation parent key boom"));
+    }
+
+    #[tokio::test]
+    async fn relation_is_loaded_panics_include_relation_context() {
+        let executor = StaticQueryExecutor {
+            records: Vec::new(),
+        };
+        let relation = has_many(
+            RelationContextParent::ID,
+            RelationContextChild::PARENT_ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, children| parent.children = Loaded::new(children),
+        )
+        .named("panic_loaded_children")
+        .is_loaded(|_parent| panic!("relation is loaded boom"));
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation
+            .load_missing(&executor, &mut parents)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "relation `panic_loaded_children` failed to check loaded state from target `relation_context_children`"
+        ));
+        assert!(message.contains("relation is_loaded callback panicked: relation is loaded boom"));
+    }
+
+    #[tokio::test]
+    async fn many_to_many_parent_key_panics_include_relation_context() {
+        let executor = StaticQueryExecutor {
+            records: Vec::new(),
+        };
+        let relation = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |_parent: &RelationContextParent| -> i64 { panic!("many parent key boom") },
+            |parent, tags| parent.tags = Loaded::new(tags),
+        )
+        .named("panic_parent_key_tags");
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_parent_key_tags` failed to read parent key from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message.contains("many-to-many parent key callback panicked: many parent key boom"));
+    }
+
+    #[tokio::test]
+    async fn many_to_many_is_loaded_panics_include_relation_context() {
+        let executor = StaticQueryExecutor {
+            records: Vec::new(),
+        };
+        let relation = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |parent: &RelationContextParent| parent.id,
+            |parent, tags| parent.tags = Loaded::new(tags),
+        )
+        .named("panic_loaded_tags")
+        .is_loaded(|_parent| panic!("many is loaded boom"));
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = relation
+            .load_missing(&executor, &mut parents)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_loaded_tags` failed to check loaded state from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message.contains("many-to-many is_loaded callback panicked: many is loaded boom"));
+    }
+
+    #[tokio::test]
+    async fn aggregate_parent_key_panics_include_relation_context() {
+        let executor = StaticQueryExecutor {
+            records: Vec::new(),
+        };
+        let aggregate = has_many(
+            RelationContextParent::ID,
+            RelationContextChild::PARENT_ID,
+            |_parent: &RelationContextParent| -> i64 { panic!("aggregate parent key boom") },
+            |parent, children| parent.children = Loaded::new(children),
+        )
+        .named("panic_child_count_key")
+        .count(|_parent, _count| {})
+        .into_loader();
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = aggregate.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "relation `panic_child_count_key` failed to read parent key from target `relation_context_children`"
+        ));
+        assert!(
+            message.contains("relation parent key callback panicked: aggregate parent key boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn many_to_many_aggregate_parent_key_panics_include_relation_context() {
+        let executor = StaticQueryExecutor {
+            records: Vec::new(),
+        };
+        let aggregate = many_to_many::<RelationContextParent, RelationContextTag, (), i64, i64>(
+            RelationContextParent::ID,
+            "relation_context_tag_links",
+            "parent_id",
+            "tag_id",
+            RelationContextTag::ID,
+            |_parent: &RelationContextParent| -> i64 { panic!("many aggregate parent key boom") },
+            |parent, tags| parent.tags = Loaded::new(tags),
+        )
+        .named("panic_tag_count_key")
+        .count(|_parent, _count| {})
+        .into_loader();
+        let mut parents = vec![RelationContextParent {
+            id: 1,
+            children: Loaded::Unloaded,
+            tags: Loaded::Unloaded,
+        }];
+
+        let error = aggregate.load(&executor, &mut parents).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(
+            "many-to-many relation `panic_tag_count_key` failed to read parent key from target `relation_context_tags` via pivot `relation_context_tag_links`"
+        ));
+        assert!(message
+            .contains("many-to-many parent key callback panicked: many aggregate parent key boom"));
     }
 }

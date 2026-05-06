@@ -7,7 +7,9 @@ use crate::foundation::Result;
 use crate::jobs::{Job, JobContext};
 use crate::support::{JobId, NotificationChannelId};
 
-use super::{NotificationChannelRegistry, NOTIFY_BROADCAST, NOTIFY_DATABASE, NOTIFY_EMAIL};
+use super::{
+    callback, NotificationChannelRegistry, NOTIFY_BROADCAST, NOTIFY_DATABASE, NOTIFY_EMAIL,
+};
 
 /// Job payload that carries pre-rendered notification data for async dispatch.
 ///
@@ -88,7 +90,15 @@ impl Job for SendNotificationJob {
                         channels: self.channels.clone(),
                         custom_payloads: self.custom_payloads.clone(),
                     };
-                    if let Err(error) = channel.send(app, &stub, &stub_notification).await {
+                    if let Err(error) = callback::send_channel_adapter(
+                        channel_id,
+                        channel.as_ref(),
+                        app,
+                        &stub,
+                        &stub_notification,
+                    )
+                    .await
+                    {
                         tracing::error!(
                             channel = %channel_id,
                             notification_type = %self.notification_type,

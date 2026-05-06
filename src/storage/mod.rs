@@ -1,4 +1,5 @@
 pub mod adapter;
+pub(crate) mod callback;
 pub mod config;
 pub mod disk;
 pub mod local;
@@ -111,7 +112,7 @@ impl StorageManager {
                     let factory = custom_drivers.get(custom_name).ok_or_else(|| {
                         Error::message(format!("unknown storage driver `{custom_name}`"))
                     })?;
-                    factory(config, table).await?
+                    callback::build_storage_driver(custom_name, factory, config, table).await?
                 }
             };
 
@@ -380,5 +381,58 @@ mod tests {
         assert!(err
             .to_string()
             .contains("memory driver not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn storage_driver_factory_panic_becomes_error() {
+        let config = config_from_toml(
+            r#"
+            [storage]
+            default = "panic"
+
+            [storage.disks.panic]
+            driver = "panic"
+        "#,
+        );
+
+        let factory: StorageDriverFactory =
+            Arc::new(|_config, _table| panic!("storage factory exploded"));
+        let mut custom = HashMap::new();
+        custom.insert("panic".to_string(), factory);
+
+        let error = StorageManager::from_config(&config, custom)
+            .await
+            .expect_err("panicking storage driver factory should become an error");
+
+        assert!(error
+            .to_string()
+            .contains("storage driver `panic` factory panicked: storage factory exploded"));
+    }
+
+    #[tokio::test]
+    async fn storage_driver_factory_future_panic_becomes_error() {
+        let config = config_from_toml(
+            r#"
+            [storage]
+            default = "panic"
+
+            [storage.disks.panic]
+            driver = "panic"
+        "#,
+        );
+
+        let factory: StorageDriverFactory = Arc::new(|_config, _table| {
+            Box::pin(async { panic!("storage factory future exploded") })
+        });
+        let mut custom = HashMap::new();
+        custom.insert("panic".to_string(), factory);
+
+        let error = StorageManager::from_config(&config, custom)
+            .await
+            .expect_err("panicking storage driver factory future should become an error");
+
+        assert!(error
+            .to_string()
+            .contains("storage driver `panic` factory panicked: storage factory future exploded"));
     }
 }

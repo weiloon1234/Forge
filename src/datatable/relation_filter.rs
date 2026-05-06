@@ -7,6 +7,7 @@ use crate::database::{
 };
 use crate::foundation::{Error, Result};
 
+use super::callback::catch_datatable_callback;
 use super::filter_engine::build_filter_condition;
 use super::request::{DatatableFilterInput, DatatableFilterOp, DatatableFilterValue};
 
@@ -72,7 +73,13 @@ where
     }
 
     pub(crate) fn apply(&self, query: Query, filter: &DatatableFilterInput) -> Result<Query> {
-        (self.apply)(query, filter)
+        catch_datatable_callback(
+            format!(
+                "relation filter `{}` for relation `{}`",
+                self.field, self.relation
+            ),
+            || (self.apply)(query, filter),
+        )?
     }
 }
 
@@ -205,4 +212,50 @@ fn build_relation_like_any_condition<Row>(
         })
         .collect::<Vec<_>>();
     Ok(Condition::or(conditions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatatableRelationFilter;
+    use crate::datatable::{DatatableFilterInput, DatatableFilterOp, DatatableFilterValue};
+    use crate::foundation::Error;
+
+    fn text_filter(field: &str) -> DatatableFilterInput {
+        DatatableFilterInput {
+            field: field.to_string(),
+            op: DatatableFilterOp::Like,
+            value: DatatableFilterValue::Text("forge".to_string()),
+        }
+    }
+
+    #[test]
+    fn relation_filter_apply_panic_becomes_datatable_error() {
+        let filter = DatatableRelationFilter::<(), i64>::new(
+            "merchant.name",
+            "merchant",
+            |_query, _filter| -> crate::Result<i64> { panic!("relation filter boom") },
+        );
+
+        let error = filter.apply(1, &text_filter("merchant.name")).unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "datatable relation filter `merchant.name` for relation `merchant` panicked: relation filter boom"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn relation_filter_apply_error_remains_unchanged() {
+        let filter = DatatableRelationFilter::<(), i64>::new(
+            "merchant.name",
+            "merchant",
+            |_query, _filter| Err(Error::message("bad relation filter")),
+        );
+
+        let error = filter.apply(1, &text_filter("merchant.name")).unwrap_err();
+
+        assert_eq!(error.to_string(), "bad relation filter");
+    }
 }

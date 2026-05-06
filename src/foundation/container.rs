@@ -1,8 +1,10 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, RwLock};
 
 use crate::foundation::{Error, Result};
+use crate::logging::panic_payload_message;
 
 type SharedService = Arc<dyn Any + Send + Sync>;
 type ServiceFactory = Arc<dyn Fn(&Container) -> Result<SharedService> + Send + Sync>;
@@ -108,7 +110,7 @@ impl Container {
 
         let shared = match entry {
             ServiceEntry::Singleton(value) => value,
-            ServiceEntry::Factory(factory) => factory(self)?,
+            ServiceEntry::Factory(factory) => resolve_factory::<T>(&factory, self)?,
         };
 
         Arc::downcast::<T>(shared).map_err(|_| {
@@ -131,9 +133,35 @@ impl Container {
     }
 }
 
+fn resolve_factory<T>(factory: &ServiceFactory, container: &Container) -> Result<SharedService>
+where
+    T: Send + Sync + 'static,
+{
+    match catch_unwind(AssertUnwindSafe(|| factory(container))) {
+        Ok(result) => result,
+        Err(panic) => Err(service_factory_panic_error(
+            std::any::type_name::<T>(),
+            panic,
+        )),
+    }
+}
+
+fn service_factory_panic_error(service: &'static str, panic: Box<dyn Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        service = service,
+        panic = %message,
+        "service factory panicked"
+    );
+    Error::message(format!("service factory `{service}` panicked: {message}"))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::Container;
+    use crate::foundation::Error;
 
     #[test]
     fn resolves_singletons_and_factories() {
@@ -156,5 +184,72 @@ mod tests {
             .singleton::<String>("duplicate".to_string())
             .unwrap_err();
         assert!(error.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn factory_panic_becomes_error() {
+        let container = Container::new();
+        container
+            .factory::<usize, _>(|_| panic!("factory exploded"))
+            .unwrap();
+
+        let error = container.resolve::<usize>().unwrap_err();
+        let message = error.to_string();
+
+        assert!(
+            message.contains(&format!(
+                "service factory `{}` panicked: factory exploded",
+                std::any::type_name::<usize>()
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn factory_arc_panic_becomes_error() {
+        let container = Container::new();
+        container
+            .factory_arc::<String, _>(|_| -> crate::foundation::Result<Arc<String>> {
+                panic!("arc factory exploded")
+            })
+            .unwrap();
+
+        let error = container.resolve::<String>().unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(&format!(
+            "service factory `{}`",
+            std::any::type_name::<String>()
+        )));
+        assert!(message.contains("panicked: arc factory exploded"));
+    }
+
+    #[test]
+    fn factory_error_remains_unchanged() {
+        let container = Container::new();
+        container
+            .factory::<usize, _>(|_| Err(Error::message("factory returned error")))
+            .unwrap();
+
+        let error = container.resolve::<usize>().unwrap_err();
+
+        assert_eq!(error.to_string(), "factory returned error");
+    }
+
+    #[test]
+    fn factory_panic_does_not_poison_other_resolution() {
+        let container = Container::new();
+        container.singleton::<String>("forge".to_string()).unwrap();
+        container
+            .factory::<usize, _>(|_| panic!("factory exploded"))
+            .unwrap();
+
+        let message = container.resolve::<usize>().unwrap_err().to_string();
+
+        assert!(message.contains(&format!(
+            "service factory `{}` panicked: factory exploded",
+            std::any::type_name::<usize>()
+        )));
+        assert_eq!(container.resolve::<String>().unwrap().as_str(), "forge");
     }
 }

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::database::DbValue;
 use crate::foundation::{AppContext, Result};
 
-use super::{Notifiable, Notification};
+use super::{callback, Notifiable, Notification};
 
 /// Adapter trait for notification delivery channels.
 ///
@@ -30,10 +30,10 @@ impl NotificationChannel for EmailNotificationChannel {
         notifiable: &dyn Notifiable,
         notification: &dyn Notification,
     ) -> Result<()> {
-        let Some(_email) = notifiable.route_notification_for("email") else {
+        let Some(_email) = callback::route_notification_for(notifiable, "email")? else {
             return Ok(());
         };
-        let Some(message) = notification.to_email(notifiable) else {
+        let Some(message) = callback::notification_email(notification, notifiable)? else {
             return Ok(());
         };
         app.email()?.send(message).await
@@ -52,15 +52,15 @@ impl NotificationChannel for DatabaseNotificationChannel {
         notifiable: &dyn Notifiable,
         notification: &dyn Notification,
     ) -> Result<()> {
-        let Some(data) = notification.to_database() else {
+        let Some(data) = callback::notification_database(notification)? else {
             return Ok(());
         };
         let db = app.database()?;
         db.raw_execute(
             "INSERT INTO notifications (notifiable_id, type, data, created_at) VALUES ($1, $2, $3, NOW())",
             &[
-                DbValue::Text(notifiable.notification_id()),
-                DbValue::Text(notification.notification_type().to_string()),
+                DbValue::Text(callback::notifiable_id(notifiable)?),
+                DbValue::Text(callback::notification_type(notification)?),
                 DbValue::Json(data),
             ],
         )
@@ -80,13 +80,13 @@ impl NotificationChannel for BroadcastNotificationChannel {
         notifiable: &dyn Notifiable,
         notification: &dyn Notification,
     ) -> Result<()> {
-        let Some(payload) = notification.to_broadcast() else {
+        let Some(payload) = callback::notification_broadcast(notification)? else {
             return Ok(());
         };
         let ws = app.websocket()?;
         let channel_id = crate::support::ChannelId::owned(format!(
             "notifications:{}",
-            notifiable.notification_id()
+            callback::notifiable_id(notifiable)?
         ));
         let event = crate::support::ChannelEventId::new("notification");
         ws.publish(channel_id, event, None::<&str>, payload).await

@@ -1,6 +1,11 @@
-use std::marker::PhantomData;
+use std::{
+    any::{type_name, Any},
+    marker::PhantomData,
+    panic::{catch_unwind, AssertUnwindSafe},
+};
 
-use crate::foundation::Result;
+use crate::foundation::{Error, Result};
+use crate::logging::panic_payload_message;
 
 use super::ast::{ColumnRef, DbType, Expr, FromItem, SelectItem};
 use super::model::FromDbValue;
@@ -137,7 +142,10 @@ impl<P> ProjectionMeta<P> {
     }
 
     pub fn hydrate_record(&self, record: &DbRecord) -> Result<P> {
-        (self.hydrate)(record)
+        match catch_unwind(AssertUnwindSafe(|| (self.hydrate)(record))) {
+            Ok(result) => result,
+            Err(panic) => Err(projection_hydration_panic_error::<P>(panic)),
+        }
     }
 
     pub fn source_select_items(&self, table_alias: &str) -> Result<Vec<SelectItem>> {
@@ -149,6 +157,20 @@ impl<P> ProjectionMeta<P> {
     }
 }
 
+fn projection_hydration_panic_error<P>(panic: Box<dyn Any + Send>) -> Error {
+    let projection = type_name::<P>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        projection = projection,
+        panic = %message,
+        "projection hydration panicked"
+    );
+    Error::message(format!(
+        "projection `{projection}` hydration panicked: {message}"
+    ))
+}
+
 pub trait Projection: Clone + Send + Sync + Sized + 'static {
     fn projection_meta() -> &'static ProjectionMeta<Self>;
 
@@ -158,5 +180,44 @@ pub trait Projection: Clone + Send + Sync + Sized + 'static {
 
     fn source(source: impl Into<FromItem>) -> super::query::ProjectionQuery<Self> {
         super::query::ProjectionQuery::new(source, Self::projection_meta())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::DbValue;
+    use crate::foundation::Error;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct PanickingHydrationText(String);
+
+    impl FromDbValue for PanickingHydrationText {
+        fn from_db_value(value: &DbValue) -> Result<Self> {
+            match value {
+                DbValue::Text(value) if value == "panic" => panic!("projection hydrate boom"),
+                DbValue::Text(value) => Ok(Self(value.clone())),
+                _ => Err(Error::message("expected text value")),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, crate::Projection)]
+    struct PanicHydrationProjection {
+        #[forge(db_type = "text")]
+        value: PanickingHydrationText,
+    }
+
+    #[test]
+    fn projection_meta_hydration_panic_becomes_error() {
+        let mut record = DbRecord::new();
+        record.insert("value", DbValue::from("panic"));
+
+        let error = PanicHydrationProjection::from_record(&record).unwrap_err();
+
+        assert!(error.to_string().contains("projection `"));
+        assert!(error
+            .to_string()
+            .contains("hydration panicked: projection hydrate boom"));
     }
 }

@@ -1,7 +1,8 @@
 use std::{
-    any::type_name,
+    any::{type_name, Any},
     future::Future,
     marker::PhantomData,
+    panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -13,6 +14,7 @@ use uuid::Uuid;
 use crate::config::DatabaseModelConfig;
 use crate::events::{Event, EventBus, EventOrigin};
 use crate::foundation::{AppContext, Error, Result};
+use crate::logging::panic_payload_message;
 use crate::support::{Date, DateTime, EventId, LocalDateTime, ModelId, Time};
 
 use super::ast::{
@@ -882,7 +884,23 @@ impl<M> TableMeta<M> {
     }
 
     pub fn hydrate_record(&self, record: &DbRecord) -> Result<M> {
-        (self.hydrate)(record)
+        match catch_unwind(AssertUnwindSafe(|| (self.hydrate)(record))) {
+            Ok(result) => result,
+            Err(panic) => Err(self.hydration_panic_error(panic)),
+        }
+    }
+
+    fn hydration_panic_error(&self, panic: Box<dyn Any + Send>) -> Error {
+        let model = type_name::<M>();
+        let message = panic_payload_message(panic);
+        tracing::error!(
+            target: "forge.database",
+            model = model,
+            table = self.name,
+            panic = %message,
+            "model hydration panicked"
+        );
+        Error::message(format!("model `{model}` hydration panicked: {message}"))
     }
 }
 
@@ -1315,5 +1333,47 @@ impl<T> Loaded<T> {
             Self::Loaded(value) => Some(value),
             Self::Unloaded => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct PanickingHydrationText(String);
+
+    impl FromDbValue for PanickingHydrationText {
+        fn from_db_value(value: &DbValue) -> Result<Self> {
+            match value {
+                DbValue::Text(value) if value == "panic" => panic!("model hydrate boom"),
+                DbValue::Text(value) => Ok(Self(value.clone())),
+                _ => Err(Error::message("expected text value")),
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "panic_hydration_models", primary_key_strategy = "manual")]
+    struct PanicHydrationModel {
+        id: i64,
+        #[forge(db_type = "text")]
+        value: PanickingHydrationText,
+    }
+
+    #[test]
+    fn table_meta_hydration_panic_becomes_error() {
+        let mut record = DbRecord::new();
+        record.insert("id", DbValue::from(1_i64));
+        record.insert("value", DbValue::from("panic"));
+
+        let error = PanicHydrationModel::table_meta()
+            .hydrate_record(&record)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("model `"));
+        assert!(error
+            .to_string()
+            .contains("hydration panicked: model hydrate boom"));
     }
 }

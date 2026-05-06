@@ -1025,10 +1025,10 @@ impl Worker {
             JobExecutionOutcome::Retry {
                 run_at_millis,
                 attempts,
+                error,
             } => {
                 if let Some(ref mw) = middleware {
-                    mw.run_failed(&envelope.job, &job_context, "job failed, scheduling retry")
-                        .await;
+                    mw.run_failed(&envelope.job, &job_context, &error).await;
                 }
                 let retry_job_id = envelope.job.clone();
                 let retry_queue = envelope.queue.clone();
@@ -1067,7 +1067,7 @@ impl Worker {
                     queue: &retry_queue,
                     status: JobHistoryStatus::Retried,
                     attempt: attempts,
-                    error: Some("job failed, scheduling retry"),
+                    error: Some(&error),
                     started_at,
                     duration_ms,
                 })
@@ -1781,8 +1781,15 @@ struct DeadLetterClaimedJob<'a> {
 
 enum JobExecutionOutcome {
     Success,
-    Retry { run_at_millis: i64, attempts: u32 },
-    DeadLetter { error: String, attempts: u32 },
+    Retry {
+        run_at_millis: i64,
+        attempts: u32,
+        error: String,
+    },
+    DeadLetter {
+        error: String,
+        attempts: u32,
+    },
 }
 
 #[async_trait]
@@ -1855,6 +1862,7 @@ where
             return Ok(JobExecutionOutcome::Retry {
                 run_at_millis,
                 attempts,
+                error: error_msg,
             });
         }
     }
@@ -2285,6 +2293,9 @@ mod tests {
             },
         );
         let app = build_app(runtime, diagnostics.clone());
+        let failed = Arc::new(Mutex::new(Vec::new()));
+        let dead_lettered = Arc::new(Mutex::new(Vec::new()));
+        register_panic_middleware(&app, failed.clone(), dead_lettered.clone());
 
         dispatcher.dispatch(PanicThenSucceedJob).await.unwrap();
         let worker = Worker::from_app(app).unwrap();
@@ -2294,12 +2305,17 @@ mod tests {
         assert_eq!(snapshot.jobs.retried_total, 1);
         assert_eq!(snapshot.jobs.dead_lettered_total, 0);
         assert_eq!(snapshot.jobs.succeeded_total, 0);
+        assert_eq!(
+            failed.lock().unwrap().as_slice(),
+            &["panic.then.succeed.job:job panicked: flaky panic"]
+        );
 
         assert!(worker.run_once().await.unwrap());
         let snapshot = diagnostics.snapshot();
         assert_eq!(snapshot.jobs.retried_total, 1);
         assert_eq!(snapshot.jobs.dead_lettered_total, 0);
         assert_eq!(snapshot.jobs.succeeded_total, 1);
+        assert!(dead_lettered.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

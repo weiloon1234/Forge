@@ -11,7 +11,9 @@ use crate::auth::AccessScope;
 use crate::config::ObservabilityConfig;
 use crate::database::DbValue;
 use crate::foundation::{AppContext, Error, Result};
-use crate::http::{HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions};
+use crate::http::{
+    wrap_http_authorize_callback, HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions,
+};
 use crate::openapi::spec::{generate_openapi_spec, DocumentedRoute};
 use crate::support::{GuardId, PermissionId};
 
@@ -93,7 +95,7 @@ impl ObservabilityOptions {
         F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        self.authorize = Some(std::sync::Arc::new(move |ctx| Box::pin(f(ctx))));
+        self.authorize = Some(wrap_http_authorize_callback(f));
         self
     }
 

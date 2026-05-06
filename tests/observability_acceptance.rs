@@ -86,6 +86,7 @@ mod app {
         pub enum ProbeBehavior {
             Healthy,
             Unhealthy,
+            Panic,
         }
 
         #[derive(Clone, Copy)]
@@ -106,6 +107,7 @@ mod app {
                         ids::ProbeKey::Database,
                         "database offline",
                     )),
+                    ProbeBehavior::Panic => panic!("database probe exploded"),
                 }
             }
         }
@@ -456,6 +458,47 @@ async fn readiness_endpoint_returns_503_when_provider_probe_fails() {
         .find(|probe| probe.id == app::ids::ProbeKey::Database.into())
         .unwrap();
     assert_eq!(database_probe.state, ProbeState::Unhealthy);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn readiness_endpoint_returns_503_when_provider_probe_panics() {
+    let config_dir = tempdir().unwrap();
+    let server_port = free_port();
+    write_http_config(
+        config_dir.path(),
+        server_port,
+        &format!("observability-ready-panic-{server_port}"),
+    );
+
+    let server = tokio::spawn({
+        let builder = build_http_app(config_dir.path(), app::providers::ProbeBehavior::Panic);
+        async move { builder.run_http_async().await.unwrap() }
+    });
+
+    let base_url = format!("http://127.0.0.1:{server_port}");
+    wait_for_http_ready(&base_url).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{base_url}/_forge/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let readiness: ReadinessReport = response.json().await.unwrap();
+    assert_eq!(readiness.state, ProbeState::Unhealthy);
+    let database_probe = readiness
+        .probes
+        .into_iter()
+        .find(|probe| probe.id == app::ids::ProbeKey::Database.into())
+        .unwrap();
+    assert_eq!(database_probe.state, ProbeState::Unhealthy);
+    assert_eq!(
+        database_probe.message.as_deref(),
+        Some("readiness check panicked: database probe exploded")
+    );
 
     server.abort();
 }

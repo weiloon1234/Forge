@@ -266,6 +266,15 @@ mod tests {
         }
     }
 
+    struct PanickingProbe;
+
+    #[async_trait]
+    impl ReadinessCheck for PanickingProbe {
+        async fn run(&self, _app: &AppContext) -> crate::Result<ProbeResult> {
+            panic!("probe boom")
+        }
+    }
+
     #[test]
     fn rejects_duplicate_probe_registration() {
         let mut builder = ReadinessRegistryBuilder::default();
@@ -306,5 +315,34 @@ mod tests {
         assert_eq!(report.probes[0].state, ProbeState::Healthy);
         assert_eq!(report.probes[1].state, ProbeState::Unhealthy);
         assert_eq!(report.probes[1].id, ProbeId::new("provider.fail"));
+    }
+
+    #[tokio::test]
+    async fn readiness_aggregation_reports_panics_as_unhealthy() {
+        let mut builder = ReadinessRegistryBuilder::default();
+        builder
+            .register_arc(ProbeId::new("provider.panic"), Arc::new(PanickingProbe))
+            .unwrap();
+
+        let diagnostics = RuntimeDiagnostics::new(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistryBuilder::freeze_shared(Arc::new(Mutex::new(builder))),
+        );
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let report = diagnostics.run_readiness_checks(&app).await.unwrap();
+
+        assert_eq!(report.state, ProbeState::Unhealthy);
+        assert_eq!(report.probes.len(), 1);
+        assert_eq!(report.probes[0].id, ProbeId::new("provider.panic"));
+        assert_eq!(report.probes[0].state, ProbeState::Unhealthy);
+        assert_eq!(
+            report.probes[0].message.as_deref(),
+            Some("readiness check panicked: probe boom")
+        );
     }
 }

@@ -7,6 +7,7 @@ pub(crate) mod spa;
 
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -16,11 +17,12 @@ use axum::middleware::{self as axum_middleware, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
 use axum::Router;
+use futures_util::FutureExt;
 
 use crate::auth::{token::actor_has_mfa_pending, AccessScope, Actor, AuthError, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
-use crate::logging::AuthOutcome;
+use crate::logging::{panic_payload_message, AuthOutcome};
 use crate::support::{GuardId, PermissionId, RouteId};
 pub use crate::validation::{JsonValidated, Validated};
 
@@ -800,12 +802,30 @@ fn apply_rate_limit(options: &mut HttpRouteOptions, rate_limit: middleware::Rate
     }
 }
 
-fn wrap_http_authorize_callback<F, Fut>(f: F) -> HttpAuthorizeCallback
+pub(crate) fn wrap_http_authorize_callback<F, Fut>(f: F) -> HttpAuthorizeCallback
 where
     F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
-    Arc::new(move |ctx| Box::pin(f(ctx)))
+    Arc::new(move |ctx| match catch_unwind(AssertUnwindSafe(|| f(ctx))) {
+        Ok(future) => Box::pin(async move {
+            match AssertUnwindSafe(future).catch_unwind().await {
+                Ok(result) => result,
+                Err(panic) => Err(http_authorizer_panic_error(panic)),
+            }
+        }),
+        Err(panic) => Box::pin(async move { Err(http_authorizer_panic_error(panic)) }),
+    })
+}
+
+fn http_authorizer_panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.auth",
+        panic = %message,
+        "http authorizer panicked"
+    );
+    Error::message(format!("http authorizer panicked: {message}"))
 }
 
 fn join_path_prefix(base: &str, path: &str) -> String {
@@ -1601,15 +1621,30 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::future::ready;
 
     use axum::routing::{delete, get, post, put};
 
     use super::{HttpRegistrar, HttpRegistration, HttpResourceRoutes, HttpRouteOptions};
+    use crate::auth::Actor;
+    use crate::config::ConfigRepository;
+    use crate::foundation::{AppContext, Container};
     use crate::http::middleware::{RateLimit, RateLimitWindow};
     use crate::support::{GuardId, PermissionId, RouteId};
+    use crate::validation::RuleRegistry;
 
     async fn ok() -> &'static str {
         "ok"
+    }
+
+    fn authorize_context() -> super::HttpAuthorizeContext {
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        super::HttpAuthorizeContext::new(app, Actor::new("user-1", GuardId::new("api")))
     }
 
     fn route_by_path<'a>(registrar: &'a HttpRegistrar, path: &str) -> &'a super::RouteRegistration {
@@ -1621,6 +1656,39 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing route at `{path}`"))
+    }
+
+    #[tokio::test]
+    async fn http_authorize_future_panic_becomes_error() {
+        let authorize = super::wrap_http_authorize_callback(|_ctx| async {
+            let should_panic = true;
+            if should_panic {
+                panic!("route auth boom");
+            }
+            Ok(())
+        });
+
+        let error = authorize(authorize_context()).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("http authorizer panicked: route auth boom"));
+    }
+
+    #[tokio::test]
+    async fn http_authorize_factory_panic_becomes_error() {
+        let authorize = super::wrap_http_authorize_callback(|_ctx| {
+            if std::hint::black_box(true) {
+                panic!("route auth factory boom");
+            }
+            ready(Ok(()))
+        });
+
+        let error = authorize(authorize_context()).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("http authorizer panicked: route auth factory boom"));
     }
 
     #[test]

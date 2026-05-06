@@ -12,6 +12,7 @@ use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::ops::Deref;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -20,12 +21,14 @@ use axum::extract::FromRequestParts;
 use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::AuthConfig;
 use crate::database::{ColumnRef, ComparisonOp, DbType, DbValue, Expr, Model, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
+use crate::logging::panic_payload_message;
 use crate::support::{GuardId, ModelId, PermissionId, PolicyId, RoleId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -698,10 +701,8 @@ impl AuthManager {
         let actor = match authenticator {
             GuardAuthenticator::Bearer(bearer) => {
                 let token = self.extract_token(headers)?;
-                bearer
-                    .authenticate(&token)
-                    .await
-                    .map_err(|error| AuthError::internal(error.to_string()))?
+                run_bearer_authenticator(&guard_id, bearer, &token)
+                    .await?
                     .ok_or_else(|| {
                         AuthError::unauthorized_code(AuthErrorCode::InvalidBearerToken)
                     })?
@@ -737,11 +738,7 @@ impl AuthManager {
 
         match authenticator {
             GuardAuthenticator::Bearer(bearer) => {
-                let Some(actor) = bearer
-                    .authenticate(token)
-                    .await
-                    .map_err(|error| AuthError::internal(error.to_string()))?
-                else {
+                let Some(actor) = run_bearer_authenticator(&guard_id, bearer, token).await? else {
                     return Err(AuthError::unauthorized_code(
                         AuthErrorCode::InvalidBearerToken,
                     ));
@@ -833,8 +830,63 @@ impl Authorizer {
             )));
         };
 
-        policy_handler.evaluate(actor, &self.app).await
+        run_policy_evaluator(&policy, policy_handler, actor, &self.app).await
     }
+}
+
+async fn run_bearer_authenticator(
+    guard: &GuardId,
+    bearer: Arc<dyn BearerAuthenticator>,
+    token: &str,
+) -> std::result::Result<Option<Actor>, AuthError> {
+    let future = match catch_unwind(AssertUnwindSafe(|| bearer.authenticate(token))) {
+        Ok(future) => future,
+        Err(panic) => return Err(auth_guard_panic_error(guard, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result.map_err(|error| AuthError::internal(error.to_string())),
+        Err(panic) => Err(auth_guard_panic_error(guard, panic)),
+    }
+}
+
+async fn run_policy_evaluator(
+    policy: &PolicyId,
+    policy_handler: Arc<dyn Policy>,
+    actor: &Actor,
+    app: &AppContext,
+) -> Result<bool> {
+    let future = match catch_unwind(AssertUnwindSafe(|| policy_handler.evaluate(actor, app))) {
+        Ok(future) => future,
+        Err(panic) => return Err(auth_policy_panic_error(policy, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(auth_policy_panic_error(policy, panic)),
+    }
+}
+
+fn auth_guard_panic_error(guard: &GuardId, panic: Box<dyn Any + Send>) -> AuthError {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.auth",
+        guard = %guard,
+        panic = %message,
+        "auth guard panicked"
+    );
+    AuthError::internal(format!("auth guard `{guard}` panicked: {message}"))
+}
+
+fn auth_policy_panic_error(policy: &PolicyId, panic: Box<dyn Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.auth",
+        policy = %policy,
+        panic = %message,
+        "auth policy panicked"
+    );
+    Error::message(format!("auth policy `{policy}` panicked: {message}"))
 }
 
 #[derive(Clone, Default)]
@@ -1016,6 +1068,24 @@ mod tests {
         }
     }
 
+    struct PanickingAuthenticator;
+
+    #[async_trait]
+    impl super::BearerAuthenticator for PanickingAuthenticator {
+        async fn authenticate(&self, _token: &str) -> crate::Result<Option<Actor>> {
+            panic!("guard boom")
+        }
+    }
+
+    struct PanickingPolicy;
+
+    #[async_trait]
+    impl super::Policy for PanickingPolicy {
+        async fn evaluate(&self, _actor: &Actor, _app: &AppContext) -> crate::Result<bool> {
+            panic!("policy boom")
+        }
+    }
+
     fn app() -> AppContext {
         AppContext::new(
             Container::new(),
@@ -1084,6 +1154,46 @@ mod tests {
 
         assert_eq!(resolved.id, actor.id);
         assert_eq!(resolved.guard, GuardId::new("api"));
+    }
+
+    #[tokio::test]
+    async fn bearer_authenticator_panic_becomes_internal_auth_error() {
+        let manager = AuthManager::new(
+            AuthConfig::default(),
+            HashMap::from([(
+                GuardId::new("api"),
+                super::GuardAuthenticator::Bearer(Arc::new(PanickingAuthenticator)),
+            )]),
+        );
+
+        let error = manager
+            .authenticate_token("token-1", Some(&GuardId::new("api")))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, super::AuthError::Internal(_)));
+        assert!(error
+            .to_string()
+            .contains("auth guard `api` panicked: guard boom"));
+    }
+
+    #[tokio::test]
+    async fn policy_panic_becomes_authorization_error() {
+        let app = app();
+        let authorizer = Authorizer::new(
+            app,
+            HashMap::from([(PolicyId::new("admin"), Arc::new(PanickingPolicy) as Arc<_>)]),
+        );
+        let actor = Actor::new("user-1", GuardId::new("api"));
+
+        let error = authorizer
+            .allows_policy(&actor, PolicyId::new("admin"))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("auth policy `admin` panicked: policy boom"));
     }
 
     #[tokio::test]

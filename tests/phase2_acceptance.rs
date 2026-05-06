@@ -23,6 +23,8 @@ mod app {
         pub const CLIENT_EVENTS_CHANNEL: ChannelId = ChannelId::new("client_events");
         pub const FAIL_CHANNEL: ChannelId = ChannelId::new("failures");
         pub const PRESENCE_CHANNEL: ChannelId = ChannelId::new("presence");
+        pub const JOIN_PANIC_CHANNEL: ChannelId = ChannelId::new("join_panic");
+        pub const LEAVE_PANIC_CHANNEL: ChannelId = ChannelId::new("leave_panic");
         pub const ECHO_EVENT: ChannelEventId = ChannelEventId::new("echo");
         pub const HTTP_NOTICE_EVENT: ChannelEventId = ChannelEventId::new("http_notice");
         pub const TYPING_EVENT: ChannelEventId = ChannelEventId::new("typing");
@@ -175,6 +177,26 @@ mod app {
                         log.lock().unwrap().push(format!("presence:left:{room}"));
                         Ok(())
                     }),
+            )?;
+            registrar.channel_with_options(
+                ids::JOIN_PANIC_CHANNEL,
+                |_context: WebSocketContext, _payload: serde_json::Value| async move { Ok(()) },
+                WebSocketChannelOptions::new().on_join(|_context| async {
+                    if std::hint::black_box(true) {
+                        panic!("join hook exploded");
+                    }
+                    Ok(())
+                }),
+            )?;
+            registrar.channel_with_options(
+                ids::LEAVE_PANIC_CHANNEL,
+                |_context: WebSocketContext, _payload: serde_json::Value| async move { Ok(()) },
+                WebSocketChannelOptions::new().on_leave(|_context| async {
+                    if std::hint::black_box(true) {
+                        panic!("leave hook exploded");
+                    }
+                    Ok(())
+                }),
             )?;
             Ok(())
         }
@@ -747,6 +769,58 @@ async fn websocket_disconnect_runs_presence_leave_and_lifecycle_hooks() {
     assert_eq!(leave.event, PRESENCE_LEAVE_EVENT);
     assert_eq!(leave.room.as_deref(), Some("team"));
     wait_for_log(&log, "presence:left:team").await;
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn websocket_lifecycle_hook_panics_do_not_break_subscription_flow() {
+    let config_dir = tempdir().unwrap();
+    let server_port = free_port();
+    let websocket_port = free_port();
+    write_phase2_config(
+        config_dir.path(),
+        server_port,
+        websocket_port,
+        &format!("phase2-lifecycle-panic-{websocket_port}"),
+    );
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = tokio::spawn({
+        let builder = build_websocket_app(config_dir.path(), log.clone(), false);
+        async move { builder.run_websocket_async().await.unwrap() }
+    });
+
+    let url = format!("ws://127.0.0.1:{websocket_port}/ws");
+    let mut socket = connect_websocket(&url).await;
+
+    send_ws_json(
+        &mut socket,
+        serde_json::json!({ "action": "subscribe", "channel": "join_panic" }),
+    )
+    .await;
+    assert_eq!(next_ws_message(&mut socket).await.event, SUBSCRIBED_EVENT);
+
+    send_ws_json(
+        &mut socket,
+        serde_json::json!({ "action": "subscribe", "channel": "leave_panic" }),
+    )
+    .await;
+    assert_eq!(next_ws_message(&mut socket).await.event, SUBSCRIBED_EVENT);
+
+    send_ws_json(
+        &mut socket,
+        serde_json::json!({ "action": "unsubscribe", "channel": "leave_panic" }),
+    )
+    .await;
+    assert_eq!(next_ws_message(&mut socket).await.event, UNSUBSCRIBED_EVENT);
+
+    send_ws_json(
+        &mut socket,
+        serde_json::json!({ "action": "subscribe", "channel": "chat" }),
+    )
+    .await;
+    assert_eq!(next_ws_message(&mut socket).await.event, SUBSCRIBED_EVENT);
 
     server.abort();
 }

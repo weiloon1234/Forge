@@ -344,6 +344,24 @@ impl PasswordUser {
     }
 }
 
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(table = PASSWORD_USERS_TABLE, primary_key_strategy = "manual")]
+struct PanickingPasswordUser {
+    id: i64,
+    email: String,
+    #[forge(write_mutator = "panic_password")]
+    password: String,
+}
+
+impl PanickingPasswordUser {
+    async fn panic_password(_context: &ModelHookContext<'_>, value: String) -> Result<String> {
+        if value == "panic-create" || value == "panic-update" {
+            panic!("password mutator boom");
+        }
+        Ok(format!("mutated:{value}"))
+    }
+}
+
 #[derive(Default)]
 struct TimestampHookLog {
     entries: Mutex<Vec<String>>,
@@ -797,6 +815,87 @@ impl ModelLifecycle<RejectingLifecycleUser> for RejectingLifecycleUserHooks {
     ) -> Result<()> {
         if draft.pending_record().decode::<String>("email")? == "reject@example.com" {
             return Err(Error::message("creating hook rejected row"));
+        }
+        Ok(())
+    }
+}
+
+struct PanickingLifecycleUserHooks;
+
+#[derive(Debug, PartialEq, forge::Model)]
+#[forge(table = USERS_TABLE, primary_key_strategy = "manual", lifecycle = PanickingLifecycleUserHooks)]
+struct PanickingLifecycleUser {
+    id: i64,
+    email: String,
+    active: bool,
+    nickname: Option<String>,
+}
+
+#[async_trait]
+impl ModelLifecycle<PanickingLifecycleUser> for PanickingLifecycleUserHooks {
+    async fn creating(
+        _context: &ModelHookContext<'_>,
+        draft: &mut CreateDraft<PanickingLifecycleUser>,
+    ) -> Result<()> {
+        if draft.pending_record().text("email") == "panic-creating@example.com" {
+            panic!("creating boom");
+        }
+        Ok(())
+    }
+
+    async fn created(
+        _context: &ModelHookContext<'_>,
+        _created: &PanickingLifecycleUser,
+        record: &DbRecord,
+    ) -> Result<()> {
+        if record.text("email") == "panic-created@example.com" {
+            panic!("created boom");
+        }
+        Ok(())
+    }
+
+    async fn updating(
+        _context: &ModelHookContext<'_>,
+        _current: &PanickingLifecycleUser,
+        draft: &mut UpdateDraft<PanickingLifecycleUser>,
+    ) -> Result<()> {
+        if draft.pending_record().text("nickname") == "panic-updating" {
+            panic!("updating boom");
+        }
+        Ok(())
+    }
+
+    async fn updated(
+        _context: &ModelHookContext<'_>,
+        _before: &PanickingLifecycleUser,
+        _after: &PanickingLifecycleUser,
+        _before_record: &DbRecord,
+        after_record: &DbRecord,
+    ) -> Result<()> {
+        if after_record.text("nickname") == "panic-updated" {
+            panic!("updated boom");
+        }
+        Ok(())
+    }
+
+    async fn deleting(
+        _context: &ModelHookContext<'_>,
+        _current: &PanickingLifecycleUser,
+        record: &DbRecord,
+    ) -> Result<()> {
+        if record.text("email") == "panic-deleting@example.com" {
+            panic!("deleting boom");
+        }
+        Ok(())
+    }
+
+    async fn deleted(
+        _context: &ModelHookContext<'_>,
+        _deleted: &PanickingLifecycleUser,
+        record: &DbRecord,
+    ) -> Result<()> {
+        if record.text("email") == "panic-deleted@example.com" {
+            panic!("deleted boom");
         }
         Ok(())
     }
@@ -1478,6 +1577,109 @@ async fn model_write_mutators_hash_passwords_and_generated_accessors_return_tran
         .unwrap()
         .unwrap();
     assert_eq!(raw_inserted.password, "raw-password");
+}
+
+#[tokio::test]
+async fn write_mutator_panics_roll_back_model_writes() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let create_error = PanickingPasswordUser::create()
+        .set(PanickingPasswordUser::ID, 10_i64)
+        .set(PanickingPasswordUser::EMAIL, "panic-create@example.com")
+        .set(PanickingPasswordUser::PASSWORD, "panic-create")
+        .save(app)
+        .await
+        .unwrap_err();
+    assert!(create_error
+        .to_string()
+        .contains("write mutator `password` panicked: password mutator boom"));
+    assert!(PanickingPasswordUser::query()
+        .where_(PanickingPasswordUser::ID.eq(10_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .is_none());
+
+    let bulk_error = PanickingPasswordUser::create_many()
+        .row(|row| {
+            row.set(PanickingPasswordUser::ID, 11_i64)
+                .set(PanickingPasswordUser::EMAIL, "bulk-ok@example.com")
+                .set(PanickingPasswordUser::PASSWORD, "bulk-ok")
+        })
+        .row(|row| {
+            row.set(PanickingPasswordUser::ID, 12_i64)
+                .set(PanickingPasswordUser::EMAIL, "bulk-panic@example.com")
+                .set(PanickingPasswordUser::PASSWORD, "panic-create")
+        })
+        .execute(app)
+        .await
+        .unwrap_err();
+    assert!(bulk_error
+        .to_string()
+        .contains("write mutator `password` panicked: password mutator boom"));
+    assert!(PanickingPasswordUser::query()
+        .where_(Condition::or([
+            PanickingPasswordUser::ID.eq(11_i64),
+            PanickingPasswordUser::ID.eq(12_i64),
+        ]))
+        .get(database)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let created = PanickingPasswordUser::create()
+        .set(PanickingPasswordUser::ID, 13_i64)
+        .set(PanickingPasswordUser::EMAIL, "ok@example.com")
+        .set(PanickingPasswordUser::PASSWORD, "ok")
+        .save(app)
+        .await
+        .unwrap();
+    assert_eq!(created.password, "mutated:ok");
+
+    let update_error = PanickingPasswordUser::update()
+        .set(PanickingPasswordUser::PASSWORD, "panic-update")
+        .where_(PanickingPasswordUser::ID.eq(13_i64))
+        .execute(app)
+        .await
+        .unwrap_err();
+    assert!(update_error
+        .to_string()
+        .contains("write mutator `password` panicked: password mutator boom"));
+    let unchanged = PanickingPasswordUser::query()
+        .where_(PanickingPasswordUser::ID.eq(13_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.password, "mutated:ok");
+
+    let conflict_error = PanickingPasswordUser::create()
+        .set(PanickingPasswordUser::ID, 13_i64)
+        .set(PanickingPasswordUser::EMAIL, "conflict@example.com")
+        .set(PanickingPasswordUser::PASSWORD, "incoming")
+        .on_conflict_columns([PanickingPasswordUser::ID])
+        .do_update()
+        .set_conflict(PanickingPasswordUser::PASSWORD, "panic-update")
+        .save(app)
+        .await
+        .unwrap_err();
+    assert!(conflict_error
+        .to_string()
+        .contains("write mutator `password` panicked: password mutator boom"));
+    let unchanged = PanickingPasswordUser::query()
+        .where_(PanickingPasswordUser::ID.eq(13_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.email, "ok@example.com");
+    assert_eq!(unchanged.password, "mutated:ok");
 }
 
 #[tokio::test]
@@ -2226,6 +2428,140 @@ async fn lifecycle_pre_commit_failures_roll_back_and_post_commit_failures_do_not
         .decode::<i64>("count")
         .unwrap();
     assert_eq!(count_after_event_failure, 1);
+}
+
+#[tokio::test]
+async fn model_lifecycle_panics_roll_back_like_hook_errors() {
+    let Some(runtime) = test_app_runtime().await else {
+        return;
+    };
+    let database = runtime.database.as_ref();
+    let app = &runtime.app;
+    let _guard = database_lock().lock().await;
+    reset_schema(database).await;
+
+    let creating_error = PanickingLifecycleUser::create()
+        .set(PanickingLifecycleUser::ID, 130_i64)
+        .set(PanickingLifecycleUser::EMAIL, "panic-creating@example.com")
+        .set(PanickingLifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap_err();
+    assert!(creating_error
+        .to_string()
+        .contains("creating hook panicked: creating boom"));
+    assert!(PanickingLifecycleUser::query()
+        .where_(PanickingLifecycleUser::ID.eq(130_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .is_none());
+
+    let created_error = PanickingLifecycleUser::create()
+        .set(PanickingLifecycleUser::ID, 131_i64)
+        .set(PanickingLifecycleUser::EMAIL, "panic-created@example.com")
+        .set(PanickingLifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap_err();
+    assert!(created_error
+        .to_string()
+        .contains("created hook panicked: created boom"));
+    assert!(PanickingLifecycleUser::query()
+        .where_(PanickingLifecycleUser::ID.eq(131_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .is_none());
+
+    PanickingLifecycleUser::create()
+        .set(PanickingLifecycleUser::ID, 132_i64)
+        .set(
+            PanickingLifecycleUser::EMAIL,
+            "panic-update-target@example.com",
+        )
+        .set(PanickingLifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap();
+
+    let updating_error = PanickingLifecycleUser::update()
+        .set(PanickingLifecycleUser::NICKNAME, "panic-updating")
+        .where_(PanickingLifecycleUser::ID.eq(132_i64))
+        .execute(app)
+        .await
+        .unwrap_err();
+    assert!(updating_error
+        .to_string()
+        .contains("updating hook panicked: updating boom"));
+    let update_target = PanickingLifecycleUser::query()
+        .where_(PanickingLifecycleUser::ID.eq(132_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(update_target.nickname.is_none());
+
+    let updated_error = PanickingLifecycleUser::update()
+        .set(PanickingLifecycleUser::NICKNAME, "panic-updated")
+        .where_(PanickingLifecycleUser::ID.eq(132_i64))
+        .execute(app)
+        .await
+        .unwrap_err();
+    assert!(updated_error
+        .to_string()
+        .contains("updated hook panicked: updated boom"));
+    let update_target = PanickingLifecycleUser::query()
+        .where_(PanickingLifecycleUser::ID.eq(132_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(update_target.nickname.is_none());
+
+    PanickingLifecycleUser::create()
+        .set(PanickingLifecycleUser::ID, 133_i64)
+        .set(PanickingLifecycleUser::EMAIL, "panic-deleting@example.com")
+        .set(PanickingLifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap();
+    let deleting_error = PanickingLifecycleUser::delete()
+        .where_(PanickingLifecycleUser::ID.eq(133_i64))
+        .execute(app)
+        .await
+        .unwrap_err();
+    assert!(deleting_error
+        .to_string()
+        .contains("deleting hook panicked: deleting boom"));
+    assert!(PanickingLifecycleUser::query()
+        .where_(PanickingLifecycleUser::ID.eq(133_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .is_some());
+
+    PanickingLifecycleUser::create()
+        .set(PanickingLifecycleUser::ID, 134_i64)
+        .set(PanickingLifecycleUser::EMAIL, "panic-deleted@example.com")
+        .set(PanickingLifecycleUser::ACTIVE, true)
+        .save(app)
+        .await
+        .unwrap();
+    let deleted_error = PanickingLifecycleUser::delete()
+        .where_(PanickingLifecycleUser::ID.eq(134_i64))
+        .execute(app)
+        .await
+        .unwrap_err();
+    assert!(deleted_error
+        .to_string()
+        .contains("deleted hook panicked: deleted boom"));
+    assert!(PanickingLifecycleUser::query()
+        .where_(PanickingLifecycleUser::ID.eq(134_i64))
+        .first(database)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

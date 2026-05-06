@@ -1,13 +1,22 @@
-use std::{collections::VecDeque, future::Future, marker::PhantomData, pin::Pin};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    marker::PhantomData,
+    panic::{catch_unwind, AssertUnwindSafe},
+    pin::Pin,
+};
 
 use serde::Serialize;
 
 use crate::audit::{record_with_assignments, write_model_audit, AuditEventType};
 use crate::events::{Event, EventOrigin};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{current_actor, current_request};
+use crate::logging::{current_actor, current_request, panic_payload_message};
 use crate::support::{Collection, ModelId};
-use futures_util::stream::{self, BoxStream, StreamExt};
+use futures_util::{
+    stream::{self, BoxStream, StreamExt},
+    FutureExt,
+};
 
 use super::aggregate::{
     count_query_ast, execute_scalar_projection_on_ast, wrap_query_for_alias_aggregate,
@@ -25,9 +34,10 @@ use super::compiler::PostgresCompiler;
 use super::extensions::{register_model_records, AnyModelExtension};
 use super::model::{
     upsert_assignment, AfterCommitSink, Column, CreateDraft, FromDbValue, IntoFieldValue, Model,
-    ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent, ModelHookContext,
-    ModelLifecycle, ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelUpdatedEvent,
-    ModelUpdatingEvent, ModelWriteExecutor, TableMeta, ToDbValue, UpdateDraft,
+    ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent,
+    ModelFieldWriteMutator, ModelHookContext, ModelLifecycle, ModelLifecycleSnapshot,
+    ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent, ModelWriteExecutor, TableMeta,
+    ToDbValue, UpdateDraft,
 };
 use super::projection::{Projection, ProjectionField, ProjectionMeta};
 use super::relation::{
@@ -3630,7 +3640,9 @@ where
 
         match expr {
             Expr::Value(value) => {
-                let transformed = write_mutator(context, value.clone()).await?;
+                let transformed =
+                    run_model_write_mutator::<M>(column, write_mutator, context, value.clone())
+                        .await?;
                 *expr = Expr::value(transformed);
             }
             Expr::Excluded(_) => {}
@@ -3645,6 +3657,44 @@ where
     }
 
     Ok(())
+}
+
+async fn run_model_write_mutator<M>(
+    column: &ColumnRef,
+    write_mutator: ModelFieldWriteMutator,
+    context: &ModelHookContext<'_>,
+    value: DbValue,
+) -> Result<DbValue>
+where
+    M: Model,
+{
+    let future = match catch_unwind(AssertUnwindSafe(|| write_mutator(context, value))) {
+        Ok(future) => future,
+        Err(panic) => return Err(model_write_mutator_panic_error::<M>(&column.name, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(model_write_mutator_panic_error::<M>(&column.name, panic)),
+    }
+}
+
+fn model_write_mutator_panic_error<M>(column: &str, panic: Box<dyn std::any::Any + Send>) -> Error
+where
+    M: Model,
+{
+    let model = std::any::type_name::<M>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        model = model,
+        column = column,
+        panic = %message,
+        "model write mutator panicked"
+    );
+    Error::message(format!(
+        "model `{model}` write mutator `{column}` panicked: {message}"
+    ))
 }
 
 async fn apply_create_write_mutators<M>(
@@ -3791,6 +3841,41 @@ impl LifecycleMode {
     }
 }
 
+async fn run_model_lifecycle_hook<M, F, Fut>(hook: &'static str, run: F) -> Result<()>
+where
+    M: Model,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let future = match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(future) => future,
+        Err(panic) => return Err(model_lifecycle_panic_error::<M>(hook, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(model_lifecycle_panic_error::<M>(hook, panic)),
+    }
+}
+
+fn model_lifecycle_panic_error<M>(hook: &'static str, panic: Box<dyn std::any::Any + Send>) -> Error
+where
+    M: Model,
+{
+    let model = std::any::type_name::<M>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        model = model,
+        hook = hook,
+        panic = %message,
+        "model lifecycle hook panicked"
+    );
+    Error::message(format!(
+        "model lifecycle `{model}` {hook} hook panicked: {message}"
+    ))
+}
+
 async fn create_model_records_in_transaction_inner<M>(
     create: &CreateModel<M>,
     app: &AppContext,
@@ -3808,7 +3893,10 @@ where
     let mut draft = CreateDraft::<M>::new(values);
     let context = ModelHookContext::new(app, database, transaction, origin.clone());
     if lifecycle_mode.enabled() {
-        M::Lifecycle::creating(&context, &mut draft).await?;
+        run_model_lifecycle_hook::<M, _, _>("creating", || {
+            M::Lifecycle::creating(&context, &mut draft)
+        })
+        .await?;
     }
     let mut on_conflict = create.on_conflict.clone();
     let mut values = draft.into_values();
@@ -3842,7 +3930,10 @@ where
     for record in &records {
         let model = create.table.hydrate_record(record)?;
         if lifecycle_mode.enabled() {
-            M::Lifecycle::created(&context, &model, record).await?;
+            run_model_lifecycle_hook::<M, _, _>("created", || {
+                M::Lifecycle::created(&context, &model, record)
+            })
+            .await?;
         }
         write_model_audit::<M>(&context, AuditEventType::Created, None, Some(record)).await?;
         if lifecycle_mode.enabled() {
@@ -3952,7 +4043,10 @@ where
         apply_update_model_conventions(update.table, app, &mut values, update.system_action)?;
         let mut draft = UpdateDraft::<M>::new(values);
         if lifecycle_mode.enabled() {
-            M::Lifecycle::updating(&context, &current_model, &mut draft).await?;
+            run_model_lifecycle_hook::<M, _, _>("updating", || {
+                M::Lifecycle::updating(&context, &current_model, &mut draft)
+            })
+            .await?;
         }
         let mut values = draft.into_values();
         apply_update_write_mutators(update.table, &context, &mut values).await?;
@@ -3992,13 +4086,15 @@ where
         let after_record = expect_single_record("update()", records)?;
         let after_model = update.table.hydrate_record(&after_record)?;
         if lifecycle_mode.enabled() {
-            M::Lifecycle::updated(
-                &context,
-                &current_model,
-                &after_model,
-                &current_record,
-                &after_record,
-            )
+            run_model_lifecycle_hook::<M, _, _>("updated", || {
+                M::Lifecycle::updated(
+                    &context,
+                    &current_model,
+                    &after_model,
+                    &current_record,
+                    &after_record,
+                )
+            })
             .await?;
         }
         write_model_audit::<M>(
@@ -4109,7 +4205,10 @@ where
     for current_record in &current_records {
         let current_model = delete.table.hydrate_record(current_record)?;
         if lifecycle_mode.enabled() {
-            M::Lifecycle::deleting(&context, &current_model, current_record).await?;
+            run_model_lifecycle_hook::<M, _, _>("deleting", || {
+                M::Lifecycle::deleting(&context, &current_model, current_record)
+            })
+            .await?;
             context
                 .dispatch(ModelDeletingEvent {
                     snapshot: ModelLifecycleSnapshot::for_model::<M>(
@@ -4178,7 +4277,10 @@ where
         }
 
         if lifecycle_mode.enabled() {
-            M::Lifecycle::deleted(&context, &current_model, current_record).await?;
+            run_model_lifecycle_hook::<M, _, _>("deleted", || {
+                M::Lifecycle::deleted(&context, &current_model, current_record)
+            })
+            .await?;
             dispatch_post_commit_model_event(
                 app,
                 after_commit,

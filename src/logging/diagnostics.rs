@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
+use super::panic_payload_message;
 use super::probes::{LivenessReport, ProbeResult, ReadinessRegistry, ReadinessReport};
 use super::types::{
     AuthOutcome, HttpOutcomeClass, JobOutcome, ProbeState, RuntimeBackendKind,
@@ -371,12 +374,28 @@ impl RuntimeDiagnostics {
         let mut state = ProbeState::Healthy;
 
         for registered in &self.readiness.checks {
-            let probe = match registered.check.run(app).await {
-                Ok(mut probe) => {
+            let probe = match AssertUnwindSafe(registered.check.run(app))
+                .catch_unwind()
+                .await
+            {
+                Ok(Ok(mut probe)) => {
                     probe.id = registered.id.clone();
                     probe
                 }
-                Err(error) => ProbeResult::unhealthy(registered.id.clone(), error.to_string()),
+                Ok(Err(error)) => ProbeResult::unhealthy(registered.id.clone(), error.to_string()),
+                Err(panic) => {
+                    let message = panic_payload_message(panic);
+                    tracing::error!(
+                        target: "forge.readiness",
+                        probe = %registered.id,
+                        panic = %message,
+                        "readiness check panicked"
+                    );
+                    ProbeResult::unhealthy(
+                        registered.id.clone(),
+                        format!("readiness check panicked: {message}"),
+                    )
+                }
             };
 
             if !probe.state.is_healthy() {

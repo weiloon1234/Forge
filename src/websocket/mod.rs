@@ -1,12 +1,16 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AccessScope, Actor, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::RuntimeDiagnostics;
+use crate::logging::{panic_payload_message, RuntimeDiagnostics};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{ChannelEventId, ChannelId, GuardId, PermissionId};
 
@@ -288,13 +292,8 @@ pub struct WebSocketRegistrar {
 }
 
 /// Type for channel lifecycle callbacks (on_join / on_leave).
-pub type LifecycleCallback = Arc<
-    dyn Fn(
-            WebSocketContext,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
-        + Send
-        + Sync,
->;
+pub type LifecycleCallback =
+    Arc<dyn Fn(WebSocketContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 /// Type for dynamic per-subscription authorization callbacks.
 pub type AuthorizeCallback = Arc<
@@ -302,7 +301,7 @@ pub type AuthorizeCallback = Arc<
             WebSocketContext,
             ChannelId,
             Option<String>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -370,9 +369,9 @@ impl WebSocketChannelOptions {
     pub fn authorize<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(WebSocketContext, ChannelId, Option<String>) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        self.authorize = Some(Arc::new(move |ctx, ch, room| Box::pin(f(ctx, ch, room))));
+        self.authorize = Some(wrap_authorize_callback(f));
         self
     }
 
@@ -386,9 +385,9 @@ impl WebSocketChannelOptions {
     pub fn on_join<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(WebSocketContext) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        self.on_join = Some(Arc::new(move |ctx| Box::pin(f(ctx))));
+        self.on_join = Some(wrap_lifecycle_callback("on_join", f));
         self
     }
 
@@ -396,9 +395,9 @@ impl WebSocketChannelOptions {
     pub fn on_leave<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(WebSocketContext) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        self.on_leave = Some(Arc::new(move |ctx| Box::pin(f(ctx))));
+        self.on_leave = Some(wrap_lifecycle_callback("on_leave", f));
         self
     }
 
@@ -423,6 +422,58 @@ impl WebSocketChannelOptions {
     pub(crate) fn permissions_set(&self) -> std::collections::BTreeSet<PermissionId> {
         self.access.permissions()
     }
+}
+
+fn wrap_authorize_callback<F, Fut>(f: F) -> AuthorizeCallback
+where
+    F: Fn(WebSocketContext, ChannelId, Option<String>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    Arc::new(move |ctx, channel, room| {
+        match catch_unwind(AssertUnwindSafe(|| f(ctx, channel.clone(), room.clone()))) {
+            Ok(future) => Box::pin(async move {
+                match AssertUnwindSafe(future).catch_unwind().await {
+                    Ok(result) => result,
+                    Err(panic) => Err(websocket_authorizer_panic_error(panic)),
+                }
+            }),
+            Err(panic) => Box::pin(async move { Err(websocket_authorizer_panic_error(panic)) }),
+        }
+    })
+}
+
+fn wrap_lifecycle_callback<F, Fut>(hook: &'static str, f: F) -> LifecycleCallback
+where
+    F: Fn(WebSocketContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    Arc::new(move |ctx| match catch_unwind(AssertUnwindSafe(|| f(ctx))) {
+        Ok(future) => Box::pin(async move {
+            match AssertUnwindSafe(future).catch_unwind().await {
+                Ok(result) => result,
+                Err(panic) => Err(websocket_lifecycle_panic_error(hook, panic)),
+            }
+        }),
+        Err(panic) => Box::pin(async move { Err(websocket_lifecycle_panic_error(hook, panic)) }),
+    })
+}
+
+fn websocket_lifecycle_panic_error(
+    hook: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> Error {
+    let message = panic_payload_message(panic);
+    Error::message(format!("websocket {hook} hook panicked: {message}"))
+}
+
+fn websocket_authorizer_panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.websocket",
+        panic = %message,
+        "websocket authorizer panicked"
+    );
+    Error::message(format!("websocket authorizer panicked: {message}"))
 }
 
 impl Default for WebSocketRegistrar {
@@ -555,10 +606,32 @@ impl WebSocketChannelRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::future::ready;
+
     use super::{
         ChannelId, GuardId, PermissionId, WebSocketChannelOptions, WebSocketChannelRegistry,
         WebSocketRegistrar,
     };
+    use crate::auth::Actor;
+    use crate::config::ConfigRepository;
+    use crate::foundation::{AppContext, Container};
+    use crate::validation::RuleRegistry;
+
+    fn websocket_context() -> super::WebSocketContext {
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        super::WebSocketContext::new(
+            app,
+            1,
+            Some(Actor::new("user-1", GuardId::new("api"))),
+            ChannelId::new("chat"),
+            None,
+        )
+    }
 
     #[test]
     fn rejects_duplicate_channel_registration() {
@@ -576,6 +649,80 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("already registered"));
+    }
+
+    #[tokio::test]
+    async fn websocket_authorize_future_panic_becomes_error() {
+        let options = WebSocketChannelOptions::new().authorize(|_ctx, _channel, _room| async {
+            let should_panic = true;
+            if should_panic {
+                panic!("ws auth boom");
+            }
+            Ok(())
+        });
+        let authorize = options.authorize.unwrap();
+
+        let error = authorize(websocket_context(), ChannelId::new("chat"), None)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("websocket authorizer panicked: ws auth boom"));
+    }
+
+    #[tokio::test]
+    async fn websocket_authorize_factory_panic_becomes_error() {
+        let options = WebSocketChannelOptions::new().authorize(|_ctx, _channel, _room| {
+            if std::hint::black_box(true) {
+                panic!("ws auth factory boom");
+            }
+            ready(Ok(()))
+        });
+        let authorize = options.authorize.unwrap();
+
+        let error = authorize(websocket_context(), ChannelId::new("chat"), None)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("websocket authorizer panicked: ws auth factory boom"));
+    }
+
+    #[tokio::test]
+    async fn websocket_on_join_future_panic_becomes_error() {
+        let options = WebSocketChannelOptions::new().on_join(|_ctx| async {
+            let should_panic = true;
+            if should_panic {
+                panic!("join hook boom");
+            }
+            Ok(())
+        });
+        let on_join = options.on_join.unwrap();
+
+        let error = on_join(websocket_context()).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("websocket on_join hook panicked: join hook boom"));
+    }
+
+    #[tokio::test]
+    async fn websocket_on_leave_factory_panic_becomes_error() {
+        let options = WebSocketChannelOptions::new().on_leave(|_ctx| {
+            if std::hint::black_box(true) {
+                panic!("leave hook factory boom");
+            }
+            ready(Ok(()))
+        });
+        let on_leave = options.on_leave.unwrap();
+
+        let error = on_leave(websocket_context()).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("websocket on_leave hook panicked: leave hook factory boom"));
     }
 
     #[test]

@@ -311,6 +311,7 @@ const JOBS_FIELDS: &[PublishedField] = &[
         Some("0 = unlimited"),
     ),
     field("timeout_seconds", "300", "300", false, false, None),
+    field("shutdown_timeout_ms", "30000", "30000", false, false, None),
     field("track_history", "true", "true", false, false, None),
 ];
 

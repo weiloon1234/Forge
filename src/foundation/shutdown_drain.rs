@@ -13,6 +13,7 @@ pub(crate) struct ShutdownDrainMessages {
 pub(crate) enum ShutdownDrainTarget {
     ManagedBackgroundTasks,
     Scheduler,
+    Worker,
 }
 
 macro_rules! drain_info {
@@ -23,6 +24,9 @@ macro_rules! drain_info {
             }
             ShutdownDrainTarget::Scheduler => {
                 tracing::info!(target: "forge.scheduler", $($arg)+)
+            }
+            ShutdownDrainTarget::Worker => {
+                tracing::info!(target: "forge.worker", $($arg)+)
             }
         }
     };
@@ -36,6 +40,9 @@ macro_rules! drain_warn {
             }
             ShutdownDrainTarget::Scheduler => {
                 tracing::warn!(target: "forge.scheduler", $($arg)+)
+            }
+            ShutdownDrainTarget::Worker => {
+                tracing::warn!(target: "forge.worker", $($arg)+)
             }
         }
     };

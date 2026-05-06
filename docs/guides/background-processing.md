@@ -263,6 +263,7 @@ poll_interval_ms = 100         # how often to check for jobs
 lease_ttl_ms = 30000           # lease duration before requeue
 max_concurrent_jobs = 0        # 0 = unlimited
 timeout_seconds = 300          # global job timeout
+shutdown_timeout_ms = 30000    # active job drain timeout on shutdown (0 = abort immediately)
 track_history = true           # write to job_history table
 ```
 

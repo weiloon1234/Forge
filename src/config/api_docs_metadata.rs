@@ -60,7 +60,8 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining.",
         ],
         "jobs" => &[
-            "`spawn_worker(app)` is managed by the app lifecycle. On app shutdown, Forge asks the worker to drain and aborts it after `app.background_shutdown_timeout_ms`.",
+            "`JobsConfig` includes `shutdown_timeout_ms` for active job draining.",
+            "`spawn_worker(app)` is managed by the app lifecycle. On app shutdown, Forge asks the worker to drain jobs and aborts the managed worker after `app.background_shutdown_timeout_ms`.",
         ],
         _ => &[],
     }
@@ -87,6 +88,7 @@ mod tests {
 
         let mut jobs = String::new();
         append_module_notes("jobs", &mut jobs);
+        assert!(jobs.contains("shutdown_timeout_ms"));
         assert!(jobs.contains("spawn_worker(app)"));
         assert!(jobs.contains("app.background_shutdown_timeout_ms"));
     }

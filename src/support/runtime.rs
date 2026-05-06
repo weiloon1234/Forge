@@ -317,14 +317,6 @@ impl RuntimeBackend {
         }
     }
 
-    /// Set a key only if it does not already exist, with a TTL.
-    ///
-    /// Returns `true` if the key was set (did not exist), `false` if
-    /// it already existed (duplicate).
-    pub async fn set_if_absent(&self, key: &str, ttl_secs: u64) -> Result<bool> {
-        self.set_nx_value(key, "1", ttl_secs).await
-    }
-
     /// Set a key only if it does not already exist, with a TTL and a custom value.
     ///
     /// Returns `true` if the key was set (did not exist), `false` if

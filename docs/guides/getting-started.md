@@ -155,6 +155,7 @@ App::builder()
 queue = "default"
 poll_interval_ms = 100
 max_concurrent_jobs = 0    # 0 = unlimited
+shutdown_timeout_ms = 30000
 ```
 
 Polls the job queue, executes jobs with retry on failure, runs until shutdown signal. Scale by running multiple worker processes.

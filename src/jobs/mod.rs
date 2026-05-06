@@ -1,25 +1,34 @@
 mod backend;
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::FutureExt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tokio::task::JoinHandle;
 
 use crate::config::JobsConfig;
 use crate::database::{DbType, DbValue};
+use crate::foundation::shutdown_drain::{
+    drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
+};
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{JobOutcome as RecordedJobOutcome, RuntimeDiagnostics};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{JobId, QueueId};
 
 use self::backend::ClaimedJobLease;
+
+const INVALID_JOB_ENVELOPE_ID: JobId = JobId::new("forge.invalid_job_envelope");
 
 // ---------------------------------------------------------------------------
 // Job middleware
@@ -223,6 +232,38 @@ pub struct JobDispatcher {
     diagnostics: Arc<RuntimeDiagnostics>,
 }
 
+struct UniqueJobReservation {
+    key: String,
+    owner: String,
+    job_id: JobId,
+    unique_key: String,
+}
+
+impl UniqueJobReservation {
+    async fn rollback(&self, backend: &RuntimeBackend) {
+        match backend.del_if_value(&self.key, &self.owner).await {
+            Ok(true) => {
+                tracing::debug!(
+                    target: "forge.worker",
+                    job = %self.job_id,
+                    unique_key = %self.unique_key,
+                    "Rolled back unique job reservation after dispatch failure"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "forge.worker",
+                    job = %self.job_id,
+                    unique_key = %self.unique_key,
+                    error = %error,
+                    "Failed to roll back unique job reservation after dispatch failure"
+                );
+            }
+        }
+    }
+}
+
 impl JobDispatcher {
     pub(crate) fn new(runtime: Arc<JobRuntime>, diagnostics: Arc<RuntimeDiagnostics>) -> Self {
         Self {
@@ -249,15 +290,18 @@ impl JobDispatcher {
     where
         J: Job,
     {
+        let mut unique_reservation = None;
+
         // Unique job check: skip dispatch if a duplicate exists within the window
         if let Some(unique_duration) = job.unique_for() {
             let unique_suffix = job.unique_key().unwrap_or_else(|| J::ID.to_string());
             let unique_redis_key = format!("jobs:unique:{}:{}", J::ID, unique_suffix);
+            let unique_owner = next_delivery_token();
             let ttl_secs = unique_duration.as_secs().max(1);
             let is_new = self
                 .runtime
                 .backend
-                .set_if_absent(&unique_redis_key, ttl_secs)
+                .set_nx_value(&unique_redis_key, &unique_owner, ttl_secs)
                 .await?;
             if !is_new {
                 tracing::debug!(
@@ -268,37 +312,56 @@ impl JobDispatcher {
                 );
                 return Ok(());
             }
+
+            unique_reservation = Some(UniqueJobReservation {
+                key: unique_redis_key,
+                owner: unique_owner,
+                job_id: J::ID,
+                unique_key: unique_suffix,
+            });
         }
 
-        let queue = J::QUEUE
-            .clone()
-            .unwrap_or_else(|| self.runtime.config.queue.clone());
-        let envelope = JobEnvelope {
-            job: J::ID,
-            queue: queue.clone(),
-            attempts: 0,
-            scheduled_at: run_at_millis,
-            payload: serde_json::to_value(job).map_err(Error::other)?,
-            batch_id: None,
-            chain_remaining: None,
-        };
-        let payload = serde_json::to_string(&envelope).map_err(Error::other)?;
-        let token = next_delivery_token();
+        let dispatch_result = async {
+            let queue = J::QUEUE
+                .clone()
+                .unwrap_or_else(|| self.runtime.config.queue.clone());
+            let envelope = JobEnvelope {
+                job: J::ID,
+                queue: queue.clone(),
+                attempts: 0,
+                scheduled_at: run_at_millis,
+                payload: serde_json::to_value(job).map_err(Error::other)?,
+                batch_id: None,
+                chain_remaining: None,
+            };
+            let payload = serde_json::to_string(&envelope).map_err(Error::other)?;
+            let token = next_delivery_token();
 
-        if run_at_millis > Utc::now().timestamp_millis() {
-            self.runtime
-                .backend
-                .schedule_job(&queue, &token, &payload, run_at_millis)
-                .await?;
-        } else {
-            self.runtime
-                .backend
-                .enqueue_job(&queue, &token, &payload)
-                .await?;
+            if run_at_millis > Utc::now().timestamp_millis() {
+                self.runtime
+                    .backend
+                    .schedule_job(&queue, &token, &payload, run_at_millis)
+                    .await?;
+            } else {
+                self.runtime
+                    .backend
+                    .enqueue_job(&queue, &token, &payload)
+                    .await?;
+            }
+
+            self.diagnostics
+                .record_job_outcome(RecordedJobOutcome::Enqueued);
+
+            Ok(())
         }
+        .await;
 
-        self.diagnostics
-            .record_job_outcome(RecordedJobOutcome::Enqueued);
+        if let Err(error) = dispatch_result {
+            if let Some(reservation) = &unique_reservation {
+                reservation.rollback(&self.runtime.backend).await;
+            }
+            return Err(error);
+        }
 
         Ok(())
     }
@@ -535,8 +598,10 @@ impl Worker {
         } else {
             self.runtime.config.max_concurrent_jobs as u32
         };
+        let shutdown_timeout = self.runtime.shutdown_timeout();
         let worker = Arc::new(self);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent as usize));
+        let active_jobs = Arc::new(ActiveWorkerJobs::new(shutdown_timeout));
 
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         let shutdown_handle = {
@@ -576,11 +641,13 @@ impl Worker {
         });
 
         loop {
+            active_jobs.prune_finished().await;
+
             if *shutdown_rx.borrow() {
-                tracing::info!(target: "forge.worker", "shutting down, waiting for in-flight jobs");
-                let _ = semaphore.acquire_many(max_concurrent).await;
                 maintenance_handle.abort();
-                tracing::info!(target: "forge.worker", "all jobs drained, worker stopped");
+                let _ = maintenance_handle.await;
+                active_jobs.drain().await;
+                tracing::info!(target: "forge.worker", "worker stopped");
                 break;
             }
 
@@ -609,12 +676,13 @@ impl Worker {
                         .diagnostics
                         .record_job_outcome(RecordedJobOutcome::Leased);
                     let w = worker.clone();
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         if let Err(error) = w.process_claimed_job(lease).await {
                             tracing::error!(target: "forge.worker", error = %error, "job processing failed");
                         }
                         drop(permit);
                     });
+                    active_jobs.track(handle);
                 }
                 Ok(None) => {
                     drop(permit);
@@ -672,13 +740,50 @@ impl Worker {
         self.diagnostics
             .record_job_outcome(RecordedJobOutcome::Started);
 
-        let envelope: JobEnvelope = serde_json::from_str(&lease.payload).map_err(Error::other)?;
-        let registration = self
-            .runtime
-            .registry
-            .jobs
-            .get(&envelope.job)
-            .ok_or_else(|| Error::message(format!("job `{}` is not registered", envelope.job)))?;
+        let started_at = Utc::now().timestamp_millis();
+        let middleware = self.app.resolve::<JobMiddlewareRegistry>().ok();
+        let envelope: JobEnvelope = match serde_json::from_str(&lease.payload) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                let poison_envelope = JobEnvelope {
+                    job: INVALID_JOB_ENVELOPE_ID,
+                    queue: lease.queue.clone(),
+                    attempts: 0,
+                    scheduled_at: started_at,
+                    payload: serde_json::Value::String(lease.payload.clone()),
+                    batch_id: None,
+                    chain_remaining: None,
+                };
+                let job_context = JobContext::new(self.app.clone(), lease.queue.clone(), 1);
+                self.dead_letter_claimed_job(DeadLetterClaimedJob {
+                    lease: &lease,
+                    envelope: poison_envelope,
+                    error: format!("job envelope could not be deserialized: {error}"),
+                    attempts: 1,
+                    started_at,
+                    middleware: middleware.as_deref(),
+                    job_context: Some(&job_context),
+                })
+                .await?;
+                return Ok(());
+            }
+        };
+        let Some(registration) = self.runtime.registry.jobs.get(&envelope.job) else {
+            let attempts = envelope.attempts + 1;
+            let job_context = JobContext::new(self.app.clone(), envelope.queue.clone(), attempts);
+            let error = format!("job `{}` is not registered", envelope.job);
+            self.dead_letter_claimed_job(DeadLetterClaimedJob {
+                lease: &lease,
+                envelope,
+                error,
+                attempts,
+                started_at,
+                middleware: middleware.as_deref(),
+                job_context: Some(&job_context),
+            })
+            .await?;
+            return Ok(());
+        };
 
         // Rate limit check: requeue without incrementing attempts if over limit
         if let Some((max_per_window, window)) = registration.handler.check_rate_limit(&envelope) {
@@ -721,7 +826,6 @@ impl Worker {
             }
         }
 
-        let middleware = self.app.resolve::<JobMiddlewareRegistry>().ok();
         let job_context = JobContext::new(
             self.app.clone(),
             envelope.queue.clone(),
@@ -733,10 +837,7 @@ impl Worker {
             mw.run_before(&envelope.job, &job_context).await;
         }
 
-        let started_at = Utc::now().timestamp_millis();
-
-        let (heartbeat, shutdown_heartbeat) =
-            self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
+        let heartbeat = self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
         let default_timeout = Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
         let execution = crate::logging::scope_current_execution(
             crate::logging::ExecutionContext::Job {
@@ -750,10 +851,9 @@ impl Worker {
                 default_timeout,
             ),
         )
-        .await?;
-        let _ = shutdown_heartbeat.send(());
-        heartbeat.abort();
-        let _ = heartbeat.await;
+        .await;
+        heartbeat.shutdown().await;
+        let execution = execution?;
 
         match execution {
             JobExecutionOutcome::Success => {
@@ -938,42 +1038,90 @@ impl Worker {
         }
     }
 
-    fn spawn_lease_heartbeat(
-        &self,
-        queue: QueueId,
-        token: String,
-    ) -> (
-        tokio::task::JoinHandle<()>,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
-        let runtime = self.runtime.clone();
-        let heartbeat_every = runtime.lease_heartbeat_interval();
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-        let heartbeat = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(heartbeat_every);
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    _ = interval.tick() => {
-                        match runtime.renew_job_lease(&queue, &token).await {
-                            Ok(true) => {}
-                            Ok(false) => break,
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "forge.worker",
-                                    queue = %queue,
-                                    token = %token,
-                                    error = %error,
-                                    "Failed to renew lease"
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        (heartbeat, shutdown_tx)
+    async fn dead_letter_claimed_job(&self, job: DeadLetterClaimedJob<'_>) -> Result<()> {
+        let DeadLetterClaimedJob {
+            lease,
+            envelope,
+            error,
+            attempts,
+            started_at,
+            middleware,
+            job_context,
+        } = job;
+
+        if let (Some(middleware), Some(job_context)) = (middleware, job_context) {
+            middleware
+                .run_failed(&envelope.job, job_context, &error)
+                .await;
+        }
+
+        let job_name = envelope.job.clone();
+        let queue_name = envelope.queue.clone();
+        let payload_json = envelope.payload.clone();
+        let dead_letter = FailedJobEnvelope {
+            failed_at: Utc::now().timestamp_millis(),
+            error: error.clone(),
+            envelope: JobEnvelope {
+                attempts,
+                ..envelope
+            },
+        };
+        let payload = serde_json::to_string(&dead_letter).map_err(Error::other)?;
+        if !self
+            .runtime
+            .dead_letter_job(&lease.queue, &lease.token, &payload)
+            .await?
+        {
+            tracing::warn!(
+                target: "forge.worker",
+                queue = %lease.queue,
+                token = %lease.token,
+                "Lost job lease before poison dead-letter transition"
+            );
+            return Ok(());
+        }
+
+        tracing::error!(
+            target: "forge.worker",
+            job = %job_name,
+            queue = %queue_name,
+            attempts = attempts,
+            error = %error,
+            "Job dead-lettered"
+        );
+        self.diagnostics
+            .record_job_outcome(RecordedJobOutcome::DeadLettered);
+
+        let duration_ms = Utc::now().timestamp_millis() - started_at;
+        self.record_job_history(JobHistoryEntry {
+            job_id: &job_name,
+            queue: &queue_name,
+            status: JobHistoryStatus::DeadLettered,
+            attempt: attempts,
+            error: Some(&error),
+            started_at,
+            duration_ms,
+        })
+        .await;
+
+        if let Some(middleware) = middleware {
+            middleware
+                .run_dead_lettered(&JobDeadLetterContext {
+                    class: job_name.to_string(),
+                    id: lease.token.clone(),
+                    attempts,
+                    last_error: error,
+                    payload: payload_json,
+                    app: self.app.clone(),
+                })
+                .await;
+        }
+
+        Ok(())
+    }
+
+    fn spawn_lease_heartbeat(&self, queue: QueueId, token: String) -> LeaseHeartbeat {
+        LeaseHeartbeat::spawn(self.runtime.clone(), queue, token)
     }
 
     /// After a batched job succeeds, increment the completion counter and
@@ -1062,6 +1210,184 @@ impl Worker {
         );
 
         Ok(())
+    }
+}
+
+struct ActiveWorkerJobs {
+    tasks: Mutex<Vec<WorkerJobTask>>,
+    shutdown_timeout: Duration,
+}
+
+impl ActiveWorkerJobs {
+    fn new(shutdown_timeout: Duration) -> Self {
+        Self {
+            tasks: Mutex::new(Vec::new()),
+            shutdown_timeout,
+        }
+    }
+
+    fn track(&self, handle: JoinHandle<()>) {
+        self.tasks
+            .lock()
+            .expect("worker active job mutex poisoned")
+            .push(WorkerJobTask::new(handle));
+    }
+
+    async fn prune_finished(&self) {
+        let mut finished = Vec::new();
+        {
+            let mut tasks = self.tasks.lock().expect("worker active job mutex poisoned");
+            let mut index = 0;
+            while index < tasks.len() {
+                if tasks[index].is_finished() {
+                    finished.push(tasks.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+
+        for task in finished {
+            task.wait_finished().await;
+        }
+    }
+
+    async fn drain(&self) {
+        let tasks = {
+            let mut tasks = self.tasks.lock().expect("worker active job mutex poisoned");
+            std::mem::take(&mut *tasks)
+        };
+
+        drain_tasks(
+            tasks,
+            self.shutdown_timeout,
+            ShutdownDrainMessages {
+                target: ShutdownDrainTarget::Worker,
+                timeout_disabled: "worker shutdown timeout disabled; aborting active jobs",
+                waiting: "waiting for active jobs during worker shutdown",
+                drained: "active worker jobs drained",
+                timeout_elapsed: "worker shutdown timeout elapsed; aborting active jobs",
+            },
+        )
+        .await;
+    }
+}
+
+struct WorkerJobTask {
+    handle: Option<JoinHandle<()>>,
+}
+
+impl WorkerJobTask {
+    fn new(handle: JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+}
+
+#[async_trait]
+impl ShutdownDrainTask for WorkerJobTask {
+    fn is_finished(&mut self) -> bool {
+        self.handle
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(true)
+    }
+
+    async fn wait_finished(mut self) {
+        if let Some(handle) = self.handle.take() {
+            if let Err(error) = handle.await {
+                tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "Worker job task finished with join error"
+                );
+            }
+        }
+    }
+
+    fn abort(&self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+
+    async fn wait_after_abort(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for WorkerJobTask {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+    }
+}
+
+struct LeaseHeartbeat {
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl LeaseHeartbeat {
+    fn spawn(runtime: Arc<JobRuntime>, queue: QueueId, token: String) -> Self {
+        let heartbeat_every = runtime.lease_heartbeat_interval();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(heartbeat_every);
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    _ = interval.tick() => {
+                        match runtime.renew_job_lease(&queue, &token).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "forge.worker",
+                                    queue = %queue,
+                                    token = %token,
+                                    error = %error,
+                                    "Failed to renew lease"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            shutdown: Some(shutdown_tx),
+            handle: Some(handle),
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
     }
 }
 
@@ -1281,6 +1607,10 @@ impl JobRuntime {
         Duration::from_millis(millis)
     }
 
+    fn shutdown_timeout(&self) -> Duration {
+        Duration::from_millis(self.config.shutdown_timeout_ms)
+    }
+
     async fn promote_due_jobs(&self, now_millis: i64) -> Result<usize> {
         self.backend
             .promote_due_jobs(
@@ -1378,6 +1708,16 @@ struct FailedJobEnvelope {
     envelope: JobEnvelope,
 }
 
+struct DeadLetterClaimedJob<'a> {
+    lease: &'a ClaimedJobLease,
+    envelope: JobEnvelope,
+    error: String,
+    attempts: u32,
+    started_at: i64,
+    middleware: Option<&'a JobMiddlewareRegistry>,
+    job_context: Option<&'a JobContext>,
+}
+
 enum JobExecutionOutcome {
     Success,
     Retry { run_at_millis: i64, attempts: u32 },
@@ -1427,11 +1767,16 @@ where
 
         let timeout_duration = job.timeout().unwrap_or(default_timeout);
         let context = JobContext::new(app.clone(), envelope.queue.clone(), envelope.attempts + 1);
-        let result = tokio::time::timeout(timeout_duration, job.handle(context)).await;
+        let result = tokio::time::timeout(
+            timeout_duration,
+            AssertUnwindSafe(job.handle(context)).catch_unwind(),
+        )
+        .await;
 
         let error_msg = match result {
-            Ok(Ok(())) => return Ok(JobExecutionOutcome::Success),
-            Ok(Err(error)) => error.to_string(),
+            Ok(Ok(Ok(()))) => return Ok(JobExecutionOutcome::Success),
+            Ok(Ok(Err(error))) => error.to_string(),
+            Ok(Err(panic)) => format!("job panicked: {}", panic_payload_message(panic)),
             Err(_elapsed) => format!("job timed out after {}s", timeout_duration.as_secs()),
         };
 
@@ -1459,6 +1804,16 @@ where
     }
 }
 
+fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 fn next_delivery_token() -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     format!(
@@ -1470,6 +1825,7 @@ fn next_delivery_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1477,7 +1833,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        Job, JobContext, JobDeadLetterContext, JobDispatcher, JobMiddleware,
+        Job, JobContext, JobDeadLetterContext, JobDispatcher, JobEnvelope, JobMiddleware,
         JobMiddlewareRegistryBuilder, JobRegistryBuilder, JobRuntime, Worker,
     };
     use crate::config::JobsConfig;
@@ -1507,6 +1863,208 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PanickingJob;
+
+    #[async_trait]
+    impl Job for PanickingJob {
+        const ID: JobId = JobId::new("panicking.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            panic!("job explode")
+        }
+
+        fn max_retries(&self) -> Option<u32> {
+            Some(1)
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PanicThenSucceedJob;
+
+    #[async_trait]
+    impl Job for PanicThenSucceedJob {
+        const ID: JobId = JobId::new("panic.then.succeed.job");
+
+        async fn handle(&self, context: JobContext) -> crate::Result<()> {
+            if context.attempt() == 1 {
+                panic!("flaky panic")
+            }
+            Ok(())
+        }
+
+        fn max_retries(&self) -> Option<u32> {
+            Some(2)
+        }
+
+        fn backoff(&self, _attempt: u32) -> Duration {
+            Duration::from_millis(0)
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct UniqueOkJob {
+        key: String,
+    }
+
+    #[async_trait]
+    impl Job for UniqueOkJob {
+        const ID: JobId = JobId::new("unique.ok.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn unique_for(&self) -> Option<Duration> {
+            Some(Duration::from_secs(60))
+        }
+
+        fn unique_key(&self) -> Option<String> {
+            Some(self.key.clone())
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct UniqueSerializationFailJob;
+
+    impl serde::Serialize for UniqueSerializationFailJob {
+        fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("unique job serialization failed"))
+        }
+    }
+
+    #[async_trait]
+    impl Job for UniqueSerializationFailJob {
+        const ID: JobId = JobId::new("unique.serialization.fail.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn unique_for(&self) -> Option<Duration> {
+            Some(Duration::from_secs(60))
+        }
+
+        fn unique_key(&self) -> Option<String> {
+            Some("fixed".to_string())
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct BlockingJob {
+        tag: String,
+    }
+
+    #[async_trait]
+    impl Job for BlockingJob {
+        const ID: JobId = JobId::new("blocking.job");
+
+        async fn handle(&self, _context: JobContext) -> crate::Result<()> {
+            let mut state = take_worker_lifecycle_state(&self.tag);
+            if let Some(started) = state.started.take() {
+                let _ = started.send(());
+            }
+
+            let _guard = WorkerLifecycleGuard {
+                completed: state.completed_flag.clone(),
+                aborted: state.aborted_flag.clone(),
+            };
+
+            if let Some(release) = state.release.take() {
+                let _ = release.await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+
+            state.completed_flag.store(true, Ordering::SeqCst);
+            if let Some(completed) = state.completed.take() {
+                let _ = completed.send(());
+            }
+            Ok(())
+        }
+    }
+
+    struct WorkerLifecycleState {
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        release: Option<tokio::sync::oneshot::Receiver<()>>,
+        completed: Option<tokio::sync::oneshot::Sender<()>>,
+        completed_flag: Arc<AtomicBool>,
+        aborted_flag: Arc<AtomicBool>,
+    }
+
+    struct WorkerLifecycleProbe {
+        started: tokio::sync::oneshot::Receiver<()>,
+        release: Option<tokio::sync::oneshot::Sender<()>>,
+        completed: tokio::sync::oneshot::Receiver<()>,
+        completed_flag: Arc<AtomicBool>,
+        aborted_flag: Arc<AtomicBool>,
+    }
+
+    struct WorkerLifecycleGuard {
+        completed: Arc<AtomicBool>,
+        aborted: Arc<AtomicBool>,
+    }
+
+    impl Drop for WorkerLifecycleGuard {
+        fn drop(&mut self) {
+            if !self.completed.load(Ordering::SeqCst) {
+                self.aborted.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    static WORKER_LIFECYCLE_STATES: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<String, WorkerLifecycleState>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+    fn worker_lifecycle_probe(tag: &str, releasable: bool) -> WorkerLifecycleProbe {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let completed_flag = Arc::new(AtomicBool::new(false));
+        let aborted_flag = Arc::new(AtomicBool::new(false));
+
+        WORKER_LIFECYCLE_STATES.lock().unwrap().insert(
+            tag.to_string(),
+            WorkerLifecycleState {
+                started: Some(started_tx),
+                release: releasable.then_some(release_rx),
+                completed: Some(completed_tx),
+                completed_flag: completed_flag.clone(),
+                aborted_flag: aborted_flag.clone(),
+            },
+        );
+
+        WorkerLifecycleProbe {
+            started: started_rx,
+            release: releasable.then_some(release_tx),
+            completed: completed_rx,
+            completed_flag,
+            aborted_flag,
+        }
+    }
+
+    fn take_worker_lifecycle_state(tag: &str) -> WorkerLifecycleState {
+        WORKER_LIFECYCLE_STATES
+            .lock()
+            .unwrap()
+            .remove(tag)
+            .unwrap_or_else(|| panic!("missing lifecycle state for `{tag}`"))
+    }
+
+    async fn wait_for_flag(flag: &AtomicBool) {
+        for _ in 0..50 {
+            if flag.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("flag was not set");
+    }
+
     fn build_app(runtime: Arc<JobRuntime>, diagnostics: Arc<RuntimeDiagnostics>) -> AppContext {
         let container = Container::new();
         let app = AppContext::new(
@@ -1518,6 +2076,298 @@ mod tests {
         app.container().singleton_arc(runtime).unwrap();
         app.container().singleton_arc(diagnostics).unwrap();
         app
+    }
+
+    fn build_blocking_runtime(
+        namespace: &str,
+        jobs_config: JobsConfig,
+    ) -> (
+        RuntimeBackend,
+        Arc<JobRuntime>,
+        Arc<RuntimeDiagnostics>,
+        JobDispatcher,
+    ) {
+        let backend = RuntimeBackend::memory(namespace);
+        let mut registry = JobRegistryBuilder::default();
+        registry.register::<BlockingJob>().unwrap();
+
+        let runtime = Arc::new(JobRuntime::new(
+            backend.clone(),
+            jobs_config.clone(),
+            JobRegistryBuilder::freeze_shared(Arc::new(Mutex::new(registry)), &jobs_config),
+        ));
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistryBuilder::freeze_shared(ReadinessRegistryBuilder::shared()),
+        ));
+        let dispatcher = JobDispatcher::new(runtime.clone(), diagnostics.clone());
+        (backend, runtime, diagnostics, dispatcher)
+    }
+
+    fn build_panic_runtime(
+        namespace: &str,
+        jobs_config: JobsConfig,
+    ) -> (
+        RuntimeBackend,
+        Arc<JobRuntime>,
+        Arc<RuntimeDiagnostics>,
+        JobDispatcher,
+    ) {
+        let backend = RuntimeBackend::memory(namespace);
+        let mut registry = JobRegistryBuilder::default();
+        registry.register::<PanickingJob>().unwrap();
+        registry.register::<PanicThenSucceedJob>().unwrap();
+
+        let runtime = Arc::new(JobRuntime::new(
+            backend.clone(),
+            jobs_config.clone(),
+            JobRegistryBuilder::freeze_shared(Arc::new(Mutex::new(registry)), &jobs_config),
+        ));
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistryBuilder::freeze_shared(ReadinessRegistryBuilder::shared()),
+        ));
+        let dispatcher = JobDispatcher::new(runtime.clone(), diagnostics.clone());
+        (backend, runtime, diagnostics, dispatcher)
+    }
+
+    struct PanicRecordingMiddleware {
+        failed: Arc<Mutex<Vec<String>>>,
+        dead_lettered: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl JobMiddleware for PanicRecordingMiddleware {
+        async fn failed(
+            &self,
+            job_id: &JobId,
+            _context: &JobContext,
+            error: &str,
+        ) -> crate::Result<()> {
+            self.failed
+                .lock()
+                .unwrap()
+                .push(format!("{job_id}:{error}"));
+            Ok(())
+        }
+
+        async fn on_dead_lettered(&self, context: &JobDeadLetterContext) -> crate::Result<()> {
+            self.dead_lettered
+                .lock()
+                .unwrap()
+                .push(context.class.clone());
+            Ok(())
+        }
+    }
+
+    fn register_panic_middleware(
+        app: &AppContext,
+        failed: Arc<Mutex<Vec<String>>>,
+        dead_lettered: Arc<Mutex<Vec<String>>>,
+    ) {
+        let mut middleware_builder = JobMiddlewareRegistryBuilder::default();
+        middleware_builder.register(Arc::new(PanicRecordingMiddleware {
+            failed,
+            dead_lettered,
+        }));
+        app.container()
+            .singleton_arc(Arc::new(JobMiddlewareRegistryBuilder::freeze_shared(
+                Arc::new(Mutex::new(middleware_builder)),
+            )))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn panicking_job_run_once_dead_letters_without_panicking() {
+        let backend_namespace = "job-panic-dead-letter";
+        let (backend, runtime, diagnostics, dispatcher) =
+            build_panic_runtime(backend_namespace, JobsConfig::default());
+        let app = build_app(runtime, diagnostics.clone());
+        let failed = Arc::new(Mutex::new(Vec::new()));
+        let dead_lettered = Arc::new(Mutex::new(Vec::new()));
+        register_panic_middleware(&app, failed.clone(), dead_lettered.clone());
+
+        dispatcher.dispatch(PanickingJob).await.unwrap();
+        let worker = Worker::from_app(app).unwrap();
+
+        assert!(worker.run_once().await.unwrap());
+
+        let dead_letters = backend
+            .dead_letters(&QueueId::new("default"))
+            .await
+            .unwrap();
+        assert_eq!(dead_letters.len(), 1);
+        let payload: serde_json::Value = serde_json::from_str(&dead_letters[0]).unwrap();
+        assert_eq!(payload["error"], "job panicked: job explode");
+
+        assert_eq!(
+            failed.lock().unwrap().as_slice(),
+            &["panicking.job:job panicked: job explode"]
+        );
+        assert_eq!(dead_lettered.lock().unwrap().as_slice(), &["panicking.job"]);
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.jobs.dead_lettered_total, 1);
+        assert_eq!(snapshot.jobs.retried_total, 0);
+        assert_eq!(snapshot.jobs.succeeded_total, 0);
+    }
+
+    #[tokio::test]
+    async fn panicking_job_retries_then_succeeds() {
+        let (_backend, runtime, diagnostics, dispatcher) = build_panic_runtime(
+            "job-panic-retry",
+            JobsConfig {
+                poll_interval_ms: 1,
+                lease_ttl_ms: 50,
+                ..JobsConfig::default()
+            },
+        );
+        let app = build_app(runtime, diagnostics.clone());
+
+        dispatcher.dispatch(PanicThenSucceedJob).await.unwrap();
+        let worker = Worker::from_app(app).unwrap();
+
+        assert!(worker.run_once().await.unwrap());
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.jobs.retried_total, 1);
+        assert_eq!(snapshot.jobs.dead_lettered_total, 0);
+        assert_eq!(snapshot.jobs.succeeded_total, 0);
+
+        assert!(worker.run_once().await.unwrap());
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.jobs.retried_total, 1);
+        assert_eq!(snapshot.jobs.dead_lettered_total, 0);
+        assert_eq!(snapshot.jobs.succeeded_total, 1);
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_waits_for_active_job_completion() {
+        let jobs_config = JobsConfig {
+            poll_interval_ms: 1,
+            lease_ttl_ms: 50,
+            shutdown_timeout_ms: 500,
+            ..JobsConfig::default()
+        };
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_blocking_runtime("worker-shutdown-drain", jobs_config);
+        let app = build_app(runtime, diagnostics);
+        let mut probe = worker_lifecycle_probe("drain", true);
+
+        dispatcher
+            .dispatch(BlockingJob {
+                tag: "drain".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let worker = Worker::from_app(app).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let worker_task = tokio::spawn(async move {
+            worker
+                .run_until(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        probe.started.await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        probe.release.take().unwrap().send(()).unwrap();
+        probe.completed.await.unwrap();
+
+        tokio::time::timeout(Duration::from_millis(500), worker_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(probe.completed_flag.load(Ordering::SeqCst));
+        assert!(!probe.aborted_flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_aborts_active_job_after_timeout_and_requeues_after_lease_expiry() {
+        let jobs_config = JobsConfig {
+            poll_interval_ms: 1,
+            lease_ttl_ms: 30,
+            shutdown_timeout_ms: 1,
+            max_concurrent_jobs: 1,
+            ..JobsConfig::default()
+        };
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_blocking_runtime("worker-shutdown-abort", jobs_config);
+        let app = build_app(runtime.clone(), diagnostics);
+        let probe = worker_lifecycle_probe("abort", false);
+
+        dispatcher
+            .dispatch(BlockingJob {
+                tag: "abort".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let worker = Worker::from_app(app).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let worker_task = tokio::spawn(async move {
+            worker
+                .run_until(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        probe.started.await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(500), worker_task)
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_flag(&probe.aborted_flag).await;
+        assert!(!probe.completed_flag.load(Ordering::SeqCst));
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let requeued = runtime
+            .requeue_expired_jobs(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert_eq!(requeued, 1);
+        assert!(runtime.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn aborting_worker_coordinator_aborts_active_jobs() {
+        let jobs_config = JobsConfig {
+            poll_interval_ms: 1,
+            lease_ttl_ms: 50,
+            shutdown_timeout_ms: 500,
+            max_concurrent_jobs: 1,
+            ..JobsConfig::default()
+        };
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_blocking_runtime("worker-coordinator-abort", jobs_config);
+        let app = build_app(runtime, diagnostics);
+        let probe = worker_lifecycle_probe("coordinator-abort", false);
+
+        dispatcher
+            .dispatch(BlockingJob {
+                tag: "coordinator-abort".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let worker = Worker::from_app(app).unwrap();
+        let worker_task = tokio::spawn(async move {
+            worker
+                .run_until(std::future::pending::<()>())
+                .await
+                .unwrap();
+        });
+
+        probe.started.await.unwrap();
+        worker_task.abort();
+        let _ = worker_task.await;
+        wait_for_flag(&probe.aborted_flag).await;
+        assert!(!probe.completed_flag.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1700,6 +2550,138 @@ mod tests {
         ));
         let dispatcher = JobDispatcher::new(runtime.clone(), diagnostics.clone());
         (backend, runtime, diagnostics, dispatcher)
+    }
+
+    #[tokio::test]
+    async fn malformed_job_envelope_is_dead_lettered_without_requeue_loop() {
+        let (backend, runtime, diagnostics, _dispatcher) =
+            build_runtime_and_dispatcher("poison-malformed-envelope");
+        let queue = QueueId::new("default");
+        backend
+            .enqueue_job(&queue, "poison-token", "not-json")
+            .await
+            .unwrap();
+
+        let app = build_app(runtime.clone(), diagnostics.clone());
+        let worker = Worker::from_app(app).unwrap();
+        assert!(worker.run_once().await.unwrap());
+
+        let dead_letters = backend.dead_letters(&queue).await.unwrap();
+        assert_eq!(dead_letters.len(), 1);
+        let payload: serde_json::Value = serde_json::from_str(&dead_letters[0]).unwrap();
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("job envelope could not be deserialized:"));
+        assert_eq!(payload["envelope"]["job"], "forge.invalid_job_envelope");
+        assert_eq!(payload["envelope"]["payload"], "not-json");
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.jobs.dead_lettered_total, 1);
+        assert_eq!(
+            runtime
+                .requeue_expired_jobs(chrono::Utc::now().timestamp_millis())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(runtime.claim_job().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unregistered_job_envelope_is_dead_lettered_without_requeue_loop() {
+        let (backend, runtime, diagnostics, _dispatcher) =
+            build_runtime_and_dispatcher("poison-unregistered-envelope");
+        let queue = QueueId::new("default");
+        let envelope = JobEnvelope {
+            job: JobId::new("missing.job"),
+            queue: queue.clone(),
+            attempts: 0,
+            scheduled_at: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({ "id": 123 }),
+            batch_id: None,
+            chain_remaining: None,
+        };
+        let payload = serde_json::to_string(&envelope).unwrap();
+        backend
+            .enqueue_job(&queue, "missing-token", &payload)
+            .await
+            .unwrap();
+
+        let app = build_app(runtime.clone(), diagnostics.clone());
+        let worker = Worker::from_app(app).unwrap();
+        assert!(worker.run_once().await.unwrap());
+
+        let dead_letters = backend.dead_letters(&queue).await.unwrap();
+        assert_eq!(dead_letters.len(), 1);
+        let payload: serde_json::Value = serde_json::from_str(&dead_letters[0]).unwrap();
+        assert_eq!(payload["error"], "job `missing.job` is not registered");
+        assert_eq!(payload["envelope"]["job"], "missing.job");
+        assert_eq!(payload["envelope"]["attempts"], 1);
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.jobs.dead_lettered_total, 1);
+        assert_eq!(
+            runtime
+                .requeue_expired_jobs(chrono::Utc::now().timestamp_millis())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(runtime.claim_job().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unique_dispatch_serialization_failure_rolls_back_reservation() {
+        let (backend, _runtime, _diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("unique-serialization-rollback");
+        let unique_key = format!(
+            "jobs:unique:{}:{}",
+            <UniqueSerializationFailJob as Job>::ID,
+            "fixed"
+        );
+
+        let result = dispatcher.dispatch(UniqueSerializationFailJob).await;
+
+        assert!(result.is_err());
+        assert!(!backend.key_exists(&unique_key).await.unwrap());
+        assert!(backend
+            .set_nx_value(&unique_key, "after-rollback", 60)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn successful_unique_dispatch_keeps_reservation_and_skips_duplicates() {
+        let (backend, _runtime, _diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("unique-success-keeps-reservation");
+        let unique_key = format!("jobs:unique:{}:{}", <UniqueOkJob as Job>::ID, "same");
+        let queue = QueueId::new("default");
+
+        dispatcher
+            .dispatch(UniqueOkJob {
+                key: "same".to_string(),
+            })
+            .await
+            .unwrap();
+        dispatcher
+            .dispatch(UniqueOkJob {
+                key: "same".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert!(backend.key_exists(&unique_key).await.unwrap());
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

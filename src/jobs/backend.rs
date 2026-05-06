@@ -7,17 +7,24 @@ use crate::support::runtime::{
 };
 use crate::support::QueueId;
 
+const CLAIM_STALE_TOKEN_SCAN_LIMIT: usize = 1024;
+
 const CLAIM_JOB_SCRIPT: &str = r#"
-local token = redis.call('LPOP', KEYS[1])
-if not token then
-  return nil
+local scanned = 0
+local scan_limit = tonumber(ARGV[2])
+while scanned < scan_limit do
+  local token = redis.call('LPOP', KEYS[1])
+  if not token then
+    return nil
+  end
+  scanned = scanned + 1
+  local payload = redis.call('HGET', KEYS[2], token)
+  if payload and not redis.call('ZSCORE', KEYS[3], token) then
+    redis.call('ZADD', KEYS[3], ARGV[1], token)
+    return {token, payload}
+  end
 end
-local payload = redis.call('HGET', KEYS[2], token)
-if not payload then
-  return nil
-end
-redis.call('ZADD', KEYS[3], ARGV[1], token)
-return {token, payload}
+return nil
 "#;
 
 const PROMOTE_DUE_SCRIPT: &str = r#"
@@ -26,8 +33,16 @@ if #tokens == 0 then
   return 0
 end
 redis.call('ZREM', KEYS[1], unpack(tokens))
-redis.call('RPUSH', KEYS[2], unpack(tokens))
-return #tokens
+local ready_tokens = {}
+for _, token in ipairs(tokens) do
+  if redis.call('HEXISTS', KEYS[3], token) == 1 then
+    table.insert(ready_tokens, token)
+  end
+end
+if #ready_tokens > 0 then
+  redis.call('RPUSH', KEYS[2], unpack(ready_tokens))
+end
+return #ready_tokens
 "#;
 
 const REQUEUE_EXPIRED_SCRIPT: &str = r#"
@@ -36,8 +51,16 @@ if #tokens == 0 then
   return 0
 end
 redis.call('ZREM', KEYS[1], unpack(tokens))
-redis.call('RPUSH', KEYS[2], unpack(tokens))
-return #tokens
+local ready_tokens = {}
+for _, token in ipairs(tokens) do
+  if redis.call('HEXISTS', KEYS[3], token) == 1 then
+    table.insert(ready_tokens, token)
+  end
+end
+if #ready_tokens > 0 then
+  redis.call('RPUSH', KEYS[2], unpack(ready_tokens))
+end
+return #ready_tokens
 "#;
 
 const RENEW_LEASE_SCRIPT: &str = r#"
@@ -357,9 +380,10 @@ async fn promote_due_jobs_redis(
             .map_err(Error::other)?;
         let count: i64 = ::redis::cmd("EVAL")
             .arg(PROMOTE_DUE_SCRIPT)
-            .arg(2)
+            .arg(3)
             .arg(scheduled_key(runtime, queue))
             .arg(ready_key(runtime, queue))
+            .arg(payload_key(runtime, queue))
             .arg(now_millis)
             .arg((limit - moved) as i64)
             .query_async(&mut conn)
@@ -390,9 +414,10 @@ async fn requeue_expired_jobs_redis(
             .map_err(Error::other)?;
         let count: i64 = ::redis::cmd("EVAL")
             .arg(REQUEUE_EXPIRED_SCRIPT)
-            .arg(2)
+            .arg(3)
             .arg(leased_key(runtime, queue))
             .arg(ready_key(runtime, queue))
+            .arg(payload_key(runtime, queue))
             .arg(now_millis)
             .arg((limit - moved) as i64)
             .query_async(&mut conn)
@@ -423,6 +448,7 @@ async fn claim_job_redis(
             .arg(payload_key(runtime, queue))
             .arg(leased_key(runtime, queue))
             .arg(lease_expires_at)
+            .arg(CLAIM_STALE_TOKEN_SCAN_LIMIT as i64)
             .query_async(&mut conn)
             .await
             .map_err(Error::other)?;
@@ -590,6 +616,7 @@ async fn promote_due_jobs_memory(
     limit: usize,
 ) -> Result<usize> {
     let mut moved = 0usize;
+    let payloads = runtime.payloads.lock().await;
     let mut scheduled = runtime.scheduled_jobs.lock().await;
     let mut ready = runtime.ready_queues.lock().await;
     for queue in queues {
@@ -611,6 +638,9 @@ async fn promote_due_jobs_memory(
         if !due.is_empty() {
             let queue_items = ready.entry(queue.clone()).or_default();
             for token in due {
+                if !payloads.contains_key(&token) {
+                    continue;
+                }
                 queue_items.push_back(token);
                 moved += 1;
             }
@@ -618,6 +648,7 @@ async fn promote_due_jobs_memory(
     }
     drop(ready);
     drop(scheduled);
+    drop(payloads);
     if moved > 0 {
         runtime.notify.notify_waiters();
     }
@@ -632,6 +663,7 @@ async fn requeue_expired_jobs_memory(
 ) -> Result<usize> {
     let mut moved = 0usize;
     let mut leased = runtime.leased_jobs.lock().await;
+    let payloads = runtime.payloads.lock().await;
     let mut ready = runtime.ready_queues.lock().await;
     for queue in queues {
         if moved >= limit {
@@ -652,12 +684,16 @@ async fn requeue_expired_jobs_memory(
         if !expired.is_empty() {
             let queue_items = ready.entry(queue.clone()).or_default();
             for token in expired {
+                if !payloads.contains_key(&token) {
+                    continue;
+                }
                 queue_items.push_back(token);
                 moved += 1;
             }
         }
     }
     drop(ready);
+    drop(payloads);
     drop(leased);
     if moved > 0 {
         runtime.notify.notify_waiters();
@@ -670,45 +706,57 @@ async fn claim_job_memory(
     queues: &[QueueId],
     lease_ttl: Duration,
 ) -> Result<Option<ClaimedJobLease>> {
-    let mut ready = runtime.ready_queues.lock().await;
-    let mut found = None;
-    for queue in queues {
-        if let Some(items) = ready.get_mut(queue) {
-            if let Some(token) = items.pop_front() {
-                found = Some((queue.clone(), token));
-                break;
+    let mut scanned = 0usize;
+    loop {
+        if scanned >= CLAIM_STALE_TOKEN_SCAN_LIMIT {
+            return Ok(None);
+        }
+
+        let mut ready = runtime.ready_queues.lock().await;
+        let mut found = None;
+        for queue in queues {
+            if let Some(items) = ready.get_mut(queue) {
+                if let Some(token) = items.pop_front() {
+                    found = Some((queue.clone(), token));
+                    break;
+                }
             }
         }
+        drop(ready);
+
+        let Some((queue, token)) = found else {
+            return Ok(None);
+        };
+
+        scanned += 1;
+        let Some(payload) = runtime.payloads.lock().await.get(&token).cloned() else {
+            continue;
+        };
+
+        let mut leased = runtime.leased_jobs.lock().await;
+        if leased
+            .get(&queue)
+            .map(|items| items.iter().any(|item| item.token == token))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        leased
+            .entry(queue.clone())
+            .or_default()
+            .push(LeasedJobToken {
+                expires_at_millis: expires_at(lease_ttl),
+                token: token.clone(),
+            });
+        drop(leased);
+
+        return Ok(Some(ClaimedJobLease {
+            queue,
+            token,
+            payload,
+        }));
     }
-    drop(ready);
-
-    let Some((queue, token)) = found else {
-        return Ok(None);
-    };
-
-    let payload = runtime
-        .payloads
-        .lock()
-        .await
-        .get(&token)
-        .cloned()
-        .ok_or_else(|| Error::message("job payload missing from memory runtime"))?;
-
-    let mut leased = runtime.leased_jobs.lock().await;
-    leased
-        .entry(queue.clone())
-        .or_default()
-        .push(LeasedJobToken {
-            expires_at_millis: expires_at(lease_ttl),
-            token: token.clone(),
-        });
-    drop(leased);
-
-    Ok(Some(ClaimedJobLease {
-        queue,
-        token,
-        payload,
-    }))
 }
 
 async fn renew_job_lease_memory(
@@ -945,10 +993,19 @@ async fn dead_letters_memory(runtime: &MemoryRuntime, queue: &QueueId) -> Result
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::RuntimeBackend;
+    use crate::support::runtime::{LeasedJobToken, MemoryRuntime, ScheduledJobToken};
     use crate::support::QueueId;
+
+    fn memory_runtime(backend: &RuntimeBackend) -> Arc<MemoryRuntime> {
+        match backend {
+            RuntimeBackend::Memory(runtime) => Arc::clone(runtime),
+            RuntimeBackend::Redis(_) => unreachable!("test backend should use memory runtime"),
+        }
+    }
 
     #[tokio::test]
     async fn memory_backend_claims_and_acks_leased_jobs() {
@@ -968,6 +1025,166 @@ mod tests {
         assert_eq!(claimed.token, "token-1");
 
         assert!(backend.ack_job(&queue, "token-1").await.unwrap());
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_backend_claim_skips_ready_tokens_without_payload() {
+        let backend = RuntimeBackend::memory("job-backend-claim-stale-ready");
+        let runtime = memory_runtime(&backend);
+        let queue = QueueId::new("default");
+
+        runtime
+            .ready_queues
+            .lock()
+            .await
+            .entry(queue.clone())
+            .or_default()
+            .push_back("missing-payload".to_string());
+        backend
+            .enqueue_job(&queue, "token-1", "{\"job\":\"valid\"}")
+            .await
+            .unwrap();
+
+        let claimed = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.token, "token-1");
+
+        let ready = runtime.ready_queues.lock().await;
+        assert!(ready
+            .get(&queue)
+            .map(|items| items.is_empty())
+            .unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn memory_backend_claim_skips_ready_tokens_that_are_already_leased() {
+        let backend = RuntimeBackend::memory("job-backend-claim-duplicate-ready");
+        let runtime = memory_runtime(&backend);
+        let queue = QueueId::new("default");
+
+        backend
+            .enqueue_job(&queue, "token-1", "{\"job\":\"first\"}")
+            .await
+            .unwrap();
+        runtime
+            .ready_queues
+            .lock()
+            .await
+            .entry(queue.clone())
+            .or_default()
+            .push_back("token-1".to_string());
+        backend
+            .enqueue_job(&queue, "token-2", "{\"job\":\"second\"}")
+            .await
+            .unwrap();
+
+        let first = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.token, "token-1");
+
+        let second = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.token, "token-2");
+
+        let leased = runtime.leased_jobs.lock().await;
+        let leased_tokens = leased
+            .get(&queue)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.token.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(leased_tokens, vec!["token-1", "token-2"]);
+    }
+
+    #[tokio::test]
+    async fn memory_backend_claim_prunes_duplicate_ready_token_after_ack() {
+        let backend = RuntimeBackend::memory("job-backend-claim-duplicate-after-ack");
+        let runtime = memory_runtime(&backend);
+        let queue = QueueId::new("default");
+
+        backend
+            .enqueue_job(&queue, "token-1", "{\"job\":\"once\"}")
+            .await
+            .unwrap();
+        runtime
+            .ready_queues
+            .lock()
+            .await
+            .entry(queue.clone())
+            .or_default()
+            .push_back("token-1".to_string());
+
+        let claimed = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.token, "token-1");
+        assert!(backend.ack_job(&queue, "token-1").await.unwrap());
+
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+        let ready = runtime.ready_queues.lock().await;
+        assert!(ready
+            .get(&queue)
+            .map(|items| items.is_empty())
+            .unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn memory_backend_promote_due_jobs_skips_tokens_without_payload() {
+        let backend = RuntimeBackend::memory("job-backend-promote-stale-scheduled");
+        let runtime = memory_runtime(&backend);
+        let queue = QueueId::new("default");
+        let now_millis = chrono::Utc::now().timestamp_millis();
+
+        runtime
+            .scheduled_jobs
+            .lock()
+            .await
+            .entry(queue.clone())
+            .or_default()
+            .push(ScheduledJobToken {
+                run_at_millis: now_millis - 1,
+                token: "missing-payload".to_string(),
+            });
+        backend
+            .schedule_job(&queue, "token-1", "{\"job\":\"valid\"}", now_millis - 1)
+            .await
+            .unwrap();
+
+        let promoted = backend
+            .promote_due_jobs(std::slice::from_ref(&queue), now_millis, 8)
+            .await
+            .unwrap();
+        assert_eq!(promoted, 1);
+
+        let claimed = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.token, "token-1");
         assert!(backend
             .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
             .await
@@ -1008,5 +1225,54 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reclaimed.token, "token-1");
+    }
+
+    #[tokio::test]
+    async fn memory_backend_requeue_expired_jobs_skips_tokens_without_payload() {
+        let backend = RuntimeBackend::memory("job-backend-requeue-stale-leased");
+        let runtime = memory_runtime(&backend);
+        let queue = QueueId::new("default");
+        let now_millis = chrono::Utc::now().timestamp_millis();
+
+        backend
+            .enqueue_job(&queue, "token-1", "{\"job\":\"valid\"}")
+            .await
+            .unwrap();
+        backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut leased = runtime.leased_jobs.lock().await;
+        let items = leased.entry(queue.clone()).or_default();
+        for item in items.iter_mut() {
+            if item.token == "token-1" {
+                item.expires_at_millis = now_millis - 1;
+            }
+        }
+        items.push(LeasedJobToken {
+            expires_at_millis: now_millis - 1,
+            token: "missing-payload".to_string(),
+        });
+        drop(leased);
+
+        let requeued = backend
+            .requeue_expired_jobs(std::slice::from_ref(&queue), now_millis, 8)
+            .await
+            .unwrap();
+        assert_eq!(requeued, 1);
+
+        let reclaimed = backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reclaimed.token, "token-1");
+        assert!(backend
+            .claim_job(std::slice::from_ref(&queue), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
     }
 }

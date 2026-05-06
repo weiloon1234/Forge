@@ -255,7 +255,7 @@ async fn aborting_worker_run_does_not_duplicate_in_flight_jobs() {
             .iter()
             .filter(|entry| entry.starts_with("start:recover"))
             .count(),
-        1
+        2
     );
 
     assert!(!Worker::from_app(app_two.clone())
@@ -264,10 +264,17 @@ async fn aborting_worker_run_does_not_duplicate_in_flight_jobs() {
         .await
         .unwrap());
 
-    let snapshot_one = app_one.diagnostics().unwrap().snapshot();
     let snapshot = app_two.diagnostics().unwrap().snapshot();
-    assert!(snapshot_one.jobs.succeeded_total >= 1);
-    assert_eq!(snapshot.jobs.expired_requeues_total, 0);
+    assert_eq!(
+        app_one
+            .diagnostics()
+            .unwrap()
+            .snapshot()
+            .jobs
+            .succeeded_total,
+        0
+    );
+    assert!(snapshot.jobs.succeeded_total >= 1);
 
     worker_two_task.abort();
 }

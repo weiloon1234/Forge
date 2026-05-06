@@ -50,5 +50,6 @@ fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 
 ## Notes
 
-- `spawn_worker(app)` is managed by the app lifecycle. On app shutdown, Forge asks the worker to drain and aborts it after `app.background_shutdown_timeout_ms`.
+- `JobsConfig` includes `shutdown_timeout_ms` for active job draining.
+- `spawn_worker(app)` is managed by the app lifecycle. On app shutdown, Forge asks the worker to drain jobs and aborts the managed worker after `app.background_shutdown_timeout_ms`.
 

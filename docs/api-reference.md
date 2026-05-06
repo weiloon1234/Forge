@@ -332,7 +332,7 @@ TOML-based configuration with environment overlay.
 | `DatabaseModelConfig` | `timestamps_default`, `soft_deletes_default` |
 | `RedisConfig` | `url`, `namespace` |
 | `WebSocketConfig` | `host`, `port`, `path`, heartbeat, rate limits, origin allow-list, outbound buffer, history buffer/TTL |
-| `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency` |
+| `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency`, `shutdown_timeout_ms` |
 | `SchedulerConfig` | `tick_interval_ms`, `leader_lease_ttl_ms` |
 | `AuthConfig` | `guards`, `tokens`, `sessions`, `bearer_prefix` |
 | `TokenConfig` | TTLs, rotation, length |
@@ -1808,7 +1808,7 @@ fn dispatch(self) -> Result<()>
 fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 ```
 
-Workers spawned with `spawn_worker(app)` are managed by the app lifecycle. During shutdown, Forge signals them to drain before plugin shutdown and aborts them after `app.background_shutdown_timeout_ms`.
+Workers spawned with `spawn_worker(app)` are managed by the app lifecycle. During shutdown, Forge signals them to drain active jobs before plugin shutdown and aborts the managed worker after `app.background_shutdown_timeout_ms`.
 
 ---
 

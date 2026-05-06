@@ -276,6 +276,7 @@ pub struct JobsConfig {
     pub requeue_batch_size: usize,
     pub max_concurrent_jobs: usize,
     pub timeout_seconds: u64,
+    pub shutdown_timeout_ms: u64,
     pub track_history: bool,
     pub queue_priorities: std::collections::HashMap<String, u32>,
 }
@@ -290,6 +291,7 @@ impl Default for JobsConfig {
             requeue_batch_size: 64,
             max_concurrent_jobs: 0,
             timeout_seconds: 300,
+            shutdown_timeout_ms: 30_000,
             track_history: true,
             queue_priorities: std::collections::HashMap::new(),
         }
@@ -1042,6 +1044,7 @@ mod tests {
                 max_retries = 9
                 lease_ttl_ms = 45000
                 requeue_batch_size = 12
+                shutdown_timeout_ms = 12000
 
                 [scheduler]
                 tick_interval_ms = 250
@@ -1074,9 +1077,16 @@ mod tests {
         assert_eq!(jobs.max_retries, 9);
         assert_eq!(jobs.lease_ttl_ms, 45_000);
         assert_eq!(jobs.requeue_batch_size, 12);
+        assert_eq!(jobs.shutdown_timeout_ms, 12_000);
         assert_eq!(scheduler.tick_interval_ms, 250);
         assert_eq!(scheduler.leader_lease_ttl_ms, 7_000);
         assert_eq!(scheduler.shutdown_timeout_ms, 15_000);
+    }
+
+    #[test]
+    fn jobs_config_defaults_shutdown_timeout() {
+        let jobs: JobsConfig = ConfigRepository::empty().jobs().unwrap();
+        assert_eq!(jobs.shutdown_timeout_ms, 30_000);
     }
 
     #[test]

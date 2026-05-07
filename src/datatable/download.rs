@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::foundation::{AppContext, Error, Result};
 
-use super::callback::catch_datatable_callback;
+use super::callback::{datatable_columns, datatable_mappings};
 use super::column::DatatableColumn;
 use super::context::DatatableContext;
 use super::datatable_trait::{Datatable, DatatableQuery};
@@ -53,7 +53,7 @@ where
 {
     let ctx = DatatableContext::new(app, actor, &request);
 
-    let columns = catch_datatable_callback(format!("`{}` columns callback", D::ID), D::columns)?;
+    let columns = datatable_columns::<D>()?;
     let query = super::query_pipeline::prepare_query::<D>(&ctx, &columns).await?;
 
     let db = app.database()?;
@@ -61,7 +61,7 @@ where
 
     let exportable_columns: Vec<&DatatableColumn<D::Row>> =
         columns.iter().filter(|c| c.exportable).collect();
-    let mappings = catch_datatable_callback(format!("`{}` mappings callback", D::ID), D::mappings)?;
+    let mappings = datatable_mappings::<D>()?;
 
     build_xlsx(&data, &exportable_columns, &mappings, &ctx)
 }

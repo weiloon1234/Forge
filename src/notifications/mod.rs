@@ -198,7 +198,7 @@ pub async fn notify(
 
 /// Dispatch a notification asynchronously via the job queue.
 ///
-/// Pre-renders all channel payloads immediately, then dispatches a
+/// Pre-renders selected channel payloads immediately, then dispatches a
 /// `SendNotificationJob` to the worker. Returns immediately without
 /// waiting for delivery.
 ///
@@ -235,16 +235,25 @@ pub(crate) fn try_build_notification_job(
     notification: &dyn Notification,
 ) -> Result<SendNotificationJob> {
     let channels = callback::notification_channels(notification)?;
-    let email_payload = callback::notification_email(notification, notifiable)?;
-    let database_payload = callback::notification_database(notification)?;
-    let broadcast_payload = callback::notification_broadcast(notification)?;
+    let email_payload = if has_notification_channel(&channels, &NOTIFY_EMAIL) {
+        callback::notification_email(notification, notifiable)?
+    } else {
+        None
+    };
+    let database_payload = if has_notification_channel(&channels, &NOTIFY_DATABASE) {
+        callback::notification_database(notification)?
+    } else {
+        None
+    };
+    let broadcast_payload = if has_notification_channel(&channels, &NOTIFY_BROADCAST) {
+        callback::notification_broadcast(notification)?
+    } else {
+        None
+    };
 
     let mut custom_payloads = Vec::new();
     for channel_id in &channels {
-        if *channel_id != NOTIFY_EMAIL
-            && *channel_id != NOTIFY_DATABASE
-            && *channel_id != NOTIFY_BROADCAST
-        {
+        if !is_builtin_notification_channel(channel_id) {
             if let Some(data) = callback::notification_channel_payload(
                 notification,
                 channel_id.as_ref(),
@@ -264,6 +273,17 @@ pub(crate) fn try_build_notification_job(
         broadcast_payload,
         custom_payloads,
     })
+}
+
+fn has_notification_channel(
+    channels: &[NotificationChannelId],
+    target: &NotificationChannelId,
+) -> bool {
+    channels.iter().any(|channel| channel == target)
+}
+
+fn is_builtin_notification_channel(channel: &NotificationChannelId) -> bool {
+    channel == &NOTIFY_EMAIL || channel == &NOTIFY_DATABASE || channel == &NOTIFY_BROADCAST
 }
 
 pub async fn notify_queued(
@@ -316,6 +336,26 @@ mod tests {
         }
     }
 
+    struct PanickingIdNotifiable;
+
+    impl Notifiable for PanickingIdNotifiable {
+        fn notification_id(&self) -> String {
+            panic!("notifiable id exploded")
+        }
+    }
+
+    struct PanickingRouteNotifiable;
+
+    impl Notifiable for PanickingRouteNotifiable {
+        fn notification_id(&self) -> String {
+            "user-1".to_string()
+        }
+
+        fn route_notification_for(&self, _channel: &str) -> Option<String> {
+            panic!("route exploded")
+        }
+    }
+
     struct TestNotification {
         channels: Vec<NotificationChannelId>,
     }
@@ -348,6 +388,18 @@ mod tests {
         }
     }
 
+    struct PanickingTypeNotification;
+
+    impl Notification for PanickingTypeNotification {
+        fn notification_type(&self) -> &str {
+            panic!("type exploded")
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            vec![NOTIFY_DATABASE]
+        }
+    }
+
     struct PanickingViaNotification;
 
     impl Notification for PanickingViaNotification {
@@ -357,6 +409,22 @@ mod tests {
 
         fn via(&self) -> Vec<NotificationChannelId> {
             panic!("via exploded")
+        }
+    }
+
+    struct PanickingEmailNotification;
+
+    impl Notification for PanickingEmailNotification {
+        fn notification_type(&self) -> &str {
+            "panic.email"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            vec![NOTIFY_EMAIL]
+        }
+
+        fn to_email(&self, _notifiable: &dyn Notifiable) -> Option<EmailMessage> {
+            panic!("email renderer exploded")
         }
     }
 
@@ -373,6 +441,22 @@ mod tests {
 
         fn to_database(&self) -> Option<serde_json::Value> {
             panic!("database renderer exploded")
+        }
+    }
+
+    struct PanickingBroadcastNotification;
+
+    impl Notification for PanickingBroadcastNotification {
+        fn notification_type(&self) -> &str {
+            "panic.broadcast"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            vec![NOTIFY_BROADCAST]
+        }
+
+        fn to_broadcast(&self) -> Option<serde_json::Value> {
+            panic!("broadcast renderer exploded")
         }
     }
 
@@ -393,6 +477,30 @@ mod tests {
             _notifiable: &dyn Notifiable,
         ) -> Option<serde_json::Value> {
             panic!("custom renderer exploded")
+        }
+    }
+
+    struct PanickingUnselectedRenderersNotification;
+
+    impl Notification for PanickingUnselectedRenderersNotification {
+        fn notification_type(&self) -> &str {
+            "panic.unselected"
+        }
+
+        fn via(&self) -> Vec<NotificationChannelId> {
+            vec![NOTIFY_DATABASE]
+        }
+
+        fn to_email(&self, _notifiable: &dyn Notifiable) -> Option<EmailMessage> {
+            panic!("unselected email renderer exploded")
+        }
+
+        fn to_database(&self) -> Option<serde_json::Value> {
+            Some(json!({ "selected": "database" }))
+        }
+
+        fn to_broadcast(&self) -> Option<serde_json::Value> {
+            panic!("unselected broadcast renderer exploded")
         }
     }
 
@@ -447,6 +555,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notification_channel_factory_panic_becomes_error() {
+        let channel_id = NotificationChannelId::new("panic");
+        let should_panic = true;
+
+        let error = callback::send_notification_channel(&channel_id, move || {
+            if should_panic {
+                panic!("channel factory exploded");
+            }
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification channel `panic` delivery panicked: channel factory exploded"));
+    }
+
+    #[tokio::test]
+    async fn notification_channel_future_panic_becomes_error() {
+        let channel_id = NotificationChannelId::new("panic");
+        let should_panic = true;
+
+        let error = callback::send_notification_channel(&channel_id, move || async move {
+            if should_panic {
+                panic!("channel future exploded");
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification channel `panic` delivery panicked: channel future exploded"));
+    }
+
+    #[tokio::test]
+    async fn notification_channel_error_remains_unchanged() {
+        let channel_id = NotificationChannelId::new("fail");
+
+        let error = callback::send_notification_channel(&channel_id, || {
+            std::future::ready(Err(Error::message("delivery failed")))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "delivery failed");
+    }
+
+    #[test]
+    fn notification_type_panic_becomes_error() {
+        let error = callback::notification_type(&PanickingTypeNotification).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification type callback panicked: type exploded"));
+    }
+
+    #[tokio::test]
     async fn notification_via_panic_becomes_error() {
         let app = test_app(Vec::new());
 
@@ -457,6 +625,61 @@ mod tests {
         assert!(error
             .to_string()
             .contains("notification via callback panicked: via exploded"));
+    }
+
+    #[test]
+    fn notification_email_renderer_panic_becomes_error() {
+        let error =
+            callback::notification_email(&PanickingEmailNotification, &TestNotifiable).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification email renderer panicked: email renderer exploded"));
+    }
+
+    #[test]
+    fn notification_broadcast_renderer_panic_becomes_error() {
+        let error = callback::notification_broadcast(&PanickingBroadcastNotification).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification broadcast renderer panicked: broadcast renderer exploded"));
+    }
+
+    #[test]
+    fn notifiable_id_panic_becomes_error() {
+        let error = callback::notifiable_id(&PanickingIdNotifiable).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification notifiable id callback panicked: notifiable id exploded"));
+    }
+
+    #[test]
+    fn notifiable_route_panic_becomes_error() {
+        let error = callback::route_notification_for(&PanickingRouteNotifiable, "sms").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("notification notifiable route callback for `sms` panicked: route exploded"));
+    }
+
+    #[tokio::test]
+    async fn built_in_email_route_panic_becomes_error() {
+        let app = test_app(Vec::new());
+
+        let error = EmailNotificationChannel
+            .send(
+                &app,
+                &PanickingRouteNotifiable,
+                &TestNotification::new(vec![NOTIFY_EMAIL]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "notification notifiable route callback for `email` panicked: route exploded"
+        ));
     }
 
     #[tokio::test]
@@ -471,6 +694,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains("notification database renderer panicked: database renderer exploded"));
+    }
+
+    #[test]
+    fn queued_builder_only_renders_selected_builtin_channels() {
+        let job =
+            try_build_notification_job(&TestNotifiable, &PanickingUnselectedRenderersNotification)
+                .unwrap();
+
+        assert_eq!(job.channels, vec![NOTIFY_DATABASE]);
+        assert!(job.email_payload.is_none());
+        assert_eq!(
+            job.database_payload,
+            Some(json!({ "selected": "database" }))
+        );
+        assert!(job.broadcast_payload.is_none());
     }
 
     #[tokio::test]

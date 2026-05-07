@@ -414,7 +414,7 @@ impl AppTransaction {
 
     /// Buffer a queued notification that will only be dispatched after a successful `commit()`.
     ///
-    /// Channel payloads are pre-rendered immediately (at call time) so
+    /// Selected channel payloads are pre-rendered immediately (at call time) so
     /// the notification/notifiable do not need to outlive the transaction.
     pub fn notify_after_commit(
         &self,
@@ -556,6 +556,26 @@ fn service_provider_panic_error(phase: &'static str, panic: Box<dyn Any + Send>)
         "service provider panicked"
     );
     Error::message(format!("service provider {phase} panicked: {message}"))
+}
+
+fn app_runner_panic_error(phase: &'static str, panic: Box<dyn Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        phase = phase,
+        panic = %message,
+        "app runner panicked"
+    );
+    Error::message(format!("app runner {phase} panicked: {message}"))
+}
+
+fn app_runner_active_runtime_error() -> Error {
+    tracing::error!(
+        phase = "runtime",
+        "app runner cannot start inside an active Tokio runtime"
+    );
+    Error::message(
+        "app runner runtime unavailable: sync app runners cannot be started from within an active Tokio runtime; use the async run_*_async variant instead",
+    )
 }
 
 #[async_trait]
@@ -1282,11 +1302,29 @@ impl AppBuilder {
         F: FnOnce(AppBuilder) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(app_runner_active_runtime_error());
+        }
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(Error::other)?;
-        runtime.block_on(runner(self))
+        let future = match catch_unwind(AssertUnwindSafe(|| runner(self))) {
+            Ok(future) => future,
+            Err(panic) => return Err(app_runner_panic_error("factory", panic)),
+        };
+
+        match catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(AssertUnwindSafe(future).catch_unwind())
+        })) {
+            Ok(Ok(result)) => result,
+            Ok(Err(panic)) => Err(app_runner_panic_error("future", panic)),
+            Err(panic) => {
+                runtime.shutdown_background();
+                Err(app_runner_panic_error("runtime", panic))
+            }
+        }
     }
 }
 
@@ -1671,6 +1709,55 @@ mod tests {
 
         assert!(error.to_string().contains("service provider boot panicked"));
         assert!(error.to_string().contains("provider boot boom"));
+    }
+
+    #[test]
+    fn app_block_on_runner_error_remains_unchanged() {
+        let error = App::builder()
+            .block_on(|_| async { Err(Error::message("runner failed")) })
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "runner failed");
+    }
+
+    #[test]
+    fn app_block_on_runner_factory_panic_becomes_error() {
+        let error = App::builder()
+            .block_on(|_| -> std::future::Ready<Result<()>> {
+                panic!("runner factory boom");
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "app runner factory panicked: runner factory boom"
+        );
+    }
+
+    #[test]
+    fn app_block_on_runner_future_panic_becomes_error() {
+        let error = App::builder()
+            .block_on(|_| async {
+                panic!("runner future boom");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "app runner future panicked: runner future boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_block_on_active_runtime_becomes_error() {
+        let error = App::builder().block_on(|_| async { Ok(()) }).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "app runner runtime unavailable: sync app runners cannot be started from within an active Tokio runtime; use the async run_*_async variant instead"
+        );
     }
 
     #[tokio::test]

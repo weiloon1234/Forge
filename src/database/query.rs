@@ -571,14 +571,6 @@ impl Query {
         }
     }
 
-    fn from_ast(ast: QueryAst) -> Self {
-        Self {
-            ast,
-            options: QueryExecutionOptions::default(),
-            deferred_error: None,
-        }
-    }
-
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.options.timeout = Some(timeout);
         self
@@ -973,13 +965,22 @@ impl Query {
     }
 
     pub fn union(self, other: Self) -> Self {
-        let deferred_error =
-            first_deferred_error(self.deferred_error.clone(), other.deferred_error.clone());
+        let Self {
+            ast: left,
+            deferred_error: left_error,
+            ..
+        } = self;
+        let Self {
+            ast: right,
+            deferred_error: right_error,
+            ..
+        } = other;
+        let deferred_error = first_deferred_error(left_error, right_error);
         Self {
             ast: QueryAst::set_operation(SetOperationNode {
-                left: Box::new(self.ast),
+                left: Box::new(left),
                 operator: SetOperator::Union,
-                right: Box::new(other.ast),
+                right: Box::new(right),
                 order_by: Vec::new(),
                 limit: None,
                 offset: None,
@@ -990,13 +991,22 @@ impl Query {
     }
 
     pub fn union_all(self, other: Self) -> Self {
-        let deferred_error =
-            first_deferred_error(self.deferred_error.clone(), other.deferred_error.clone());
+        let Self {
+            ast: left,
+            deferred_error: left_error,
+            ..
+        } = self;
+        let Self {
+            ast: right,
+            deferred_error: right_error,
+            ..
+        } = other;
+        let deferred_error = first_deferred_error(left_error, right_error);
         Self {
             ast: QueryAst::set_operation(SetOperationNode {
-                left: Box::new(self.ast),
+                left: Box::new(left),
                 operator: SetOperator::UnionAll,
-                right: Box::new(other.ast),
+                right: Box::new(right),
                 order_by: Vec::new(),
                 limit: None,
                 offset: None,

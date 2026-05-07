@@ -130,22 +130,14 @@ where
         let event = event
             .downcast_ref::<E>()
             .ok_or_else(|| Error::message(format!("failed to downcast event `{}`", E::ID)))?;
-        match AssertUnwindSafe(self.listener.handle(context, event))
-            .catch_unwind()
-            .await
-        {
+        let future = match catch_unwind(AssertUnwindSafe(|| self.listener.handle(context, event))) {
+            Ok(future) => future,
+            Err(panic) => return Err(event_listener_panic_error::<E>(panic)),
+        };
+
+        match AssertUnwindSafe(future).catch_unwind().await {
             Ok(result) => result,
-            Err(panic) => {
-                let message = panic_payload_message(panic);
-                tracing::error!(
-                    event = %E::ID,
-                    panic = %message,
-                    "Event listener panicked"
-                );
-                Err(Error::message(format!(
-                    "event listener panicked: {message}"
-                )))
-            }
+            Err(panic) => Err(event_listener_panic_error::<E>(panic)),
         }
     }
 }
@@ -314,9 +306,21 @@ fn event_mapper_panic_error<E: Event>(
     Error::message(format!("{subject} panicked: {message}"))
 }
 
+fn event_listener_panic_error<E: Event>(panic: Box<dyn std::any::Any + Send>) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        event = %E::ID,
+        panic = %message,
+        "Event listener panicked"
+    );
+    Error::message(format!("event listener panicked: {message}"))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -395,6 +399,49 @@ mod tests {
         }
     }
 
+    struct ErrorListener;
+
+    #[async_trait]
+    impl EventListener<TestEvent> for ErrorListener {
+        async fn handle(&self, _context: &EventContext, _event: &TestEvent) -> crate::Result<()> {
+            Err(crate::Error::message("listener failed"))
+        }
+    }
+
+    struct FactoryPanicListener;
+
+    impl EventListener<TestEvent> for FactoryPanicListener {
+        fn handle<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            _context: &'life1 EventContext,
+            _event: &'life2 TestEvent,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("listener factory explode")
+        }
+    }
+
+    fn test_bus_for_listener<L>(listener: L) -> EventBus
+    where
+        L: EventListener<TestEvent>,
+    {
+        let registry = EventRegistryBuilder::shared();
+        registry.lock().unwrap().listen::<TestEvent, _>(listener);
+
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        EventBus::new(app, EventRegistryBuilder::freeze_shared(registry))
+    }
+
     #[tokio::test]
     async fn dispatches_listeners_in_registration_order() {
         let target = Arc::new(Mutex::new(Vec::new()));
@@ -466,6 +513,27 @@ mod tests {
             "event listener panicked: listener explode"
         );
         assert_eq!(target.lock().unwrap().as_slice(), ["first", "panic"]);
+    }
+
+    #[tokio::test]
+    async fn listener_error_remains_unchanged() {
+        let bus = test_bus_for_listener(ErrorListener);
+
+        let error = bus.dispatch(TestEvent).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "listener failed");
+    }
+
+    #[tokio::test]
+    async fn listener_factory_panic_becomes_dispatch_error() {
+        let bus = test_bus_for_listener(FactoryPanicListener);
+
+        let error = bus.dispatch(TestEvent).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "event listener panicked: listener factory explode"
+        );
     }
 
     #[tokio::test]

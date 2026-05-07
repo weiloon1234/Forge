@@ -13,8 +13,8 @@ use super::{
 
 /// Job payload that carries pre-rendered notification data for async dispatch.
 ///
-/// Created by `notify_queued()`. All channel payloads are pre-rendered at
-/// dispatch time so the worker doesn't need to reconstruct the notification.
+/// Created by `notify_queued()`. Selected channel payloads are pre-rendered
+/// at dispatch time so the worker doesn't need to reconstruct the notification.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendNotificationJob {
     pub(crate) notifiable_id: String,

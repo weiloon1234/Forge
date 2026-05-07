@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -399,17 +400,31 @@ pub trait Plugin: Send + Sync + 'static {
 
 pub(crate) async fn boot_plugin(plugin: &Arc<dyn Plugin>, app: &AppContext) -> Result<()> {
     let manifest = plugin_manifest(plugin)?;
-    match AssertUnwindSafe(plugin.boot(app)).catch_unwind().await {
-        Ok(result) => result,
-        Err(panic) => Err(plugin_panic_error(Some(manifest.id()), "boot", panic)),
-    }
+    run_plugin_lifecycle_callback(manifest.id(), "boot", || plugin.boot(app)).await
 }
 
 pub(crate) async fn shutdown_plugin(plugin: &Arc<dyn Plugin>, app: &AppContext) -> Result<()> {
     let manifest = plugin_manifest(plugin)?;
-    match AssertUnwindSafe(plugin.shutdown(app)).catch_unwind().await {
+    run_plugin_lifecycle_callback(manifest.id(), "shutdown", || plugin.shutdown(app)).await
+}
+
+async fn run_plugin_lifecycle_callback<F, Fut>(
+    id: &PluginId,
+    phase: &'static str,
+    callback: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let future = match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(future) => future,
+        Err(panic) => return Err(plugin_panic_error(Some(id), phase, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result,
-        Err(panic) => Err(plugin_panic_error(Some(manifest.id()), "shutdown", panic)),
+        Err(panic) => Err(plugin_panic_error(Some(id), phase, panic)),
     }
 }
 
@@ -1378,11 +1393,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        prepare_plugins, Plugin, PluginAsset, PluginAssetKind, PluginDependency, PluginId,
-        PluginInstallOptions, PluginManifest, PluginRegistrar, PluginRegistry, PluginScaffold,
-        PluginScaffoldOptions, PluginScaffoldVar,
+        prepare_plugins, run_plugin_lifecycle_callback, Plugin, PluginAsset, PluginAssetKind,
+        PluginDependency, PluginId, PluginInstallOptions, PluginManifest, PluginRegistrar,
+        PluginRegistry, PluginScaffold, PluginScaffoldOptions, PluginScaffoldVar,
     };
-    use crate::foundation::{AppContext, Result, ServiceProvider, ServiceRegistrar};
+    use crate::foundation::{AppContext, Error, Result, ServiceProvider, ServiceRegistrar};
     use crate::support::{PluginAssetId, PluginScaffoldId};
 
     struct EmptyPlugin {
@@ -1573,6 +1588,58 @@ mod tests {
             .to_string()
             .contains("plugin `forge.panic.register` register panicked"));
         assert!(error.to_string().contains("register boom"));
+    }
+
+    #[tokio::test]
+    async fn plugin_lifecycle_error_remains_unchanged() {
+        let id = PluginId::new("forge.lifecycle.error");
+
+        let error = run_plugin_lifecycle_callback(&id, "boot", || async {
+            Err(Error::message("plugin boot failed"))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "plugin boot failed");
+    }
+
+    #[tokio::test]
+    async fn plugin_lifecycle_factory_panic_becomes_error() {
+        let id = PluginId::new("forge.lifecycle.factory_panic");
+
+        let error =
+            run_plugin_lifecycle_callback(&id, "boot", || -> std::future::Ready<Result<()>> {
+                panic!("plugin factory boom")
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "plugin `forge.lifecycle.factory_panic` boot panicked: plugin factory boom"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_lifecycle_future_panic_becomes_error() {
+        let id = PluginId::new("forge.lifecycle.future_panic");
+
+        let error = run_plugin_lifecycle_callback(&id, "shutdown", || async {
+            panic!("plugin future boom");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "plugin `forge.lifecycle.future_panic` shutdown panicked: plugin future boom"
+            ),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

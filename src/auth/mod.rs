@@ -27,6 +27,7 @@ use crate::config::AuthConfig;
 use crate::database::{ColumnRef, ComparisonOp, DbType, DbValue, Expr, Model, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{catch_async_panic, panic_payload_message};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{GuardId, ModelId, PermissionId, PolicyId, RoleId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -537,7 +538,7 @@ impl GuardRegistryBuilder {
     pub(crate) fn freeze_shared(
         handle: GuardRegistryHandle,
     ) -> HashMap<GuardId, GuardAuthenticator> {
-        let mut builder = handle.lock().expect("guard registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "guard registry");
         std::mem::take(&mut builder.guards)
     }
 }
@@ -569,7 +570,7 @@ impl PolicyRegistryBuilder {
     pub(crate) fn freeze_shared(
         handle: PolicyRegistryHandle,
     ) -> HashMap<PolicyId, Arc<dyn Policy>> {
-        let mut builder = handle.lock().expect("policy registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "policy registry");
         std::mem::take(&mut builder.policies)
     }
 }
@@ -620,9 +621,7 @@ impl AuthenticatableRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: AuthenticatableRegistryHandle) -> AuthenticatableRegistry {
-        let mut builder = handle
-            .lock()
-            .expect("authenticatable registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "authenticatable registry");
         AuthenticatableRegistry {
             resolvers: std::mem::take(&mut builder.resolvers),
         }

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::attachments::Attachment;
 use crate::foundation::{Error, Result};
+use crate::support::sync::lock_unpoisoned;
 use crate::translations::ModelTranslation;
 
 use super::runtime::{DbRecord, QueryExecutor};
@@ -313,9 +314,7 @@ impl ModelExtensionScope {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ModelExtensionCache> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock_unpoisoned(&self.inner, "model extension cache")
     }
 }
 

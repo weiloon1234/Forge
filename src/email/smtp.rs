@@ -103,10 +103,10 @@ fn build_lettre_message(email: &OutboundEmail) -> Result<Message> {
             let mut mixed = MultiPart::mixed().multipart(alternative);
             for att in &email.attachments {
                 let ct = lettre::message::header::ContentType::parse(&att.content_type)
-                    .unwrap_or_else(|_| {
+                    .or_else(|_| {
                         lettre::message::header::ContentType::parse("application/octet-stream")
-                            .unwrap()
-                    });
+                    })
+                    .map_err(|e| Error::message(format!("email content type error: {e}")))?;
                 mixed = mixed.singlepart(
                     SinglePart::builder()
                         .header(ct)

@@ -18,6 +18,7 @@ use crate::notifications::{
     NotificationChannel, NotificationChannelRegistryBuilder, NotificationChannelRegistryHandle,
 };
 use crate::storage::{StorageDriverFactory, StorageDriverRegistryHandle};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{GuardId, MigrationId, PolicyId, ProbeId, SeederId};
 use crate::validation::RuleRegistry;
 
@@ -129,11 +130,7 @@ impl ServiceRegistrar {
         E: Event,
         L: EventListener<E>,
     {
-        self.registries
-            .event
-            .lock()
-            .expect("event registry lock poisoned")
-            .listen::<E, L>(listener);
+        lock_unpoisoned(&self.registries.event, "event registry").listen::<E, L>(listener);
         Ok(())
     }
 
@@ -141,18 +138,11 @@ impl ServiceRegistrar {
     where
         J: Job,
     {
-        self.registries
-            .job
-            .lock()
-            .expect("job registry lock poisoned")
-            .register::<J>()
+        lock_unpoisoned(&self.registries.job, "job registry").register::<J>()
     }
 
     pub fn register_job_middleware<M: JobMiddleware>(&self, middleware: M) -> Result<()> {
-        self.registries
-            .job_middleware
-            .lock()
-            .expect("job middleware registry lock poisoned")
+        lock_unpoisoned(&self.registries.job_middleware, "job middleware registry")
             .register(Arc::new(middleware));
         Ok(())
     }
@@ -164,10 +154,7 @@ impl ServiceRegistrar {
     where
         M: MigrationFile,
     {
-        self.registries
-            .migration
-            .lock()
-            .expect("migration registry lock poisoned")
+        lock_unpoisoned(&self.registries.migration, "migration registry")
             .register_file::<M>(id.into())
     }
 
@@ -175,11 +162,7 @@ impl ServiceRegistrar {
     where
         S: SeederFile,
     {
-        self.registries
-            .seeder
-            .lock()
-            .expect("seeder registry lock poisoned")
-            .register_file::<S>(id.into())
+        lock_unpoisoned(&self.registries.seeder, "seeder registry").register_file::<S>(id.into())
     }
 
     pub fn register_guard<I, G>(&self, id: I, guard: G) -> Result<()>
@@ -187,11 +170,7 @@ impl ServiceRegistrar {
         I: Into<GuardId>,
         G: BearerAuthenticator,
     {
-        self.registries
-            .guard
-            .lock()
-            .expect("guard registry lock poisoned")
-            .register_arc(id, Arc::new(guard))
+        lock_unpoisoned(&self.registries.guard, "guard registry").register_arc(id, Arc::new(guard))
     }
 
     pub fn register_policy<I, P>(&self, id: I, policy: P) -> Result<()>
@@ -199,10 +178,7 @@ impl ServiceRegistrar {
         I: Into<PolicyId>,
         P: Policy,
     {
-        self.registries
-            .policy
-            .lock()
-            .expect("policy registry lock poisoned")
+        lock_unpoisoned(&self.registries.policy, "policy registry")
             .register_arc(id, Arc::new(policy))
     }
 
@@ -210,10 +186,7 @@ impl ServiceRegistrar {
     where
         M: Authenticatable,
     {
-        self.registries
-            .authenticatable
-            .lock()
-            .expect("authenticatable registry lock poisoned")
+        lock_unpoisoned(&self.registries.authenticatable, "authenticatable registry")
             .register::<M>()
     }
 
@@ -222,26 +195,17 @@ impl ServiceRegistrar {
         I: Into<ProbeId>,
         C: ReadinessCheck,
     {
-        self.registries
-            .readiness
-            .lock()
-            .expect("readiness registry lock poisoned")
+        lock_unpoisoned(&self.registries.readiness, "readiness registry")
             .register_arc(id, Arc::new(check))
     }
 
     pub fn register_storage_driver(&self, name: &str, factory: StorageDriverFactory) -> Result<()> {
-        self.registries
-            .storage_driver
-            .lock()
-            .expect("storage driver registry lock poisoned")
+        lock_unpoisoned(&self.registries.storage_driver, "storage driver registry")
             .register(name.to_string(), factory)
     }
 
     pub fn register_email_driver(&self, name: &str, factory: EmailDriverFactory) -> Result<()> {
-        self.registries
-            .email_driver
-            .lock()
-            .expect("email driver registry lock poisoned")
+        lock_unpoisoned(&self.registries.email_driver, "email driver registry")
             .register(name.to_string(), factory)
     }
 
@@ -250,11 +214,11 @@ impl ServiceRegistrar {
         I: Into<crate::support::NotificationChannelId>,
         N: NotificationChannel,
     {
-        self.registries
-            .notification_channel
-            .lock()
-            .expect("notification channel registry lock poisoned")
-            .register(id, Arc::new(channel))
+        lock_unpoisoned(
+            &self.registries.notification_channel,
+            "notification channel registry",
+        )
+        .register(id, Arc::new(channel))
     }
 
     pub(crate) fn notification_channel_registry(&self) -> NotificationChannelRegistryHandle {
@@ -269,11 +233,7 @@ impl ServiceRegistrar {
     where
         D: crate::datatable::Datatable,
     {
-        self.registries
-            .datatable
-            .lock()
-            .expect("datatable registry lock poisoned")
-            .register::<D>()
+        lock_unpoisoned(&self.registries.datatable, "datatable registry").register::<D>()
     }
 
     pub(crate) fn datatable_registry(&self) -> DatatableRegistryHandle {

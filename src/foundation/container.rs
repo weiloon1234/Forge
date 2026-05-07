@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::foundation::{Error, Result};
 use crate::logging::{catch_sync_panic, panic_payload_message};
+use crate::support::sync::{read_unpoisoned, write_unpoisoned};
 
 type SharedService = Arc<dyn Any + Send + Sync>;
 type ServiceFactory = Arc<dyn Fn(&Container) -> Result<SharedService> + Send + Sync>;
@@ -35,10 +36,7 @@ impl Container {
     where
         T: Send + Sync + 'static,
     {
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|_| Error::message("container lock poisoned"))?;
+        let mut entries = write_unpoisoned(&self.entries, "container");
         let type_id = TypeId::of::<T>();
         if entries.contains_key(&type_id) {
             return Err(Error::message(format!(
@@ -68,10 +66,7 @@ impl Container {
         T: Send + Sync + 'static,
         F: Fn(&Container) -> Result<Arc<T>> + Send + Sync + 'static,
     {
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|_| Error::message("container lock poisoned"))?;
+        let mut entries = write_unpoisoned(&self.entries, "container");
         let type_id = TypeId::of::<T>();
         if entries.contains_key(&type_id) {
             return Err(Error::message(format!(
@@ -94,10 +89,7 @@ impl Container {
         T: Send + Sync + 'static,
     {
         let entry = {
-            let entries = self
-                .entries
-                .read()
-                .map_err(|_| Error::message("container lock poisoned"))?;
+            let entries = read_unpoisoned(&self.entries, "container");
             entries.get(&TypeId::of::<T>()).cloned()
         }
         .ok_or_else(|| {
@@ -157,6 +149,7 @@ fn service_factory_panic_error(service: &'static str, panic: Box<dyn Any + Send>
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Arc;
 
     use super::Container;
@@ -249,6 +242,21 @@ mod tests {
             "service factory `{}` panicked: factory exploded",
             std::any::type_name::<usize>()
         )));
+        assert_eq!(container.resolve::<String>().unwrap().as_str(), "forge");
+    }
+
+    #[test]
+    fn recovers_poisoned_entry_lock() {
+        let container = Container::new();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _entries = container.entries.write().unwrap();
+            panic!("poison container");
+        }));
+        assert!(result.is_err());
+
+        container.singleton::<String>("forge".to_string()).unwrap();
+
         assert_eq!(container.resolve::<String>().unwrap().as_str(), "forge");
     }
 }

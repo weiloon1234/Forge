@@ -3552,6 +3552,40 @@ async fn locking_streaming_timeout_and_debug_surfaces_work() {
 }
 
 #[tokio::test]
+async fn dropping_raw_stream_cancels_in_flight_producer_and_releases_pool_slot() {
+    let Some(url) = postgres_url() else {
+        return;
+    };
+    let database = DatabaseManager::from_config(&DatabaseConfig {
+        url,
+        min_connections: 0,
+        max_connections: 1,
+        acquire_timeout_ms: 200,
+        ..DatabaseConfig::default()
+    })
+    .await
+    .unwrap();
+
+    let stream = database.raw_stream(
+        "SELECT pg_sleep(5)::text AS slept",
+        &[],
+        QueryExecutionOptions::default().with_label("dropped slow stream"),
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(stream);
+
+    let rows = tokio::time::timeout(
+        Duration::from_secs(1),
+        database.raw_query("SELECT 1::bigint AS value", &[]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(rows[0].decode::<i64>("value").unwrap(), 1);
+}
+
+#[tokio::test]
 async fn typed_runtime_hydrates_published_countries_char_columns_as_strings() {
     let Some(database) = test_database().await else {
         return;

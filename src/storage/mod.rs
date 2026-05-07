@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::ConfigRepository;
 use crate::foundation::{Error, Result};
+use crate::support::sync::lock_unpoisoned;
 
 pub type StorageDriverFactory = Arc<
     dyn Fn(
@@ -52,12 +53,8 @@ impl StorageDriverRegistryBuilder {
     pub(crate) fn freeze_shared(
         handle: StorageDriverRegistryHandle,
     ) -> HashMap<String, StorageDriverFactory> {
-        std::mem::take(
-            &mut handle
-                .lock()
-                .expect("storage driver registry lock poisoned")
-                .drivers,
-        )
+        let mut builder = lock_unpoisoned(&handle, "storage driver registry");
+        std::mem::take(&mut builder.drivers)
     }
 }
 

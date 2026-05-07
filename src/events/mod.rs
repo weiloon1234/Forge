@@ -11,6 +11,7 @@ use crate::auth::Actor;
 use crate::foundation::{AppContext, Error, Result};
 use crate::jobs::Job;
 use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::EventId;
 use crate::websocket::ServerMessage;
 
@@ -162,7 +163,7 @@ impl EventRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: EventRegistryHandle) -> EventRegistrySnapshot {
-        let mut builder = handle.lock().expect("event registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "event registry");
         EventRegistrySnapshot {
             listeners: std::mem::take(&mut builder.listeners),
         }
@@ -313,6 +314,7 @@ fn event_listener_panic_error<E: Event>(panic: Box<dyn std::any::Any + Send>) ->
 mod tests {
     use std::future::Future;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -464,6 +466,21 @@ mod tests {
         bus.dispatch(TestEvent).await.unwrap();
 
         assert_eq!(target.lock().unwrap().as_slice(), ["first", "second"]);
+    }
+
+    #[test]
+    fn registry_freeze_recovers_poisoned_lock() {
+        let registry = EventRegistryBuilder::shared();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _builder = registry.lock().unwrap();
+            panic!("poison event registry");
+        }));
+        assert!(result.is_err());
+
+        let snapshot = EventRegistryBuilder::freeze_shared(registry);
+
+        assert!(snapshot.listeners.is_empty());
     }
 
     #[tokio::test]

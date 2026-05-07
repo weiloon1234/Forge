@@ -11,6 +11,7 @@ use crate::auth::Actor;
 use crate::events::EventOrigin;
 use crate::foundation::AppContext;
 use crate::jobs::{JobDeadLetterContext, JobMiddleware};
+use crate::support::sync::lock_unpoisoned;
 
 use super::{catch_async_panic, current_execution, CurrentRequest, ExecutionContext};
 
@@ -233,7 +234,7 @@ pub(crate) fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
 
 pub(crate) fn set_global_panic_reporters(registry: Arc<ErrorReporterRegistry>) {
     let slot = GLOBAL_PANIC_REPORTERS.get_or_init(|| Mutex::new(None));
-    *slot.lock().expect("panic reporter registry lock poisoned") = Some(registry);
+    *lock_unpoisoned(slot, "panic reporter registry") = Some(registry);
 }
 
 pub(crate) fn report_panic_from_hook(message: String, location: String) {

@@ -142,11 +142,13 @@ where
         return Ok(query);
     }
 
-    Ok(apply_filter(
-        query,
-        scope.expect("LikeAny scope should exist when conditions are present"),
-        Condition::or(conditions),
-    ))
+    let Some(scope) = scope else {
+        return Err(Error::message(
+            "LikeAny requires at least one filter target",
+        ));
+    };
+
+    Ok(apply_filter(query, scope, Condition::or(conditions)))
 }
 
 pub(crate) fn build_filter_condition(

@@ -11,6 +11,7 @@ use super::types::{
 };
 use super::{catch_async_panic, panic_payload_message};
 use crate::foundation::{AppContext, Result};
+use crate::support::sync::{read_unpoisoned, write_unpoisoned};
 use crate::support::ChannelId;
 
 const HTTP_REQUEST_DURATION_BUCKETS_MS: [u64; 12] = [
@@ -222,7 +223,7 @@ struct WebSocketCounters {
 
 impl WebSocketCounters {
     fn snapshot(&self) -> WebSocketRuntimeSnapshot {
-        let map = self.per_channel.read().expect("per_channel lock poisoned");
+        let map = read_unpoisoned(&self.per_channel, "websocket per-channel counters");
         let mut channels: Vec<WebSocketChannelSnapshot> = map
             .iter()
             .map(|(id, counters)| WebSocketChannelSnapshot {
@@ -253,13 +254,13 @@ impl WebSocketCounters {
     fn entry(&self, channel: &ChannelId) -> Arc<PerChannelWebSocketCounters> {
         // Fast path: read lock and return if present.
         {
-            let map = self.per_channel.read().expect("per_channel lock poisoned");
+            let map = read_unpoisoned(&self.per_channel, "websocket per-channel counters");
             if let Some(existing) = map.get(channel) {
                 return existing.clone();
             }
         }
         // Slow path: upgrade to write lock and insert.
-        let mut map = self.per_channel.write().expect("per_channel lock poisoned");
+        let mut map = write_unpoisoned(&self.per_channel, "websocket per-channel counters");
         map.entry(channel.clone())
             .or_insert_with(|| Arc::new(PerChannelWebSocketCounters::default()))
             .clone()

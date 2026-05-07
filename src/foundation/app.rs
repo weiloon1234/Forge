@@ -41,6 +41,7 @@ use crate::redis::RedisManager;
 use crate::scheduler::ScheduleRegistrar;
 use crate::storage::{StorageDriverRegistryBuilder, StorageManager};
 use crate::support::runtime::RuntimeBackend;
+use crate::support::sync::{lock_unpoisoned, mutex_into_inner_unpoisoned};
 use crate::support::{
     Clock, CryptManager, GuardId, HashManager, RouteId, Timezone, ValidationRuleId,
 };
@@ -448,10 +449,7 @@ impl AppTransaction {
     pub async fn commit(self) -> Result<()> {
         self.transaction.commit().await?;
 
-        let callbacks = self
-            .after_commit
-            .into_inner()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let callbacks = mutex_into_inner_unpoisoned(self.after_commit, "after-commit callbacks");
 
         run_after_commit_callbacks(&self.app, callbacks).await;
 
@@ -633,10 +631,7 @@ impl AfterCommitSink for AppTransaction {
     }
 
     fn defer_after_commit(&self, callback: AfterCommitCallback) {
-        self.after_commit
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(callback);
+        lock_unpoisoned(&self.after_commit, "after-commit callbacks").push(callback);
     }
 }
 
@@ -1020,10 +1015,7 @@ impl AppBuilder {
             auth_config.sessions.clone(),
         ));
         {
-            let mut guards = registries
-                .guard
-                .lock()
-                .expect("guard registry lock poisoned");
+            let mut guards = lock_unpoisoned(&registries.guard, "guard registry");
             for (guard_name, driver_config) in &auth_config.guards {
                 if guards.contains(guard_name) {
                     continue; // consumer-registered guard takes precedence
@@ -1099,9 +1091,7 @@ impl AppBuilder {
         // Auto-register built-in notification channels (consumer-registered ones take precedence)
         let ncr_handle = registrar.notification_channel_registry();
         {
-            let mut ncr = ncr_handle
-                .lock()
-                .expect("notification channel registry lock poisoned");
+            let mut ncr = lock_unpoisoned(&ncr_handle, "notification channel registry");
             if !ncr.contains(&crate::notifications::NOTIFY_EMAIL) {
                 ncr.register(
                     crate::notifications::NOTIFY_EMAIL,
@@ -1355,7 +1345,7 @@ fn register_builtin_readiness_checks(
     registry: &ReadinessRegistryHandle,
     backend_kind: RuntimeBackendKind,
 ) -> Result<()> {
-    let mut registry = registry.lock().expect("readiness registry lock poisoned");
+    let mut registry = lock_unpoisoned(registry, "readiness registry");
     registry.register_arc(
         FRAMEWORK_BOOTSTRAP_PROBE,
         Arc::new(|app: &AppContext| {

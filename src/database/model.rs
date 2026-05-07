@@ -14,6 +14,7 @@ use crate::config::DatabaseModelConfig;
 use crate::events::{Event, EventBus, EventOrigin};
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{catch_sync_panic, panic_payload_message};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{Date, DateTime, EventId, LocalDateTime, ModelId, Time};
 
 use super::ast::{
@@ -536,16 +537,11 @@ fn runtime_model_defaults_lock() -> &'static Mutex<DatabaseModelConfig> {
 }
 
 fn runtime_model_defaults() -> DatabaseModelConfig {
-    runtime_model_defaults_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+    lock_unpoisoned(runtime_model_defaults_lock(), "runtime model defaults").clone()
 }
 
 pub(crate) fn set_runtime_model_defaults(defaults: DatabaseModelConfig) {
-    *runtime_model_defaults_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = defaults;
+    *lock_unpoisoned(runtime_model_defaults_lock(), "runtime model defaults") = defaults;
 }
 
 impl ColumnInfo {

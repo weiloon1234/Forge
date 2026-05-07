@@ -24,7 +24,7 @@ use crate::logging::{
     JobOutcome as RecordedJobOutcome, RuntimeDiagnostics,
 };
 use crate::support::runtime::RuntimeBackend;
-use crate::support::{JobId, QueueId};
+use crate::support::{sync::lock_unpoisoned, JobId, QueueId};
 
 use self::backend::{ClaimedJobLease, JobToEnqueue, SuccessfulJobEffects};
 
@@ -68,9 +68,7 @@ impl JobMiddlewareRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: JobMiddlewareRegistryHandle) -> JobMiddlewareRegistry {
-        let mut builder = handle
-            .lock()
-            .expect("job middleware registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "job middleware registry");
         JobMiddlewareRegistry {
             middlewares: std::mem::take(&mut builder.middlewares),
         }
@@ -1339,16 +1337,13 @@ impl ActiveWorkerJobs {
     }
 
     fn track(&self, handle: JoinHandle<()>) {
-        self.tasks
-            .lock()
-            .expect("worker active job mutex poisoned")
-            .push(WorkerJobTask::new(handle));
+        lock_unpoisoned(&self.tasks, "worker active jobs").push(WorkerJobTask::new(handle));
     }
 
     async fn prune_finished(&self) {
         let mut finished = Vec::new();
         {
-            let mut tasks = self.tasks.lock().expect("worker active job mutex poisoned");
+            let mut tasks = lock_unpoisoned(&self.tasks, "worker active jobs");
             let mut index = 0;
             while index < tasks.len() {
                 if tasks[index].is_finished() {
@@ -1366,7 +1361,7 @@ impl ActiveWorkerJobs {
 
     async fn drain(&self) {
         let tasks = {
-            let mut tasks = self.tasks.lock().expect("worker active job mutex poisoned");
+            let mut tasks = lock_unpoisoned(&self.tasks, "worker active jobs");
             std::mem::take(&mut *tasks)
         };
 
@@ -1652,7 +1647,7 @@ impl JobRegistryBuilder {
         handle: JobRegistryHandle,
         config: &JobsConfig,
     ) -> JobRegistrySnapshot {
-        let mut builder = handle.lock().expect("job registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "job registry");
         let jobs = std::mem::take(&mut builder.jobs)
             .into_iter()
             .map(|(name, registration)| {

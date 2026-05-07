@@ -1,22 +1,15 @@
-use std::{
-    collections::VecDeque,
-    future::Future,
-    marker::PhantomData,
-    panic::{catch_unwind, AssertUnwindSafe},
-    pin::Pin,
-};
+use std::{collections::VecDeque, future::Future, marker::PhantomData, pin::Pin};
 
 use serde::Serialize;
 
 use crate::audit::{record_with_assignments, write_model_audit, AuditEventType};
 use crate::events::{Event, EventOrigin};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{current_actor, current_request, panic_payload_message};
-use crate::support::{Collection, ModelId};
-use futures_util::{
-    stream::{self, BoxStream, StreamExt},
-    FutureExt,
+use crate::logging::{
+    catch_async_panic, catch_sync_panic, current_actor, current_request, panic_payload_message,
 };
+use crate::support::{Collection, ModelId};
+use futures_util::stream::{self, BoxStream, StreamExt};
 
 use super::aggregate::{
     count_query_ast, execute_scalar_projection_on_ast, wrap_query_for_alias_aggregate,
@@ -1460,7 +1453,7 @@ where
     /// Apply a reusable query scope.
     pub fn scope(self, f: impl FnOnce(Self) -> Self) -> Self {
         let fallback = self.clone();
-        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+        match catch_sync_panic(|| f(self)) {
             Ok(query) => query,
             Err(panic) => fallback
                 .with_deferred_error(projection_query_dsl_panic_message::<P>("scope", panic)),
@@ -1874,7 +1867,7 @@ where
     /// ```
     pub fn scope(self, f: impl FnOnce(Self) -> Self) -> Self {
         let fallback = self.clone();
-        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+        match catch_sync_panic(|| f(self)) {
             Ok(query) => query,
             Err(panic) => {
                 fallback.with_deferred_error(model_query_dsl_panic_message::<M>("scope", panic))
@@ -1971,9 +1964,7 @@ where
         To: Model,
         F: FnOnce(ModelQuery<To>) -> ModelQuery<To>,
     {
-        let scoped = match catch_unwind(AssertUnwindSafe(|| {
-            scope(ModelQuery::new(To::table_meta()))
-        })) {
+        let scoped = match catch_sync_panic(|| scope(ModelQuery::new(To::table_meta()))) {
             Ok(scoped) => scoped,
             Err(panic) => {
                 return self
@@ -1999,9 +1990,7 @@ where
         Pivot: Clone + Send + Sync + 'static,
         F: FnOnce(ModelQuery<To>) -> ModelQuery<To>,
     {
-        let scoped = match catch_unwind(AssertUnwindSafe(|| {
-            scope(ModelQuery::new(To::table_meta()))
-        })) {
+        let scoped = match catch_sync_panic(|| scope(ModelQuery::new(To::table_meta()))) {
             Ok(scoped) => scoped,
             Err(panic) => {
                 return self.with_deferred_error(model_query_dsl_panic_message::<M>(
@@ -2997,7 +2986,7 @@ where
     where
         F: FnOnce(CreateRow<M>) -> CreateRow<M>,
     {
-        match catch_unwind(AssertUnwindSafe(|| build(CreateRow::new()))) {
+        match catch_sync_panic(|| build(CreateRow::new())) {
             Ok(row) => self.rows.push(row.into_values()),
             Err(panic) => {
                 if self.row_builder_error.is_none() {
@@ -3805,12 +3794,7 @@ async fn run_model_write_mutator<M>(
 where
     M: Model,
 {
-    let future = match catch_unwind(AssertUnwindSafe(|| write_mutator(context, value))) {
-        Ok(future) => future,
-        Err(panic) => return Err(model_write_mutator_panic_error::<M>(&column.name, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| write_mutator(context, value)).await {
         Ok(result) => result,
         Err(panic) => Err(model_write_mutator_panic_error::<M>(&column.name, panic)),
     }
@@ -3844,12 +3828,7 @@ where
     F: FnMut(I) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let future = match catch_unwind(AssertUnwindSafe(|| handler(input))) {
-        Ok(future) => future,
-        Err(panic) => return Err(query_iteration_panic_error::<M>(operation, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| handler(input)).await {
         Ok(result) => result,
         Err(panic) => Err(query_iteration_panic_error::<M>(operation, panic)),
     }
@@ -4080,12 +4059,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let future = match catch_unwind(AssertUnwindSafe(run)) {
-        Ok(future) => future,
-        Err(panic) => return Err(model_lifecycle_panic_error::<M>(hook, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(run).await {
         Ok(result) => result,
         Err(panic) => Err(model_lifecycle_panic_error::<M>(hook, panic)),
     }
@@ -5094,6 +5068,7 @@ mod tests {
         has_many, DbRecord, DbValue, Loaded, QueryExecutionOptions, QueryExecutor, RelationDef,
     };
     use crate::foundation::{Error, Result};
+    use crate::support::sync::lock_unpoisoned;
     use crate::{Model, ModelId};
 
     #[test]
@@ -5162,7 +5137,9 @@ mod tests {
             _bindings: &[DbValue],
             _options: QueryExecutionOptions,
         ) -> Result<Vec<DbRecord>> {
-            Ok(self.batches.lock().unwrap().pop_front().unwrap_or_default())
+            Ok(lock_unpoisoned(&self.batches, "iteration executor batches")
+                .pop_front()
+                .unwrap_or_default())
         }
 
         async fn raw_execute_with(

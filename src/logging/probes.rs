@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::ProbeState;
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::ProbeId;
 
 pub const FRAMEWORK_BOOTSTRAP_PROBE: ProbeId = ProbeId::new("forge.bootstrap");
@@ -100,7 +101,7 @@ impl ReadinessRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: ReadinessRegistryHandle) -> ReadinessRegistry {
-        let mut builder = handle.lock().expect("readiness registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "readiness registry");
         ReadinessRegistry {
             checks: std::mem::take(&mut builder.checks),
         }

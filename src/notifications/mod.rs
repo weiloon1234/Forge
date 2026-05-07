@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::email::EmailMessage;
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::NotificationChannelId;
 
 pub use channel::{
@@ -127,9 +128,7 @@ impl NotificationChannelRegistryBuilder {
     pub(crate) fn freeze_shared(
         handle: NotificationChannelRegistryHandle,
     ) -> NotificationChannelRegistry {
-        let mut builder = handle
-            .lock()
-            .expect("notification channel registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "notification channel registry");
         NotificationChannelRegistry {
             channels: std::mem::take(&mut builder.channels),
         }
@@ -314,7 +313,7 @@ mod tests {
         let container = Container::new();
         let handle = NotificationChannelRegistryBuilder::shared();
         {
-            let mut builder = handle.lock().expect("notification registry lock");
+            let mut builder = lock_unpoisoned(&handle, "notification registry");
             for (id, channel) in channels {
                 builder.register(id, channel).unwrap();
             }

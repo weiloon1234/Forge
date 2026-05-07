@@ -3,12 +3,14 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use ::redis::AsyncCommands;
 use futures_util::StreamExt;
-use tokio::sync::{broadcast, mpsc, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
+use tokio::task::JoinHandle;
 
 use crate::config::ConfigRepository;
 use crate::foundation::{Error, Result};
 use crate::logging::RuntimeBackendKind;
 use crate::redis::namespaced_value;
+use crate::support::sync::lock_unpoisoned;
 use crate::support::QueueId;
 
 #[derive(Clone, Debug)]
@@ -19,11 +21,42 @@ pub(crate) struct PubSubMessage {
 
 pub(crate) struct BackendSubscription {
     receiver: mpsc::UnboundedReceiver<PubSubMessage>,
+    cancel: Option<oneshot::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl BackendSubscription {
+    fn new(receiver: mpsc::UnboundedReceiver<PubSubMessage>) -> Self {
+        Self {
+            receiver,
+            cancel: None,
+            handle: None,
+        }
+    }
+
+    fn with_task(
+        receiver: mpsc::UnboundedReceiver<PubSubMessage>,
+        cancel: oneshot::Sender<()>,
+        handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            receiver,
+            cancel: Some(cancel),
+            handle: Some(handle),
+        }
+    }
+
     pub async fn recv(&mut self) -> Option<PubSubMessage> {
         self.receiver.recv().await
+    }
+}
+
+impl Drop for BackendSubscription {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        let _ = self.handle.take();
     }
 }
 
@@ -608,7 +641,7 @@ impl RedisRuntime {
     async fn subscribe_ws(&self, topics: &[String]) -> Result<BackendSubscription> {
         let (tx, rx) = mpsc::unbounded_channel();
         if topics.is_empty() {
-            return Ok(BackendSubscription { receiver: rx });
+            return Ok(BackendSubscription::new(rx));
         }
 
         let mut pubsub = self.client.get_async_pubsub().await.map_err(Error::other)?;
@@ -620,19 +653,28 @@ impl RedisRuntime {
         }
 
         let mut stream = pubsub.into_on_message();
-        tokio::spawn(async move {
-            while let Some(message) = stream.next().await {
-                let payload = match message.get_payload::<String>() {
-                    Ok(payload) => payload,
-                    Err(_) => continue,
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            loop {
+                let message = tokio::select! {
+                    _ = &mut cancel_rx => break,
+                    message = stream.next() => message,
+                };
+                let Some(message) = message else {
+                    break;
+                };
+                let Ok(payload) = message.get_payload::<String>() else {
+                    continue;
                 };
                 let raw_topic = message.get_channel_name().to_string();
                 let topic = logical_topics.get(&raw_topic).cloned().unwrap_or(raw_topic);
-                let _ = tx.send(PubSubMessage { topic, payload });
+                if tx.send(PubSubMessage { topic, payload }).is_err() {
+                    break;
+                }
             }
         });
 
-        Ok(BackendSubscription { receiver: rx })
+        Ok(BackendSubscription::with_task(rx, cancel_tx, handle))
     }
 }
 
@@ -720,13 +762,23 @@ impl MemoryRuntime {
         let topics = topics.to_vec();
         let mut receiver = self.ws_tx.subscribe();
         let (tx, rx) = mpsc::unbounded_channel();
+        if topics.is_empty() {
+            return Ok(BackendSubscription::new(rx));
+        }
 
-        tokio::spawn(async move {
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
             loop {
-                match receiver.recv().await {
+                let message = tokio::select! {
+                    _ = &mut cancel_rx => break,
+                    message = receiver.recv() => message,
+                };
+                match message {
                     Ok(message) => {
-                        if topics.iter().any(|topic| topic == &message.topic) {
-                            let _ = tx.send(message);
+                        if topics.iter().any(|topic| topic == &message.topic)
+                            && tx.send(message).is_err()
+                        {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -735,7 +787,7 @@ impl MemoryRuntime {
             }
         });
 
-        Ok(BackendSubscription { receiver: rx })
+        Ok(BackendSubscription::with_task(rx, cancel_tx, handle))
     }
 }
 
@@ -743,7 +795,7 @@ fn shared_memory_runtime(namespace: &str) -> Arc<MemoryRuntime> {
     static REGISTRY: OnceLock<StdMutex<HashMap<String, Weak<MemoryRuntime>>>> = OnceLock::new();
 
     let registry = REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()));
-    let mut registry = registry.lock().expect("runtime registry lock poisoned");
+    let mut registry = lock_unpoisoned(registry, "runtime registry");
 
     if let Some(existing) = registry.get(namespace).and_then(Weak::upgrade) {
         return existing;
@@ -752,4 +804,66 @@ fn shared_memory_runtime(namespace: &str) -> Arc<MemoryRuntime> {
     let runtime = Arc::new(MemoryRuntime::new());
     registry.insert(namespace.to_string(), Arc::downgrade(&runtime));
     runtime
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::RuntimeBackend;
+
+    fn memory_backend() -> RuntimeBackend {
+        RuntimeBackend::memory(&format!("test-{}", Uuid::now_v7()))
+    }
+
+    #[tokio::test]
+    async fn memory_subscription_receives_matching_topics() {
+        let backend = memory_backend();
+        let mut subscription = backend.subscribe_ws(&["chat".to_string()]).await.unwrap();
+
+        backend.publish_ws("other", "ignored").await.unwrap();
+        backend.publish_ws("chat", "hello").await.unwrap();
+
+        let message = subscription.recv().await.unwrap();
+        assert_eq!(message.topic, "chat");
+        assert_eq!(message.payload, "hello");
+    }
+
+    #[tokio::test]
+    async fn dropping_memory_subscription_stops_forwarder() {
+        let backend = memory_backend();
+        let runtime = match &backend {
+            RuntimeBackend::Memory(runtime) => runtime.clone(),
+            RuntimeBackend::Redis(_) => unreachable!("test backend is memory"),
+        };
+
+        let subscription = backend.subscribe_ws(&["chat".to_string()]).await.unwrap();
+
+        for _ in 0..20 {
+            if runtime.ws_tx.receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.ws_tx.receiver_count(), 1);
+
+        drop(subscription);
+
+        for _ in 0..20 {
+            if runtime.ws_tx.receiver_count() == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(runtime.ws_tx.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_subscription_does_not_spawn_forwarder() {
+        let backend = memory_backend();
+        let subscription = backend.subscribe_ws(&[]).await.unwrap();
+
+        assert!(subscription.handle.is_none());
+    }
 }

@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::ConfigRepository;
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::sync::lock_unpoisoned;
 
 // Public re-exports — also available for internal use within this module
 pub use address::EmailAddress;
@@ -72,12 +73,8 @@ impl EmailDriverRegistryBuilder {
     pub(crate) fn freeze_shared(
         handle: EmailDriverRegistryHandle,
     ) -> HashMap<String, EmailDriverFactory> {
-        std::mem::take(
-            &mut handle
-                .lock()
-                .expect("email driver registry lock poisoned")
-                .drivers,
-        )
+        let mut builder = lock_unpoisoned(&handle, "email driver registry");
+        std::mem::take(&mut builder.drivers)
     }
 }
 

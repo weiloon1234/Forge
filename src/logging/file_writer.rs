@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use tracing_subscriber::fmt::MakeWriter;
 
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{Clock, Date};
 
 #[derive(Clone)]
@@ -99,7 +100,7 @@ impl<'a> MakeWriter<'a> for DateRotatingFileWriter {
     type Writer = FileWriterGuard<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        let mut state = self.state.lock().expect("log file lock poisoned");
+        let mut state = lock_unpoisoned(&self.state, "log file");
 
         let today = self.clock.today();
         if today != state.current_date {

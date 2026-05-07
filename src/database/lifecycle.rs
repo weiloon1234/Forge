@@ -13,6 +13,7 @@ use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::DatabaseConfig;
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{CommandId, MigrationId, SeederId};
 
 use super::runtime::{DatabaseSession, QueryExecutionOptions, QueryExecutor};
@@ -351,9 +352,7 @@ impl MigrationRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: MigrationRegistryHandle) -> Result<MigrationRegistry> {
-        let builder = handle
-            .lock()
-            .map_err(|_| Error::message("migration registry lock poisoned"))?;
+        let builder = lock_unpoisoned(&handle, "migration registry");
         Ok(MigrationRegistry {
             migrations: builder.migrations.values().cloned().collect(),
         })
@@ -387,9 +386,7 @@ impl SeederRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: SeederRegistryHandle) -> Result<SeederRegistry> {
-        let mut builder = handle
-            .lock()
-            .map_err(|_| Error::message("seeder registry lock poisoned"))?;
+        let mut builder = lock_unpoisoned(&handle, "seeder registry");
         Ok(SeederRegistry {
             seeders: std::mem::take(&mut builder.seeders),
         })

@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::sync::{read_unpoisoned, write_unpoisoned};
 use crate::support::ValidationRuleId;
 use crate::validation::types::ValidationError;
 
@@ -61,10 +62,7 @@ impl RuleRegistry {
         I: Into<ValidationRuleId>,
     {
         let id = id.into();
-        let mut rules = self
-            .rules
-            .write()
-            .map_err(|_| Error::message("rule registry lock poisoned"))?;
+        let mut rules = write_unpoisoned(&self.rules, "rule registry");
         if rules.contains_key(&id) {
             return Err(Error::message(format!(
                 "validation rule `{id}` already registered"
@@ -75,10 +73,7 @@ impl RuleRegistry {
     }
 
     pub fn get(&self, id: &ValidationRuleId) -> Result<Option<Arc<dyn ValidationRule>>> {
-        Ok(self
-            .rules
-            .read()
-            .map_err(|_| Error::message("rule registry lock poisoned"))?
+        Ok(read_unpoisoned(&self.rules, "rule registry")
             .get(id)
             .cloned())
     }

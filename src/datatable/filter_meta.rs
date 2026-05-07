@@ -448,13 +448,12 @@ impl DatatableFilterRow {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-
     use serde_json::json;
 
     use crate::app_enum::ForgeAppEnum;
     use crate::database::{DbType, ProjectionField};
     use crate::datatable::{DatatableFilterOp, DatatableFilterValueKind};
+    use crate::logging::catch_sync_panic;
 
     use super::DatatableFilterField;
 
@@ -684,31 +683,31 @@ mod tests {
 
     #[test]
     fn server_fields_rejects_empty_field_lists() {
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        let result = catch_sync_panic(|| {
             DatatableFilterField::text_search("search", "Search")
                 .server_fields::<SearchModel, _, crate::database::Column<SearchModel, String>>(
                     std::iter::empty(),
                 )
-        }));
+        });
 
         assert!(result.is_err(), "empty search fields should panic");
     }
 
     #[test]
     fn server_fields_rejects_field_names_containing_pipe() {
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        let result = catch_sync_panic(|| {
             DatatableFilterField::text_search("search", "Search")
                 .server_fields([SearchProjection::INVALID])
-        }));
+        });
 
         assert!(result.is_err(), "pipe-delimited field names should panic");
     }
 
     #[test]
     fn server_fields_rejects_non_search_filters() {
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        let result = catch_sync_panic(|| {
             DatatableFilterField::text("status", "Status").server_field(SearchModel::NAME)
-        }));
+        });
 
         assert!(result.is_err(), "non-LikeAny filters should panic");
     }

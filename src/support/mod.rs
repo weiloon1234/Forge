@@ -11,6 +11,7 @@ pub mod lock;
 pub(crate) mod runtime;
 mod sanitize;
 pub(crate) mod sha256;
+pub(crate) mod sync;
 mod token;
 
 pub use collection::Collection;

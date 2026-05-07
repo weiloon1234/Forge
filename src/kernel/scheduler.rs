@@ -19,6 +19,7 @@ use crate::scheduler::{
     ScheduledTask,
 };
 use crate::support::runtime::RuntimeBackend;
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{DateTime, ScheduleId};
 
 pub struct SchedulerKernel {
@@ -81,10 +82,7 @@ impl SchedulerKernel {
             diagnostics.record_scheduler_tick();
         }
         let previous = {
-            let mut last_tick = self
-                .last_tick
-                .lock()
-                .expect("scheduler tick mutex poisoned");
+            let mut last_tick = lock_unpoisoned(&self.last_tick, "scheduler tick");
             let previous = last_tick.unwrap_or_else(|| now.sub_seconds(1));
             *last_tick = Some(now);
             previous
@@ -203,19 +201,14 @@ impl SchedulerKernel {
     }
 
     fn track_active_task(&self, handle: JoinHandle<()>) {
-        self.active_tasks
-            .lock()
-            .expect("scheduler active task mutex poisoned")
+        lock_unpoisoned(&self.active_tasks, "scheduler active tasks")
             .push(ScheduleTaskHandle(handle));
     }
 
     async fn prune_finished_tasks(&self) {
         let mut finished = Vec::new();
         {
-            let mut active_tasks = self
-                .active_tasks
-                .lock()
-                .expect("scheduler active task mutex poisoned");
+            let mut active_tasks = lock_unpoisoned(&self.active_tasks, "scheduler active tasks");
             let mut index = 0;
             while index < active_tasks.len() {
                 if active_tasks[index].is_finished() {
@@ -233,10 +226,7 @@ impl SchedulerKernel {
 
     async fn drain_active_tasks(&self) {
         let active_tasks = {
-            let mut active_tasks = self
-                .active_tasks
-                .lock()
-                .expect("scheduler active task mutex poisoned");
+            let mut active_tasks = lock_unpoisoned(&self.active_tasks, "scheduler active tasks");
             std::mem::take(&mut *active_tasks)
         };
 
@@ -445,7 +435,7 @@ fn interval_due(
     every: Duration,
     now: DateTime,
 ) -> bool {
-    let mut state = state.lock().expect("scheduler interval mutex poisoned");
+    let mut state = lock_unpoisoned(state, "scheduler interval");
     match state.get(id).cloned() {
         Some(last_run) => {
             if (now.as_chrono() - last_run.as_chrono())

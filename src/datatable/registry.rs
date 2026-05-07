@@ -5,6 +5,7 @@ use async_trait::async_trait;
 
 use crate::auth::Actor;
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::sync::lock_unpoisoned;
 
 use super::datatable_trait::Datatable;
 use super::request::DatatableRequest;
@@ -146,7 +147,7 @@ impl DatatableRegistryBuilder {
     }
 
     pub(crate) fn freeze_shared(handle: DatatableRegistryHandle) -> DatatableRegistry {
-        let mut builder = handle.lock().expect("datatable registry lock poisoned");
+        let mut builder = lock_unpoisoned(&handle, "datatable registry");
         let datatables = std::mem::take(&mut builder.datatables);
         DatatableRegistry { datatables }
     }

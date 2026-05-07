@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::foundation::shutdown_drain::{
     drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
 };
+use crate::support::sync::lock_unpoisoned;
 
 #[derive(Default)]
 pub(crate) struct ManagedBackgroundTasks {
@@ -34,10 +35,7 @@ impl ManagedBackgroundTasks {
             abort,
         };
 
-        let mut tasks = self
-            .tasks
-            .lock()
-            .expect("managed background task registry lock poisoned");
+        let mut tasks = lock_unpoisoned(&self.tasks, "managed background task registry");
         if self.shutting_down.load(Ordering::SeqCst) {
             tracing::warn!(
                 task = %task.name,
@@ -53,10 +51,7 @@ impl ManagedBackgroundTasks {
     pub(crate) async fn shutdown(&self, timeout: Duration) {
         self.shutting_down.store(true, Ordering::SeqCst);
         let mut tasks = {
-            let mut tasks = self
-                .tasks
-                .lock()
-                .expect("managed background task registry lock poisoned");
+            let mut tasks = lock_unpoisoned(&self.tasks, "managed background task registry");
             std::mem::take(&mut *tasks)
         };
 

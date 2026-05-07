@@ -828,19 +828,19 @@ async fn rate_limit_middleware(
             [
                 (
                     HeaderName::from_static("x-ratelimit-limit"),
-                    HeaderValue::from_str(&info.limit.to_string()).unwrap(),
+                    rate_limit_header_value(info.limit),
                 ),
                 (
                     HeaderName::from_static("x-ratelimit-remaining"),
-                    HeaderValue::from_str("0").unwrap(),
+                    HeaderValue::from_static("0"),
                 ),
                 (
                     HeaderName::from_static("x-ratelimit-reset"),
-                    HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                    rate_limit_header_value(info.secs_until_reset),
                 ),
                 (
                     header::RETRY_AFTER,
-                    HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                    rate_limit_header_value(info.secs_until_reset),
                 ),
             ],
             axum::Json(body),
@@ -852,15 +852,15 @@ async fn rate_limit_middleware(
     let resp_headers = response.headers_mut();
     let _ = resp_headers.try_insert(
         HeaderName::from_static("x-ratelimit-limit"),
-        HeaderValue::from_str(&info.limit.to_string()).unwrap(),
+        rate_limit_header_value(info.limit),
     );
     let _ = resp_headers.try_insert(
         HeaderName::from_static("x-ratelimit-remaining"),
-        HeaderValue::from_str(&info.remaining.to_string()).unwrap(),
+        rate_limit_header_value(info.remaining),
     );
     let _ = resp_headers.try_insert(
         HeaderName::from_static("x-ratelimit-reset"),
-        HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+        rate_limit_header_value(info.secs_until_reset),
     );
     response
 }
@@ -870,6 +870,10 @@ struct RateLimitInfo {
     remaining: u32,
     limit: u32,
     secs_until_reset: u64,
+}
+
+fn rate_limit_header_value(value: impl ToString) -> HeaderValue {
+    HeaderValue::from_str(&value.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0"))
 }
 
 /// Increment the rate-limit counter for the given key and return current info.
@@ -944,19 +948,19 @@ pub(crate) async fn enforce_rate_limit(
                 [
                     (
                         HeaderName::from_static("x-ratelimit-limit"),
-                        HeaderValue::from_str(&info.limit.to_string()).unwrap(),
+                        rate_limit_header_value(info.limit),
                     ),
                     (
                         HeaderName::from_static("x-ratelimit-remaining"),
-                        HeaderValue::from_str("0").unwrap(),
+                        HeaderValue::from_static("0"),
                     ),
                     (
                         HeaderName::from_static("x-ratelimit-reset"),
-                        HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                        rate_limit_header_value(info.secs_until_reset),
                     ),
                     (
                         header::RETRY_AFTER,
-                        HeaderValue::from_str(&info.secs_until_reset.to_string()).unwrap(),
+                        rate_limit_header_value(info.secs_until_reset),
                     ),
                 ],
                 axum::Json(body),
@@ -1407,11 +1411,14 @@ async fn etag_middleware(request: Request, next: Next) -> Response {
     if let Some(ref client_etag) = if_none_match {
         let trimmed = client_etag.trim();
         if trimmed == etag || trimmed.trim_matches('"') == &hash[..32] {
-            return Response::builder()
+            return match Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, &etag)
                 .body(axum::body::Body::empty())
-                .unwrap();
+            {
+                Ok(response) => response,
+                Err(_) => StatusCode::NOT_MODIFIED.into_response(),
+            };
         }
     }
 

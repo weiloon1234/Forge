@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -14,12 +17,15 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, PgPoolOptions, PgRow};
 use sqlx::types::BigDecimal;
 use sqlx::{Column as _, PgPool, Postgres, Row, Transaction, TypeInfo as _};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
 use crate::foundation::{Error, Result};
+use crate::logging::{catch_future_panic, panic_payload_message};
+use crate::support::sync::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use crate::support::{Date, DateTime, LocalDateTime, Time};
 
 use super::ast::{DbType, DbValue, Numeric};
@@ -71,24 +77,23 @@ fn slow_query_log() -> &'static std::sync::Mutex<VecDeque<SlowQueryEntry>> {
 }
 
 fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>) {
-    if let Ok(mut log) = slow_query_log().lock() {
-        if log.len() >= 100 {
-            log.pop_front();
-        }
-        log.push_back(SlowQueryEntry {
-            sql: sql.to_string(),
-            duration_ms,
-            label: label.map(|s| s.to_string()),
-            recorded_at: ChronoUtc::now().to_rfc3339(),
-        });
+    let mut log = lock_unpoisoned(slow_query_log(), "slow query log");
+    if log.len() >= 100 {
+        log.pop_front();
     }
+    log.push_back(SlowQueryEntry {
+        sql: sql.to_string(),
+        duration_ms,
+        label: label.map(|s| s.to_string()),
+        recorded_at: ChronoUtc::now().to_rfc3339(),
+    });
 }
 
 pub fn recent_slow_queries() -> Vec<SlowQueryEntry> {
-    slow_query_log()
-        .lock()
-        .map(|log| log.iter().cloned().collect())
-        .unwrap_or_default()
+    lock_unpoisoned(slow_query_log(), "slow query log")
+        .iter()
+        .cloned()
+        .collect()
 }
 
 pub type DbRecordStream<'a> = BoxStream<'a, Result<DbRecord>>;
@@ -348,21 +353,14 @@ impl DatabaseManager {
         postgres_type_name: impl Into<String>,
         db_type: DbType,
     ) -> Result<()> {
-        let mut adapters = self
-            .runtime()?
-            .adapters
-            .write()
-            .map_err(|_| Error::message("database type adapter registry lock poisoned"))?;
+        let mut adapters =
+            write_unpoisoned(&self.runtime()?.adapters, "database type adapter registry");
         adapters.insert(normalize_type_name(&postgres_type_name.into()), db_type);
         Ok(())
     }
 
     pub fn registered_type_adapter(&self, postgres_type_name: &str) -> Result<Option<DbType>> {
-        let adapters = self
-            .runtime()?
-            .adapters
-            .read()
-            .map_err(|_| Error::message("database type adapter registry lock poisoned"))?;
+        let adapters = read_unpoisoned(&self.runtime()?.adapters, "database type adapter registry");
         Ok(adapters
             .get(&normalize_type_name(postgres_type_name))
             .copied())
@@ -770,8 +768,10 @@ fn spawn_native_stream(
     sql_log: SqlLogConfig,
 ) -> DbRecordStream<'static> {
     let (sender, receiver) = mpsc::channel(16);
+    let (cancel_tx, cancel_rx) = oneshot::channel();
 
-    tokio::spawn(async move {
+    let error_sender = sender.clone();
+    let handle = spawn_stream_task(error_sender, async move {
         if sql_log.log_queries {
             tracing::debug!(
                 target: "forge.sql",
@@ -781,34 +781,30 @@ fn spawn_native_stream(
             );
         }
 
-        let result = async {
-            let mut connection = pool.acquire().await.map_err(Error::other)?;
-            let adapter_snapshot = snapshot_adapters(&adapters)?;
-            configure_statement_timeout(connection.as_mut(), &options, TimeoutMode::Session)
-                .await?;
+        let mut cancel_rx = cancel_rx;
+        let mut connection = tokio::select! {
+            _ = &mut cancel_rx => return Ok(()),
+            acquired = pool.acquire() => acquired.map_err(Error::other)?,
+        };
+        let adapter_snapshot = snapshot_adapters(&adapters)?;
+        configure_statement_timeout(connection.as_mut(), &options, TimeoutMode::Session).await?;
 
-            let stream_result = stream_rows_from_connection(
-                connection.as_mut(),
-                &adapter_snapshot,
-                &compiled,
-                &options,
-                &sender,
-            )
-            .await;
-
-            let reset_result =
-                reset_statement_timeout(connection.as_mut(), TimeoutMode::Session).await;
-            stream_result?;
-            reset_result
-        }
+        let stream_result = stream_rows_from_connection(
+            connection.as_mut(),
+            &adapter_snapshot,
+            &compiled,
+            &options,
+            &sender,
+            &mut cancel_rx,
+        )
         .await;
 
-        if let Err(error) = result {
-            let _ = sender.send(Err(error)).await;
-        }
+        let reset_result = reset_statement_timeout(connection.as_mut(), TimeoutMode::Session).await;
+        stream_result?;
+        reset_result
     });
 
-    receiver_stream(receiver)
+    receiver_stream(receiver, cancel_tx, handle)
 }
 
 fn spawn_session_stream(
@@ -820,8 +816,10 @@ fn spawn_session_stream(
     sql_log: SqlLogConfig,
 ) -> DbRecordStream<'static> {
     let (sender, receiver) = mpsc::channel(16);
+    let (cancel_tx, cancel_rx) = oneshot::channel();
 
-    tokio::spawn(async move {
+    let error_sender = sender.clone();
+    let handle = spawn_stream_task(error_sender, async move {
         if sql_log.log_queries {
             tracing::debug!(
                 target: "forge.sql",
@@ -831,49 +829,47 @@ fn spawn_session_stream(
             );
         }
 
-        let result = async {
-            let mut connection = {
-                let mut guard = holder.lock().await;
-                guard.take()
-            };
-            let mut connection = match connection.take() {
-                Some(connection) => connection,
-                None => pool.acquire().await.map_err(Error::other)?,
-            };
-
-            let adapter_snapshot = snapshot_adapters(&adapters)?;
-            configure_statement_timeout(connection.as_mut(), &options, TimeoutMode::Session)
-                .await?;
-
-            let stream_result = stream_rows_from_connection(
-                connection.as_mut(),
-                &adapter_snapshot,
-                &compiled,
-                &options,
-                &sender,
-            )
-            .await;
-
-            let reset_result =
-                reset_statement_timeout(connection.as_mut(), TimeoutMode::Session).await;
-            {
-                let mut guard = holder.lock().await;
-                if guard.is_none() {
-                    *guard = Some(connection);
+        let mut cancel_rx = cancel_rx;
+        let mut connection = {
+            let mut guard = holder.lock().await;
+            guard.take()
+        };
+        let mut connection = match connection.take() {
+            Some(connection) => connection,
+            None => {
+                tokio::select! {
+                    _ = &mut cancel_rx => return Ok(()),
+                    acquired = pool.acquire() => acquired.map_err(Error::other)?,
                 }
             }
+        };
 
-            stream_result?;
-            reset_result
-        }
+        let adapter_snapshot = snapshot_adapters(&adapters)?;
+        configure_statement_timeout(connection.as_mut(), &options, TimeoutMode::Session).await?;
+
+        let stream_result = stream_rows_from_connection(
+            connection.as_mut(),
+            &adapter_snapshot,
+            &compiled,
+            &options,
+            &sender,
+            &mut cancel_rx,
+        )
         .await;
 
-        if let Err(error) = result {
-            let _ = sender.send(Err(error)).await;
+        let reset_result = reset_statement_timeout(connection.as_mut(), TimeoutMode::Session).await;
+        {
+            let mut guard = holder.lock().await;
+            if guard.is_none() {
+                *guard = Some(connection);
+            }
         }
+
+        stream_result?;
+        reset_result
     });
 
-    receiver_stream(receiver)
+    receiver_stream(receiver, cancel_tx, handle)
 }
 
 async fn query_records_on_connection(
@@ -988,17 +984,24 @@ async fn stream_rows_from_connection(
     compiled: &CompiledSql,
     options: &QueryExecutionOptions,
     sender: &mpsc::Sender<Result<DbRecord>>,
+    cancel_rx: &mut oneshot::Receiver<()>,
 ) -> Result<()> {
     let query = bind_query(&compiled.sql, &compiled.bindings)?;
     let mut rows = query.fetch(connection);
 
     loop {
         let next_row = if let Some(timeout_duration) = options.timeout {
-            timeout(safety_timeout(timeout_duration), rows.next())
-                .await
-                .map_err(|_| outer_timeout_error(options, "stream", &compiled.sql))?
+            tokio::select! {
+                _ = &mut *cancel_rx => return Ok(()),
+                row = timeout(safety_timeout(timeout_duration), rows.next()) => {
+                    row.map_err(|_| outer_timeout_error(options, "stream", &compiled.sql))?
+                }
+            }
         } else {
-            rows.next().await
+            tokio::select! {
+                _ = &mut *cancel_rx => return Ok(()),
+                row = rows.next() => row,
+            }
         };
 
         match next_row {
@@ -1052,10 +1055,7 @@ async fn reset_statement_timeout(connection: &mut PgConnection, mode: TimeoutMod
 fn snapshot_adapters(
     adapters: &Arc<RwLock<BTreeMap<String, DbType>>>,
 ) -> Result<BTreeMap<String, DbType>> {
-    adapters
-        .read()
-        .map(|snapshot| snapshot.clone())
-        .map_err(|_| Error::message("database type adapter registry lock poisoned"))
+    Ok(read_unpoisoned(adapters, "database type adapter registry").clone())
 }
 
 async fn apply_outer_timeout<F, T>(
@@ -1079,14 +1079,82 @@ where
     }
 }
 
-fn receiver_stream(receiver: mpsc::Receiver<Result<DbRecord>>) -> DbRecordStream<'static> {
-    Box::pin(stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|item| (item, receiver))
-    }))
+fn spawn_stream_task<Fut>(
+    error_sender: mpsc::Sender<Result<DbRecord>>,
+    future: Fut,
+) -> JoinHandle<()>
+where
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match catch_future_panic(future).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = error_sender.send(Err(error)).await;
+            }
+            Err(panic) => {
+                let _ = error_sender
+                    .send(Err(database_stream_panic_error(panic)))
+                    .await;
+            }
+        }
+    })
+}
+
+fn receiver_stream(
+    receiver: mpsc::Receiver<Result<DbRecord>>,
+    cancel: oneshot::Sender<()>,
+    handle: JoinHandle<()>,
+) -> DbRecordStream<'static> {
+    Box::pin(SpawnedDbRecordStream::new(receiver, cancel, handle))
+}
+
+struct SpawnedDbRecordStream {
+    receiver: mpsc::Receiver<Result<DbRecord>>,
+    cancel: Option<oneshot::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl SpawnedDbRecordStream {
+    fn new(
+        receiver: mpsc::Receiver<Result<DbRecord>>,
+        cancel: oneshot::Sender<()>,
+        handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            receiver,
+            cancel: Some(cancel),
+            handle: Some(handle),
+        }
+    }
+}
+
+impl futures_util::Stream for SpawnedDbRecordStream {
+    type Item = Result<DbRecord>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_recv(cx)
+    }
+}
+
+impl Drop for SpawnedDbRecordStream {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        let _ = self.handle.take();
+    }
 }
 
 fn single_error_stream<'a>(error: Error) -> DbRecordStream<'a> {
     Box::pin(stream::once(async move { Err(error) }))
+}
+
+fn database_stream_panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
+    Error::message(format!(
+        "database stream panicked: {}",
+        panic_payload_message(panic)
+    ))
 }
 
 fn outer_timeout_error(options: &QueryExecutionOptions, action: &str, sql: &str) -> Error {
@@ -1630,7 +1698,20 @@ fn format_query_context(sql: &str, label: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_type_name;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use futures_util::StreamExt;
+    use tokio::sync::{mpsc, oneshot};
+
+    use crate::logging::catch_sync_panic;
+    use crate::support::sync::lock_unpoisoned;
+
+    use super::{
+        normalize_type_name, receiver_stream, recent_slow_queries, record_slow_query,
+        slow_query_log, spawn_stream_task, DbRecord, Result, SlowQueryEntry,
+    };
 
     #[test]
     fn normalize_type_name_maps_array_aliases_to_internal_lookup_keys() {
@@ -1641,5 +1722,89 @@ mod tests {
         assert_eq!(normalize_type_name("char[]"), "_char");
         assert_eq!(normalize_type_name("CHAR[]"), "_char");
         assert_eq!(normalize_type_name("\"CHAR\"[]"), "_char");
+    }
+
+    #[test]
+    fn slow_query_log_recovers_after_poison() {
+        lock_unpoisoned(slow_query_log(), "slow query log test setup").clear();
+
+        let result = catch_sync_panic(|| {
+            let mut log = match slow_query_log().lock() {
+                Ok(log) => log,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            log.push_back(SlowQueryEntry {
+                sql: "SELECT before panic".to_string(),
+                duration_ms: 1,
+                label: None,
+                recorded_at: "before".to_string(),
+            });
+            panic!("poison slow query log");
+        });
+        assert!(result.is_err());
+
+        record_slow_query("SELECT after panic", 42, Some("poison-recovery"));
+
+        let queries = recent_slow_queries();
+        assert!(queries.iter().any(|query| query.sql == "SELECT after panic"
+            && query.duration_ms == 42
+            && query.label.as_deref() == Some("poison-recovery")));
+
+        *lock_unpoisoned(slow_query_log(), "slow query log test cleanup") = VecDeque::new();
+    }
+
+    #[tokio::test]
+    async fn spawned_stream_cancels_worker_when_dropped() {
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (_sender, receiver) = mpsc::channel::<Result<DbRecord>>(1);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let aborted = Arc::new(AtomicBool::new(false));
+        let aborted_flag = aborted.clone();
+        let handle = tokio::spawn(async move {
+            let _drop_flag = DropFlag(aborted_flag);
+            let _ = started_tx.send(());
+            let _ = cancel_rx.await;
+        });
+        started_rx.await.unwrap();
+
+        let stream = receiver_stream(receiver, cancel_tx, handle);
+        drop(stream);
+
+        for _ in 0..20 {
+            if aborted.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(aborted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn stream_worker_panic_becomes_stream_error() {
+        let (sender, receiver) = mpsc::channel::<Result<DbRecord>>(1);
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let handle = spawn_stream_task(sender, async {
+            panic!("stream boom");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+
+        let mut stream = receiver_stream(receiver, cancel_tx, handle);
+        let error = stream
+            .next()
+            .await
+            .expect("stream should yield panic error")
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "database stream panicked: stream boom");
     }
 }

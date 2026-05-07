@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -13,16 +13,18 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::task::JoinHandle;
 
 use crate::auth::{Actor, AuthError, AuthErrorCode};
 use crate::config::WebSocketConfig;
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{
-    catch_async_panic, panic_payload_message, AuthOutcome, RuntimeDiagnostics,
+    catch_async_panic, catch_future_panic, panic_payload_message, AuthOutcome, RuntimeDiagnostics,
     WebSocketConnectionState,
 };
 use crate::support::runtime::RuntimeBackend;
+use crate::support::sync::lock_unpoisoned;
 use crate::support::{ChannelEventId, ChannelId, GuardId};
 use crate::websocket::{
     presence_key, presence_member_value, ClientAction, ClientMessage, RegisteredChannel,
@@ -48,12 +50,13 @@ impl WebSocketKernel {
         let addr = format!("{}:{}", websocket.host, websocket.port);
         let listener = TcpListener::bind(addr).await.map_err(Error::other)?;
         let local_addr = listener.local_addr().map_err(Error::other)?;
-        let router = self.build_router().await?;
+        let (router, pubsub_task) = self.build_router().await?;
 
         Ok(BoundWebSocketServer {
             listener,
             router,
             local_addr,
+            pubsub_task,
         })
     }
 
@@ -61,7 +64,7 @@ impl WebSocketKernel {
         self.bind().await?.serve().await
     }
 
-    async fn build_router(&self) -> Result<axum::Router> {
+    async fn build_router(&self) -> Result<(axum::Router, Option<WebSocketPubSubTask>)> {
         let ws_config = self.app.config().websocket()?;
         let registry = self
             .app
@@ -71,11 +74,12 @@ impl WebSocketKernel {
         let backend = RuntimeBackend::from_config(self.app.config())?;
         let state =
             WebSocketServerState::new(self.app.clone(), registered_channels, backend, ws_config);
-        state.start_pubsub().await?;
+        let pubsub_task = state.start_pubsub().await?;
 
-        Ok(axum::Router::new()
+        let router = axum::Router::new()
             .route(&state.ws_config.path, get(websocket_handler))
-            .with_state(state))
+            .with_state(state);
+        Ok((router, pubsub_task))
     }
 }
 
@@ -83,6 +87,7 @@ pub struct BoundWebSocketServer {
     listener: TcpListener,
     router: axum::Router,
     local_addr: SocketAddr,
+    pubsub_task: Option<WebSocketPubSubTask>,
 }
 
 impl BoundWebSocketServer {
@@ -98,10 +103,42 @@ impl BoundWebSocketServer {
     where
         S: Future<Output = ()> + Send + 'static,
     {
-        axum::serve(self.listener, self.router)
+        let Self {
+            listener,
+            router,
+            pubsub_task,
+            ..
+        } = self;
+        let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await
-            .map_err(Error::other)
+            .map_err(Error::other);
+        drop(pubsub_task);
+        result
+    }
+}
+
+struct WebSocketPubSubTask {
+    shutdown: StdMutex<Option<oneshot::Sender<()>>>,
+    handle: StdMutex<Option<JoinHandle<()>>>,
+}
+
+impl WebSocketPubSubTask {
+    fn new(shutdown: oneshot::Sender<()>, handle: JoinHandle<()>) -> Self {
+        Self {
+            shutdown: StdMutex::new(Some(shutdown)),
+            handle: StdMutex::new(Some(handle)),
+        }
+    }
+}
+
+impl Drop for WebSocketPubSubTask {
+    fn drop(&mut self) {
+        if let Some(shutdown) = lock_unpoisoned(&self.shutdown, "websocket pubsub shutdown").take()
+        {
+            let _ = shutdown.send(());
+        }
+        let _ = lock_unpoisoned(&self.handle, "websocket pubsub task").take();
     }
 }
 
@@ -144,12 +181,12 @@ impl WebSocketServerState {
         }
     }
 
-    async fn start_pubsub(&self) -> Result<()> {
+    async fn start_pubsub(&self) -> Result<Option<WebSocketPubSubTask>> {
         if self.channels.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
-        let backend = RuntimeBackend::from_config(self.app.config())?;
+        let backend = self.backend.clone();
         let mut topics = self
             .channels
             .keys()
@@ -160,45 +197,68 @@ impl WebSocketServerState {
         topics.push("__system:disconnect".to_string());
 
         let server_state = self.clone();
-        tokio::spawn(async move {
-            let mut subscription = match backend.subscribe_ws(&topics).await {
-                Ok(subscription) => subscription,
-                Err(error) => {
-                    tracing::error!("forge websocket pubsub startup failed: {error}");
-                    return;
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let task = async move {
+                let mut subscription = tokio::select! {
+                    _ = &mut shutdown_rx => return,
+                    subscription = backend.subscribe_ws(&topics) => match subscription {
+                        Ok(subscription) => subscription,
+                        Err(error) => {
+                            tracing::error!("forge websocket pubsub startup failed: {error}");
+                            return;
+                        }
+                    }
+                };
+
+                loop {
+                    let message = tokio::select! {
+                        _ = &mut shutdown_rx => break,
+                        message = subscription.recv() => message,
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+
+                    // Handle force-disconnect commands on the system topic.
+                    if message.topic == "__system:disconnect" {
+                        #[derive(serde::Deserialize)]
+                        struct DisconnectCommand {
+                            actor_id: String,
+                        }
+                        if let Ok(cmd) = serde_json::from_str::<DisconnectCommand>(&message.payload)
+                        {
+                            let closed = server_state.hub.disconnect_by_actor(&cmd.actor_id).await;
+                            server_state.cleanup_closed_connections(closed).await;
+                        } else {
+                            tracing::error!(
+                                "forge websocket pubsub: invalid disconnect command payload"
+                            );
+                        }
+                        continue;
+                    }
+
+                    let envelope = match serde_json::from_str::<ServerMessage>(&message.payload) {
+                        Ok(envelope) => envelope,
+                        Err(error) => {
+                            tracing::error!("forge websocket pubsub decode failed: {error}");
+                            continue;
+                        }
+                    };
+                    server_state.broadcast(&envelope).await;
                 }
             };
 
-            while let Some(message) = subscription.recv().await {
-                // Handle force-disconnect commands on the system topic.
-                if message.topic == "__system:disconnect" {
-                    #[derive(serde::Deserialize)]
-                    struct DisconnectCommand {
-                        actor_id: String,
-                    }
-                    if let Ok(cmd) = serde_json::from_str::<DisconnectCommand>(&message.payload) {
-                        let closed = server_state.hub.disconnect_by_actor(&cmd.actor_id).await;
-                        server_state.cleanup_closed_connections(closed).await;
-                    } else {
-                        tracing::error!(
-                            "forge websocket pubsub: invalid disconnect command payload"
-                        );
-                    }
-                    continue;
-                }
-
-                let envelope = match serde_json::from_str::<ServerMessage>(&message.payload) {
-                    Ok(envelope) => envelope,
-                    Err(error) => {
-                        tracing::error!("forge websocket pubsub decode failed: {error}");
-                        continue;
-                    }
-                };
-                server_state.broadcast(&envelope).await;
+            if let Err(panic) = catch_future_panic(task).await {
+                tracing::error!(
+                    target: "forge.websocket",
+                    panic = %panic_payload_message(panic),
+                    "websocket pubsub task panicked"
+                );
             }
         });
 
-        Ok(())
+        Ok(Some(WebSocketPubSubTask::new(shutdown_tx, handle)))
     }
 
     async fn capture_identity(&self, headers: &HeaderMap) -> ConnectionIdentity {
@@ -603,8 +663,33 @@ async fn handle_socket(
     }
 
     state.close_connection(connection_id).await;
-    writer.abort();
-    heartbeat.abort();
+    abort_websocket_connection_task("writer", writer).await;
+    abort_websocket_connection_task("heartbeat", heartbeat).await;
+}
+
+async fn abort_websocket_connection_task(name: &'static str, handle: JoinHandle<()>) {
+    handle.abort();
+    match handle.await {
+        Ok(()) => {}
+        Err(error) if error.is_cancelled() => {}
+        Err(error) if error.is_panic() => {
+            let message = panic_payload_message(error.into_panic());
+            tracing::error!(
+                target: "forge.websocket",
+                task = name,
+                panic = %message,
+                "websocket connection task panicked"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "forge.websocket",
+                task = name,
+                error = %error,
+                "websocket connection task ended unexpectedly"
+            );
+        }
+    }
 }
 
 async fn process_client_message(
@@ -1507,6 +1592,7 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
@@ -1593,6 +1679,79 @@ mod tests {
             RuntimeBackend::memory(namespace),
             WebSocketConfig::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn pubsub_task_drop_cancels_backend_subscription() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(
+                ChannelId::new("chat"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+            )
+            .unwrap();
+        let state = websocket_state(registrar.into_channels(), "ws-pubsub-task-drop");
+        let runtime = match &state.backend {
+            RuntimeBackend::Memory(runtime) => runtime.clone(),
+            RuntimeBackend::Redis(_) => unreachable!("test backend is memory"),
+        };
+
+        let pubsub_task = state.start_pubsub().await.unwrap().unwrap();
+
+        for _ in 0..20 {
+            if runtime.ws_tx.receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.ws_tx.receiver_count(), 1);
+
+        drop(pubsub_task);
+
+        for _ in 0..20 {
+            if runtime.ws_tx.receiver_count() == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(runtime.ws_tx.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn websocket_connection_task_abort_waits_for_task_drop() {
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_flag = dropped.clone();
+        let (started_tx, started_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _drop_flag = DropFlag(dropped_flag);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+
+        abort_websocket_connection_task("test", handle).await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn websocket_connection_task_panic_isolated_when_waiting() {
+        let handle = tokio::spawn(async {
+            panic!("websocket connection child boom");
+        });
+
+        tokio::task::yield_now().await;
+
+        abort_websocket_connection_task("test", handle).await;
     }
 
     async fn next_json(outbound: &mut mpsc::Receiver<WriterCommand>) -> ServerMessage {
@@ -1857,6 +2016,7 @@ mod tests {
             listener,
             router: axum::Router::new(),
             local_addr,
+            pubsub_task: None,
         };
 
         server.serve_until(async {}).await.unwrap();

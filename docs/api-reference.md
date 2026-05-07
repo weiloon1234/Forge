@@ -2150,9 +2150,10 @@ fn set_scheduler_leader_active(&self, active: bool)
 fn record_job_outcome(&self, outcome: JobOutcome)
 ```
 
-`/_forge/runtime` returns the structured `RuntimeSnapshot`. `/_forge/metrics` exposes the same
-runtime counter families in Prometheus text format, and new series are additive so existing metric
-names remain stable.
+`/_forge/runtime` returns the structured `RuntimeSnapshot`. `/_forge/http/stats` additively returns
+bounded HTTP route rankings, recent slow requests, and recent error samples for admin dashboards.
+`/_forge/metrics` exposes runtime counter families in Prometheus text format, and new series are
+additive so existing metric names remain stable.
 
 `/_forge/sql` preserves the existing `slow_queries` array and additively returns slow-query stats,
 top-slowest ranking, and potential HTTP N+1 suspects grouped by repeated SQL fingerprint.

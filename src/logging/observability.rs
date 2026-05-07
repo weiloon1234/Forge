@@ -228,6 +228,11 @@ pub(crate) fn register_observability_routes(
         route_options.clone(),
     );
     registrar.route_with_options(
+        &join_route(&config.base_path, "http/stats"),
+        get(http_stats),
+        route_options.clone(),
+    );
+    registrar.route_with_options(
         &join_route(&config.base_path, "metrics"),
         get(observability_metrics),
         route_options.clone(),
@@ -297,6 +302,17 @@ async fn observability_readiness(State(app): State<AppContext>) -> Response {
 async fn observability_runtime(State(app): State<AppContext>) -> Response {
     match app.diagnostics() {
         Ok(diagnostics) => (StatusCode::OK, Json(diagnostics.snapshot())).into_response(),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+async fn http_stats(State(app): State<AppContext>) -> Response {
+    match app.diagnostics() {
+        Ok(diagnostics) => (
+            StatusCode::OK,
+            Json(diagnostics.http_observability_snapshot()),
+        )
+            .into_response(),
         Err(error) => internal_error_response(error),
     }
 }

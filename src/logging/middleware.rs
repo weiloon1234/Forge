@@ -1,4 +1,4 @@
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::HeaderName;
 use axum::http::HeaderValue;
 use axum::middleware::Next;
@@ -9,7 +9,7 @@ use super::context::CurrentRequest;
 use super::request_id::{generate_request_id, RequestId, REQUEST_ID_HEADER};
 use super::{
     catch_future_panic, panic_payload_message, scope_current_request, scope_current_trace,
-    TraceContext,
+    HttpRequestRecord, TraceContext,
 };
 use crate::foundation::AppContext;
 
@@ -32,6 +32,11 @@ pub(crate) async fn request_context_middleware(
 
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let route_path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_string())
+        .unwrap_or_else(|| path.clone());
     let user_agent = request
         .headers()
         .get(axum::http::header::USER_AGENT)
@@ -119,7 +124,14 @@ pub(crate) async fn request_context_middleware(
     .await;
     let status = response.status();
     if let Ok(diagnostics) = app.diagnostics() {
-        diagnostics.record_http_response_with_duration(status, duration_ms);
+        diagnostics.record_http_request(HttpRequestRecord {
+            method: method.to_string(),
+            path: route_path,
+            status,
+            duration_ms,
+            request_id: current_request.request_id.clone(),
+            trace_id: Some(request_id.clone()),
+        });
     }
 
     tracing::info!(
@@ -300,6 +312,19 @@ mod tests {
         assert_eq!(snapshot.server_error_total, 1);
         assert_eq!(snapshot.success_total, 0);
         assert_eq!(snapshot.duration_ms.count, 1);
+
+        let http = diagnostics.http_observability_snapshot();
+        assert_eq!(http.stats.error_request_count, 1);
+        assert_eq!(http.top_error_routes[0].path, "/panic");
+        assert_eq!(http.top_error_routes[0].server_error_total, 1);
+        assert_eq!(
+            http.recent_error_requests[0].request_id.as_deref(),
+            Some("req-http-panic")
+        );
+        assert_eq!(
+            http.recent_error_requests[0].trace_id.as_deref(),
+            Some("req-http-panic")
+        );
     }
 
     #[tokio::test]
@@ -337,5 +362,33 @@ mod tests {
         assert_eq!(snapshot.requests_total, 1);
         assert_eq!(snapshot.success_total, 1);
         assert_eq!(snapshot.server_error_total, 0);
+    }
+
+    #[tokio::test]
+    async fn http_observability_groups_by_matched_route_path_when_available() {
+        let reporter = Arc::new(StubReporter::default());
+        let (app, diagnostics) = test_app_with_reporter(reporter);
+        let router = axum::Router::new()
+            .route("/users/{id}", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                app,
+                request_context_middleware,
+            ));
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/users/42")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let http = diagnostics.http_observability_snapshot();
+        assert_eq!(http.top_slowest_routes[0].path, "/users/{id}");
+        assert_eq!(http.top_slowest_routes[0].requests_total, 1);
     }
 }

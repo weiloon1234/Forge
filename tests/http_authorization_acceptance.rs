@@ -279,10 +279,11 @@ async fn http_route_authorizer_panic_returns_internal_error() {
 
 #[tokio::test]
 async fn observability_authorizer_applies_to_all_routes_and_can_hide_with_not_found() {
-    const OBSERVABILITY_ROUTES: [&str; 12] = [
+    const OBSERVABILITY_ROUTES: [&str; 13] = [
         "/_forge/health",
         "/_forge/ready",
         "/_forge/runtime",
+        "/_forge/http/stats",
         "/_forge/metrics",
         "/_forge/jobs/stats",
         "/_forge/jobs/failed",

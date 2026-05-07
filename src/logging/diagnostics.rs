@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
+use chrono::Utc as ChronoUtc;
 use serde::{Deserialize, Serialize};
 
 use super::probes::{LivenessReport, ProbeResult, ReadinessRegistry, ReadinessReport};
@@ -11,12 +12,16 @@ use super::types::{
 };
 use super::{catch_async_panic, panic_payload_message};
 use crate::foundation::{AppContext, Result};
-use crate::support::sync::{read_unpoisoned, write_unpoisoned};
+use crate::support::sync::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use crate::support::ChannelId;
 
 const HTTP_REQUEST_DURATION_BUCKETS_MS: [u64; 12] = [
     5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000,
 ];
+const HTTP_REQUEST_OBSERVATION_CAPACITY: usize = 500;
+const HTTP_ROUTE_RANKING_LIMIT: usize = 20;
+const HTTP_RECENT_REQUEST_LIMIT: usize = 50;
+const HTTP_SLOW_REQUEST_THRESHOLD_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
@@ -51,6 +56,64 @@ pub struct HttpDurationHistogramSnapshot {
 pub struct HttpDurationBucketSnapshot {
     pub le_ms: u64,
     pub cumulative_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct HttpObservabilitySnapshot {
+    pub stats: HttpObservabilityStats,
+    pub top_slowest_routes: Vec<HttpRouteRankingSnapshot>,
+    pub top_error_routes: Vec<HttpRouteRankingSnapshot>,
+    pub recent_slow_requests: Vec<HttpRequestSampleSnapshot>,
+    pub recent_error_requests: Vec<HttpRequestSampleSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct HttpObservabilityStats {
+    pub requests_total: u64,
+    pub retained_request_count: usize,
+    pub retention_capacity: usize,
+    pub slow_request_threshold_ms: u64,
+    pub route_count: usize,
+    pub slow_request_count: usize,
+    pub error_request_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct HttpRouteRankingSnapshot {
+    pub method: String,
+    pub path: String,
+    pub requests_total: u64,
+    pub informational_total: u64,
+    pub success_total: u64,
+    pub redirection_total: u64,
+    pub client_error_total: u64,
+    pub server_error_total: u64,
+    pub avg_duration_ms: u64,
+    pub max_duration_ms: u64,
+    pub p95_duration_ms: u64,
+    pub p99_duration_ms: u64,
+    pub latest_recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct HttpRequestSampleSnapshot {
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub request_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HttpRequestRecord {
+    pub method: String,
+    pub path: String,
+    pub status: axum::http::StatusCode,
+    pub duration_ms: u64,
+    pub request_id: Option<String>,
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +227,7 @@ struct HttpCounters {
     client_error_total: AtomicU64,
     server_error_total: AtomicU64,
     duration_ms: HttpDurationHistogram,
+    requests: Mutex<VecDeque<HttpRequestObservation>>,
 }
 
 impl HttpCounters {
@@ -178,6 +242,220 @@ impl HttpCounters {
             duration_ms: self.duration_ms.snapshot(),
         }
     }
+
+    fn record_request(&self, request: HttpRequestRecord) {
+        let recorded_at = ChronoUtc::now().to_rfc3339();
+        let mut requests = lock_unpoisoned(&self.requests, "http request observations");
+        if requests.len() >= HTTP_REQUEST_OBSERVATION_CAPACITY {
+            requests.pop_front();
+        }
+        requests.push_back(HttpRequestObservation {
+            method: request.method,
+            path: request.path,
+            status: request.status.as_u16(),
+            duration_ms: request.duration_ms,
+            request_id: request.request_id,
+            trace_id: request.trace_id,
+            recorded_at,
+        });
+    }
+
+    fn observability_snapshot(&self) -> HttpObservabilitySnapshot {
+        let requests: Vec<HttpRequestObservation> =
+            lock_unpoisoned(&self.requests, "http request observations")
+                .iter()
+                .cloned()
+                .collect();
+        let route_rankings = http_route_rankings(&requests);
+        let route_count = route_rankings.len();
+        let slow_request_count = requests
+            .iter()
+            .filter(|request| request.duration_ms >= HTTP_SLOW_REQUEST_THRESHOLD_MS)
+            .count();
+        let error_request_count = requests
+            .iter()
+            .filter(|request| request.status >= 400)
+            .count();
+
+        let mut top_slowest_routes = route_rankings.clone();
+        top_slowest_routes.sort_by(|left, right| {
+            right
+                .max_duration_ms
+                .cmp(&left.max_duration_ms)
+                .then_with(|| right.avg_duration_ms.cmp(&left.avg_duration_ms))
+                .then_with(|| right.requests_total.cmp(&left.requests_total))
+                .then_with(|| left.method.cmp(&right.method))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        top_slowest_routes.truncate(HTTP_ROUTE_RANKING_LIMIT);
+
+        let mut top_error_routes: Vec<HttpRouteRankingSnapshot> = route_rankings
+            .into_iter()
+            .filter(|route| route.client_error_total + route.server_error_total > 0)
+            .collect();
+        top_error_routes.sort_by(|left, right| {
+            (right.client_error_total + right.server_error_total)
+                .cmp(&(left.client_error_total + left.server_error_total))
+                .then_with(|| right.server_error_total.cmp(&left.server_error_total))
+                .then_with(|| right.max_duration_ms.cmp(&left.max_duration_ms))
+                .then_with(|| left.method.cmp(&right.method))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        top_error_routes.truncate(HTTP_ROUTE_RANKING_LIMIT);
+
+        HttpObservabilitySnapshot {
+            stats: HttpObservabilityStats {
+                requests_total: self.requests_total.load(Ordering::Relaxed),
+                retained_request_count: requests.len(),
+                retention_capacity: HTTP_REQUEST_OBSERVATION_CAPACITY,
+                slow_request_threshold_ms: HTTP_SLOW_REQUEST_THRESHOLD_MS,
+                route_count,
+                slow_request_count,
+                error_request_count,
+            },
+            top_slowest_routes,
+            top_error_routes,
+            recent_slow_requests: recent_requests(&requests, |request| {
+                request.duration_ms >= HTTP_SLOW_REQUEST_THRESHOLD_MS
+            }),
+            recent_error_requests: recent_requests(&requests, |request| request.status >= 400),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HttpRequestObservation {
+    method: String,
+    path: String,
+    status: u16,
+    duration_ms: u64,
+    request_id: Option<String>,
+    trace_id: Option<String>,
+    recorded_at: String,
+}
+
+#[derive(Default)]
+struct HttpRouteAggregate {
+    method: String,
+    path: String,
+    informational_total: u64,
+    success_total: u64,
+    redirection_total: u64,
+    client_error_total: u64,
+    server_error_total: u64,
+    duration_ms: Vec<u64>,
+    latest_recorded_at: String,
+}
+
+impl HttpRouteAggregate {
+    fn new(request: &HttpRequestObservation) -> Self {
+        Self {
+            method: request.method.clone(),
+            path: request.path.clone(),
+            latest_recorded_at: request.recorded_at.clone(),
+            ..Self::default()
+        }
+    }
+
+    fn record(&mut self, request: &HttpRequestObservation) {
+        match status_class(request.status) {
+            HttpOutcomeClass::Informational => self.informational_total += 1,
+            HttpOutcomeClass::Success => self.success_total += 1,
+            HttpOutcomeClass::Redirection => self.redirection_total += 1,
+            HttpOutcomeClass::ClientError => self.client_error_total += 1,
+            HttpOutcomeClass::ServerError => self.server_error_total += 1,
+        }
+        self.duration_ms.push(request.duration_ms);
+        if request.recorded_at > self.latest_recorded_at {
+            self.latest_recorded_at.clone_from(&request.recorded_at);
+        }
+    }
+
+    fn into_snapshot(mut self) -> HttpRouteRankingSnapshot {
+        self.duration_ms.sort_unstable();
+        let requests_total = self.duration_ms.len() as u64;
+        let sum_ms = self.duration_ms.iter().sum::<u64>();
+        let avg_duration_ms = if requests_total == 0 {
+            0
+        } else {
+            sum_ms / requests_total
+        };
+        let max_duration_ms = self.duration_ms.last().copied().unwrap_or(0);
+        let p95_duration_ms = percentile(&self.duration_ms, 95).unwrap_or(0);
+        let p99_duration_ms = percentile(&self.duration_ms, 99).unwrap_or(0);
+
+        HttpRouteRankingSnapshot {
+            method: self.method,
+            path: self.path,
+            requests_total,
+            informational_total: self.informational_total,
+            success_total: self.success_total,
+            redirection_total: self.redirection_total,
+            client_error_total: self.client_error_total,
+            server_error_total: self.server_error_total,
+            avg_duration_ms,
+            max_duration_ms,
+            p95_duration_ms,
+            p99_duration_ms,
+            latest_recorded_at: self.latest_recorded_at,
+        }
+    }
+}
+
+fn http_route_rankings(requests: &[HttpRequestObservation]) -> Vec<HttpRouteRankingSnapshot> {
+    let mut routes: HashMap<(String, String), HttpRouteAggregate> = HashMap::new();
+    for request in requests {
+        routes
+            .entry((request.method.clone(), request.path.clone()))
+            .or_insert_with(|| HttpRouteAggregate::new(request))
+            .record(request);
+    }
+    routes
+        .into_values()
+        .map(HttpRouteAggregate::into_snapshot)
+        .collect()
+}
+
+fn recent_requests<F>(
+    requests: &[HttpRequestObservation],
+    mut matches: F,
+) -> Vec<HttpRequestSampleSnapshot>
+where
+    F: FnMut(&HttpRequestObservation) -> bool,
+{
+    requests
+        .iter()
+        .rev()
+        .filter(|request| matches(request))
+        .take(HTTP_RECENT_REQUEST_LIMIT)
+        .map(|request| HttpRequestSampleSnapshot {
+            method: request.method.clone(),
+            path: request.path.clone(),
+            status: request.status,
+            duration_ms: request.duration_ms,
+            request_id: request.request_id.clone(),
+            trace_id: request.trace_id.clone(),
+            recorded_at: request.recorded_at.clone(),
+        })
+        .collect()
+}
+
+fn percentile(sorted_values: &[u64], percentile: usize) -> Option<u64> {
+    if sorted_values.is_empty() {
+        return None;
+    }
+    let rank = sorted_values
+        .len()
+        .saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1);
+    sorted_values.get(rank).copied()
+}
+
+fn status_class(status: u16) -> HttpOutcomeClass {
+    axum::http::StatusCode::from_u16(status)
+        .map(HttpOutcomeClass::from_status)
+        .unwrap_or(HttpOutcomeClass::ServerError)
 }
 
 #[derive(Default)]
@@ -368,6 +646,10 @@ impl RuntimeDiagnostics {
         }
     }
 
+    pub(crate) fn http_observability_snapshot(&self) -> HttpObservabilitySnapshot {
+        self.http.observability_snapshot()
+    }
+
     pub async fn run_readiness_checks(&self, app: &AppContext) -> Result<ReadinessReport> {
         let mut probes = Vec::with_capacity(self.readiness.checks.len());
         let mut state = ProbeState::Healthy;
@@ -413,6 +695,13 @@ impl RuntimeDiagnostics {
         duration_ms: u64,
     ) {
         self.record_http_response_inner(status, Some(duration_ms));
+    }
+
+    pub(crate) fn record_http_request(&self, request: HttpRequestRecord) {
+        let status = request.status;
+        let duration_ms = request.duration_ms;
+        self.record_http_response_inner(status, Some(duration_ms));
+        self.http.record_request(request);
     }
 
     fn record_http_response_inner(&self, status: axum::http::StatusCode, duration_ms: Option<u64>) {
@@ -709,5 +998,99 @@ mod tests {
             .find(|bucket| bucket.le_ms == 30_000)
             .expect("30000ms bucket missing");
         assert_eq!(le_30_000.cumulative_count, 2);
+    }
+
+    #[test]
+    fn http_observability_snapshot_ranks_routes_and_recent_samples() {
+        use axum::http::StatusCode;
+
+        let diagnostics = RuntimeDiagnostics::default();
+
+        diagnostics.record_http_request(HttpRequestRecord {
+            method: "GET".to_string(),
+            path: "/slow".to_string(),
+            status: StatusCode::OK,
+            duration_ms: 1_500,
+            request_id: Some("req-slow-1".to_string()),
+            trace_id: Some("trace-slow-1".to_string()),
+        });
+        diagnostics.record_http_request(HttpRequestRecord {
+            method: "GET".to_string(),
+            path: "/slow".to_string(),
+            status: StatusCode::OK,
+            duration_ms: 2_500,
+            request_id: Some("req-slow-2".to_string()),
+            trace_id: Some("trace-slow-2".to_string()),
+        });
+        diagnostics.record_http_request(HttpRequestRecord {
+            method: "POST".to_string(),
+            path: "/errors".to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            duration_ms: 35,
+            request_id: Some("req-error".to_string()),
+            trace_id: Some("trace-error".to_string()),
+        });
+
+        let snapshot = diagnostics.http_observability_snapshot();
+
+        assert_eq!(snapshot.stats.requests_total, 3);
+        assert_eq!(snapshot.stats.retained_request_count, 3);
+        assert_eq!(snapshot.stats.retention_capacity, 500);
+        assert_eq!(snapshot.stats.slow_request_threshold_ms, 1_000);
+        assert_eq!(snapshot.stats.route_count, 2);
+        assert_eq!(snapshot.stats.slow_request_count, 2);
+        assert_eq!(snapshot.stats.error_request_count, 1);
+
+        assert_eq!(snapshot.top_slowest_routes[0].path, "/slow");
+        assert_eq!(snapshot.top_slowest_routes[0].requests_total, 2);
+        assert_eq!(snapshot.top_slowest_routes[0].avg_duration_ms, 2_000);
+        assert_eq!(snapshot.top_slowest_routes[0].max_duration_ms, 2_500);
+        assert_eq!(snapshot.top_slowest_routes[0].p95_duration_ms, 2_500);
+        assert_eq!(snapshot.top_slowest_routes[0].p99_duration_ms, 2_500);
+
+        assert_eq!(snapshot.top_error_routes.len(), 1);
+        assert_eq!(snapshot.top_error_routes[0].path, "/errors");
+        assert_eq!(snapshot.top_error_routes[0].server_error_total, 1);
+
+        assert_eq!(snapshot.recent_slow_requests.len(), 2);
+        assert_eq!(
+            snapshot.recent_slow_requests[0].request_id.as_deref(),
+            Some("req-slow-2")
+        );
+        assert_eq!(snapshot.recent_error_requests.len(), 1);
+        assert_eq!(
+            snapshot.recent_error_requests[0].trace_id.as_deref(),
+            Some("trace-error")
+        );
+    }
+
+    #[test]
+    fn http_observability_retention_is_bounded() {
+        use axum::http::StatusCode;
+
+        let diagnostics = RuntimeDiagnostics::default();
+
+        for index in 0..(HTTP_REQUEST_OBSERVATION_CAPACITY + 1) {
+            diagnostics.record_http_request(HttpRequestRecord {
+                method: "GET".to_string(),
+                path: format!("/items/{index}"),
+                status: StatusCode::OK,
+                duration_ms: if index == 0 { 10_000 } else { 5 },
+                request_id: Some(format!("req-{index}")),
+                trace_id: Some(format!("trace-{index}")),
+            });
+        }
+
+        let snapshot = diagnostics.http_observability_snapshot();
+
+        assert_eq!(
+            snapshot.stats.retained_request_count,
+            HTTP_REQUEST_OBSERVATION_CAPACITY
+        );
+        assert_eq!(
+            snapshot.stats.route_count,
+            HTTP_REQUEST_OBSERVATION_CAPACITY
+        );
+        assert_eq!(snapshot.top_slowest_routes[0].max_duration_ms, 5);
     }
 }

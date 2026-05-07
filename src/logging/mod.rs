@@ -30,6 +30,7 @@ mod reporter;
 mod request_id;
 mod types;
 
+pub(crate) use diagnostics::HttpRequestRecord;
 pub use diagnostics::{RuntimeDiagnostics, RuntimeSnapshot};
 pub use observability::ObservabilityOptions;
 pub use probes::{

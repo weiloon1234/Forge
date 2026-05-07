@@ -313,6 +313,56 @@ struct FailedJobContract {
 }
 
 #[derive(Debug, Deserialize)]
+struct HttpStatsContract {
+    stats: HttpStatsSummaryContract,
+    top_slowest_routes: Vec<HttpRouteRankingContract>,
+    top_error_routes: Vec<HttpRouteRankingContract>,
+    recent_slow_requests: Vec<HttpRequestSampleContract>,
+    recent_error_requests: Vec<HttpRequestSampleContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpStatsSummaryContract {
+    requests_total: u64,
+    retained_request_count: usize,
+    retention_capacity: usize,
+    slow_request_threshold_ms: u64,
+    route_count: usize,
+    slow_request_count: usize,
+    error_request_count: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct HttpRouteRankingContract {
+    method: String,
+    path: String,
+    requests_total: u64,
+    informational_total: u64,
+    success_total: u64,
+    redirection_total: u64,
+    client_error_total: u64,
+    server_error_total: u64,
+    avg_duration_ms: u64,
+    max_duration_ms: u64,
+    p95_duration_ms: u64,
+    p99_duration_ms: u64,
+    latest_recorded_at: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct HttpRequestSampleContract {
+    method: String,
+    path: String,
+    status: u16,
+    duration_ms: u64,
+    request_id: Option<String>,
+    trace_id: Option<String>,
+    recorded_at: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlowQueriesContract {
     stats: SqlStatsContract,
     top_slowest: Vec<SlowQueryContract>,
@@ -568,6 +618,38 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
     assert_eq!(snapshot.scheduler.leadership_lost_total, 0);
     assert_eq!(snapshot.websocket.subscriptions_total, 0);
     assert_eq!(snapshot.websocket.unsubscribes_total, 0);
+
+    let http_stats: HttpStatsContract = client
+        .get(format!("{base_url}/_forge/http/stats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(http_stats.stats.requests_total >= snapshot.http.requests_total);
+    assert!(http_stats.stats.retained_request_count >= 5);
+    assert_eq!(http_stats.stats.retention_capacity, 500);
+    assert_eq!(http_stats.stats.slow_request_threshold_ms, 1_000);
+    assert!(http_stats.stats.route_count >= 3);
+    assert!(http_stats.stats.error_request_count >= 1);
+    assert!(!http_stats.top_slowest_routes.is_empty());
+    assert!(http_stats
+        .top_slowest_routes
+        .iter()
+        .any(|route| route.path == "/public"));
+    assert!(http_stats
+        .top_error_routes
+        .iter()
+        .any(|route| route.path == "/secure" && route.client_error_total >= 1));
+    assert!(http_stats
+        .recent_error_requests
+        .iter()
+        .any(|request| request.path == "/secure" && request.status == 401));
+    assert_eq!(
+        http_stats.recent_slow_requests.len(),
+        http_stats.stats.slow_request_count.min(50)
+    );
 
     let metrics = client
         .get(format!("{base_url}/_forge/metrics"))

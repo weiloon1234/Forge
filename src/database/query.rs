@@ -493,6 +493,7 @@ impl Cte {
 pub struct Query {
     ast: QueryAst,
     options: QueryExecutionOptions,
+    deferred_error: Option<String>,
 }
 
 impl From<Query> for QueryAst {
@@ -506,6 +507,7 @@ impl Query {
         Self {
             ast: QueryAst::select(SelectNode::from(source)),
             options: QueryExecutionOptions::default(),
+            deferred_error: None,
         }
     }
 
@@ -522,6 +524,7 @@ impl Query {
                 returning: Vec::new(),
             }),
             options: QueryExecutionOptions::default(),
+            deferred_error: None,
         }
     }
 
@@ -537,6 +540,7 @@ impl Query {
                 returning: Vec::new(),
             }),
             options: QueryExecutionOptions::default(),
+            deferred_error: None,
         }
     }
 
@@ -550,6 +554,7 @@ impl Query {
                 returning: Vec::new(),
             }),
             options: QueryExecutionOptions::default(),
+            deferred_error: None,
         }
     }
 
@@ -562,6 +567,7 @@ impl Query {
                 returning: Vec::new(),
             }),
             options: QueryExecutionOptions::default(),
+            deferred_error: None,
         }
     }
 
@@ -569,6 +575,7 @@ impl Query {
         Self {
             ast,
             options: QueryExecutionOptions::default(),
+            deferred_error: None,
         }
     }
 
@@ -966,25 +973,37 @@ impl Query {
     }
 
     pub fn union(self, other: Self) -> Self {
-        Self::from_ast(QueryAst::set_operation(SetOperationNode {
-            left: Box::new(self.ast),
-            operator: SetOperator::Union,
-            right: Box::new(other.ast),
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-        }))
+        let deferred_error =
+            first_deferred_error(self.deferred_error.clone(), other.deferred_error.clone());
+        Self {
+            ast: QueryAst::set_operation(SetOperationNode {
+                left: Box::new(self.ast),
+                operator: SetOperator::Union,
+                right: Box::new(other.ast),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            }),
+            options: QueryExecutionOptions::default(),
+            deferred_error,
+        }
     }
 
     pub fn union_all(self, other: Self) -> Self {
-        Self::from_ast(QueryAst::set_operation(SetOperationNode {
-            left: Box::new(self.ast),
-            operator: SetOperator::UnionAll,
-            right: Box::new(other.ast),
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-        }))
+        let deferred_error =
+            first_deferred_error(self.deferred_error.clone(), other.deferred_error.clone());
+        Self {
+            ast: QueryAst::set_operation(SetOperationNode {
+                left: Box::new(self.ast),
+                operator: SetOperator::UnionAll,
+                right: Box::new(other.ast),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            }),
+            options: QueryExecutionOptions::default(),
+            deferred_error,
+        }
     }
 
     pub fn ast(&self) -> &QueryAst {
@@ -992,6 +1011,7 @@ impl Query {
     }
 
     pub fn compile(&self) -> Result<super::compiler::CompiledSql> {
+        self.deferred_result()?;
         PostgresCompiler::compile(&self.ast)
     }
 
@@ -1121,6 +1141,7 @@ impl Query {
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         let total = count_query_ast(executor, &self.ast).await?;
         let data = self
             .clone()
@@ -1140,6 +1161,7 @@ impl Query {
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         count_query_ast(executor, &self.ast).await
     }
 
@@ -1147,6 +1169,7 @@ impl Query {
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         Ok(execute_scalar_projection_on_ast(
             executor,
             &self.ast,
@@ -1160,6 +1183,7 @@ impl Query {
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast,
@@ -1173,6 +1197,7 @@ impl Query {
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast,
@@ -1186,6 +1211,7 @@ impl Query {
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast,
@@ -1199,6 +1225,7 @@ impl Query {
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast,
@@ -1217,6 +1244,7 @@ impl Query {
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         let wrapped = wrap_query_for_alias_aggregate(
             &self.ast,
             alias,
@@ -1260,6 +1288,20 @@ impl Query {
             });
         }
         self
+    }
+
+    fn with_deferred_error(mut self, error: String) -> Self {
+        if self.deferred_error.is_none() {
+            self.deferred_error = Some(error);
+        }
+        self
+    }
+
+    fn deferred_result(&self) -> Result<()> {
+        match &self.deferred_error {
+            Some(error) => Err(Error::message(error.clone())),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1407,7 +1449,12 @@ where
 
     /// Apply a reusable query scope.
     pub fn scope(self, f: impl FnOnce(Self) -> Self) -> Self {
-        f(self)
+        let fallback = self.clone();
+        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+            Ok(query) => query,
+            Err(panic) => fallback
+                .with_deferred_error(projection_query_dsl_panic_message::<P>("scope", panic)),
+        }
     }
 
     pub fn union(self, other: Self) -> Self {
@@ -1550,6 +1597,7 @@ where
         T: FromDbValue,
     {
         let alias = field.alias();
+        self.query.deferred_result()?;
         let wrapped = wrap_query_for_alias_aggregate(
             self.query.ast(),
             alias,
@@ -1570,6 +1618,7 @@ where
         T: FromDbValue,
     {
         let alias = field.alias();
+        self.query.deferred_result()?;
         let wrapped = wrap_query_for_alias_aggregate(
             self.query.ast(),
             alias,
@@ -1590,6 +1639,7 @@ where
         T: FromDbValue,
     {
         let alias = field.alias();
+        self.query.deferred_result()?;
         let wrapped = wrap_query_for_alias_aggregate(
             self.query.ast(),
             alias,
@@ -1610,6 +1660,7 @@ where
         T: FromDbValue,
     {
         let alias = field.alias();
+        self.query.deferred_result()?;
         let wrapped = wrap_query_for_alias_aggregate(
             self.query.ast(),
             alias,
@@ -1637,6 +1688,11 @@ where
     {
         self.query.explain_analyze(executor).await
     }
+
+    fn with_deferred_error(mut self, error: String) -> Self {
+        self.query = self.query.with_deferred_error(error);
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -1651,6 +1707,7 @@ pub struct ModelQuery<M: 'static> {
     stream_batch_size: usize,
     options: QueryExecutionOptions,
     skip_defaults: bool,
+    deferred_error: Option<String>,
 }
 
 impl<M> ModelQuery<M>
@@ -1683,6 +1740,7 @@ where
             stream_batch_size: 256,
             options: QueryExecutionOptions::default(),
             skip_defaults: false,
+            deferred_error: None,
         }
     }
 
@@ -1805,7 +1863,13 @@ where
     /// User::query().scope(User::active).get(&app).await?;
     /// ```
     pub fn scope(self, f: impl FnOnce(Self) -> Self) -> Self {
-        f(self)
+        let fallback = self.clone();
+        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+            Ok(query) => query,
+            Err(panic) => {
+                fallback.with_deferred_error(model_query_dsl_panic_message::<M>("scope", panic))
+            }
+        }
     }
 
     pub fn with<To>(mut self, relation: RelationDef<M, To>) -> Self
@@ -1897,7 +1961,18 @@ where
         To: Model,
         F: FnOnce(ModelQuery<To>) -> ModelQuery<To>,
     {
-        let scoped = scope(ModelQuery::new(To::table_meta()));
+        let scoped = match catch_unwind(AssertUnwindSafe(|| {
+            scope(ModelQuery::new(To::table_meta()))
+        })) {
+            Ok(scoped) => scoped,
+            Err(panic) => {
+                return self
+                    .with_deferred_error(model_query_dsl_panic_message::<M>("where_has", panic));
+            }
+        };
+        if let Some(error) = scoped.deferred_error.clone() {
+            return self.with_deferred_error(error);
+        }
         let relation = relation.scoped_with_filter(scoped.effective_condition());
         self.select.condition =
             merge_condition(self.select.condition.take(), relation.exists_condition());
@@ -1914,7 +1989,20 @@ where
         Pivot: Clone + Send + Sync + 'static,
         F: FnOnce(ModelQuery<To>) -> ModelQuery<To>,
     {
-        let scoped = scope(ModelQuery::new(To::table_meta()));
+        let scoped = match catch_unwind(AssertUnwindSafe(|| {
+            scope(ModelQuery::new(To::table_meta()))
+        })) {
+            Ok(scoped) => scoped,
+            Err(panic) => {
+                return self.with_deferred_error(model_query_dsl_panic_message::<M>(
+                    "where_has_many_to_many",
+                    panic,
+                ));
+            }
+        };
+        if let Some(error) = scoped.deferred_error.clone() {
+            return self.with_deferred_error(error);
+        }
         let relation = relation.scoped_with_filter(scoped.effective_condition());
         self.select.condition =
             merge_condition(self.select.condition.take(), relation.exists_condition());
@@ -1931,6 +2019,7 @@ where
     }
 
     pub fn to_compiled_sql(&self) -> Result<super::compiler::CompiledSql> {
+        self.deferred_result()?;
         PostgresCompiler::compile(&self.ast())
     }
 
@@ -2123,6 +2212,7 @@ where
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         let compiled = PostgresCompiler::compile(&self.exists_ast())?;
         Ok(!executor
             .query_records_with(&compiled, self.options.clone())
@@ -2142,6 +2232,7 @@ where
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         let mut select = self.select.clone();
         select.columns =
             vec![SelectItem::new(Expr::column(column.column_ref())).aliased(column.name())];
@@ -2184,7 +2275,7 @@ where
                 break;
             }
 
-            handler(batch).await?;
+            run_query_iteration_callback::<M, _, _, _>("chunk", &mut handler, batch).await?;
             if batch_len < size as usize {
                 break;
             }
@@ -2234,7 +2325,7 @@ where
                 .into_iter()
                 .map(|(_, model)| model)
                 .collect::<Collection<_>>();
-            handler(models).await?;
+            run_query_iteration_callback::<M, _, _, _>("chunk_by_id", &mut handler, models).await?;
             last_value = next_last_value;
 
             if batch_len < size as usize {
@@ -2282,7 +2373,8 @@ where
                 .map(|(record, _)| record.decode::<T>(column.name()))
                 .transpose()?;
             for (_, model) in entries {
-                handler(model).await?;
+                run_query_iteration_callback::<M, _, _, _>("each_by_id", &mut handler, model)
+                    .await?;
             }
             last_value = next_last_value;
 
@@ -2298,6 +2390,7 @@ where
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         let total = count_query_ast(executor, &self.ast()).await?;
         let data = self
             .clone()
@@ -2387,6 +2480,7 @@ where
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         count_query_ast(executor, &self.ast()).await
     }
 
@@ -2394,6 +2488,7 @@ where
     where
         E: QueryExecutor,
     {
+        self.deferred_result()?;
         Ok(execute_scalar_projection_on_ast(
             executor,
             &self.ast(),
@@ -2407,6 +2502,7 @@ where
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast(),
@@ -2420,6 +2516,7 @@ where
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast(),
@@ -2433,6 +2530,7 @@ where
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast(),
@@ -2446,6 +2544,7 @@ where
         E: QueryExecutor,
         T: FromDbValue,
     {
+        self.deferred_result()?;
         execute_scalar_projection_on_ast(
             executor,
             &self.ast(),
@@ -2458,7 +2557,7 @@ where
         &self,
         executor: &dyn QueryExecutor,
     ) -> Result<Vec<(DbRecord, M)>> {
-        let compiled = PostgresCompiler::compile(&self.ast())?;
+        let compiled = self.to_compiled_sql()?;
         let records = executor
             .query_records_with(&compiled, self.options.clone())
             .await?;
@@ -2515,6 +2614,20 @@ where
         self
     }
 
+    fn with_deferred_error(mut self, error: String) -> Self {
+        if self.deferred_error.is_none() {
+            self.deferred_error = Some(error);
+        }
+        self
+    }
+
+    fn deferred_result(&self) -> Result<()> {
+        match &self.deferred_error {
+            Some(error) => Err(Error::message(error.clone())),
+            None => Ok(()),
+        }
+    }
+
     fn exists_ast(&self) -> QueryAst {
         let mut select = self.select.clone();
         select.columns = vec![SelectItem::new(Expr::value(1_i64)).aliased("__forge_exists")];
@@ -2568,6 +2681,7 @@ pub struct CreateManyModel<M: 'static> {
     on_conflict: Option<OnConflictNode>,
     without_lifecycle: bool,
     options: QueryExecutionOptions,
+    row_builder_error: Option<String>,
 }
 
 pub struct CreateRow<M: 'static> {
@@ -2846,6 +2960,7 @@ where
             on_conflict: None,
             without_lifecycle: false,
             options: QueryExecutionOptions::default(),
+            row_builder_error: None,
         }
     }
 
@@ -2872,7 +2987,15 @@ where
     where
         F: FnOnce(CreateRow<M>) -> CreateRow<M>,
     {
-        self.rows.push(build(CreateRow::new()).into_values());
+        match catch_unwind(AssertUnwindSafe(|| build(CreateRow::new()))) {
+            Ok(row) => self.rows.push(row.into_values()),
+            Err(panic) => {
+                if self.row_builder_error.is_none() {
+                    self.row_builder_error =
+                        Some(create_many_row_builder_panic_message::<M>(panic));
+                }
+            }
+        }
         self
     }
 
@@ -2968,6 +3091,10 @@ where
     }
 
     fn validate_rows(&self) -> Result<()> {
+        if let Some(error) = &self.row_builder_error {
+            return Err(Error::message(error.clone()));
+        }
+
         if self.rows.is_empty() {
             return Err(Error::message(
                 "create_many() requires at least one row before execute() or get()",
@@ -3695,6 +3822,102 @@ where
     Error::message(format!(
         "model `{model}` write mutator `{column}` panicked: {message}"
     ))
+}
+
+async fn run_query_iteration_callback<M, I, F, Fut>(
+    operation: &'static str,
+    handler: &mut F,
+    input: I,
+) -> Result<()>
+where
+    M: Model,
+    F: FnMut(I) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let future = match catch_unwind(AssertUnwindSafe(|| handler(input))) {
+        Ok(future) => future,
+        Err(panic) => return Err(query_iteration_panic_error::<M>(operation, panic)),
+    };
+
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(query_iteration_panic_error::<M>(operation, panic)),
+    }
+}
+
+fn query_iteration_panic_error<M>(
+    operation: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> Error
+where
+    M: Model,
+{
+    let model = std::any::type_name::<M>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        model = model,
+        operation = operation,
+        panic = %message,
+        "model query iteration callback panicked"
+    );
+    Error::message(format!(
+        "model query `{model}` {operation} callback panicked: {message}"
+    ))
+}
+
+fn first_deferred_error(left: Option<String>, right: Option<String>) -> Option<String> {
+    left.or(right)
+}
+
+fn model_query_dsl_panic_message<M>(
+    operation: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> String
+where
+    M: Model,
+{
+    let model = std::any::type_name::<M>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        model = model,
+        operation = operation,
+        panic = %message,
+        "model query DSL callback panicked"
+    );
+    format!("model query `{model}` {operation} callback panicked: {message}")
+}
+
+fn projection_query_dsl_panic_message<P>(
+    operation: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+) -> String {
+    let projection = std::any::type_name::<P>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        projection = projection,
+        operation = operation,
+        panic = %message,
+        "projection query DSL callback panicked"
+    );
+    format!("projection query `{projection}` {operation} callback panicked: {message}")
+}
+
+fn create_many_row_builder_panic_message<M>(panic: Box<dyn std::any::Any + Send>) -> String
+where
+    M: Model,
+{
+    let model = std::any::type_name::<M>();
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge.database",
+        model = model,
+        panic = %message,
+        "create_many row builder panicked"
+    );
+    format!("model create_many `{model}` row callback panicked: {message}")
 }
 
 async fn apply_create_write_mutators<M>(
@@ -4850,7 +5073,17 @@ fn decode_cursor<V: std::str::FromStr>(raw: &str) -> Result<V> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InsertSource, ModelQuery, PostgresCompiler, Query, QueryBody};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::{
+        CreateManyModel, CreateRow, InsertSource, ModelQuery, PostgresCompiler, ProjectionQuery,
+        Query, QueryBody,
+    };
+    use crate::database::{
+        has_many, DbRecord, DbValue, Loaded, QueryExecutionOptions, QueryExecutor, RelationDef,
+    };
+    use crate::foundation::{Error, Result};
     use crate::{Model, ModelId};
 
     #[test]
@@ -4880,6 +5113,81 @@ mod tests {
         active: bool,
     }
 
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "iteration_users", primary_key_strategy = "manual")]
+    struct IterationUser {
+        id: i64,
+        children: Loaded<Vec<IterationChild>>,
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "iteration_children", primary_key_strategy = "manual")]
+    struct IterationChild {
+        id: i64,
+        user_id: i64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, crate::Projection)]
+    struct IterationProjection {
+        id: i64,
+    }
+
+    struct IterationExecutor {
+        batches: Mutex<VecDeque<Vec<DbRecord>>>,
+    }
+
+    impl IterationExecutor {
+        fn new(batches: impl IntoIterator<Item = Vec<DbRecord>>) -> Self {
+            Self {
+                batches: Mutex::new(batches.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl QueryExecutor for IterationExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            Ok(self.batches.lock().unwrap().pop_front().unwrap_or_default())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    fn iteration_record(id: i64) -> DbRecord {
+        let mut record = DbRecord::new();
+        record.insert("id", DbValue::from(id));
+        record
+    }
+
+    fn iteration_user_id(user: &IterationUser) -> i64 {
+        user.id
+    }
+
+    fn attach_iteration_children(user: &mut IterationUser, children: Vec<IterationChild>) {
+        user.children = Loaded::new(children);
+    }
+
+    fn iteration_children_relation() -> RelationDef<IterationUser, IterationChild> {
+        has_many(
+            IterationUser::ID,
+            IterationChild::USER_ID,
+            iteration_user_id,
+            attach_iteration_children,
+        )
+    }
+
     #[test]
     fn model_exists_query_drops_ordering() {
         let ast = ModelQuery::new(ExistsUser::table_meta())
@@ -4890,5 +5198,198 @@ mod tests {
 
         assert!(!compiled.sql.contains("ORDER BY"));
         assert!(compiled.sql.contains("LIMIT"));
+    }
+
+    #[test]
+    fn model_scope_panic_becomes_deferred_query_error() {
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .scope(|_| panic!("model scope boom"))
+            .to_compiled_sql()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("scope callback panicked: model scope boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn projection_scope_panic_becomes_deferred_query_error() {
+        let error = ProjectionQuery::<IterationProjection>::table("iteration_users")
+            .scope(|_| panic!("projection scope boom"))
+            .to_compiled_sql()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("scope callback panicked: projection scope boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn where_has_scope_panic_becomes_deferred_query_error() {
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .where_has(iteration_children_relation(), |_| panic!("where has boom"))
+            .to_compiled_sql()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("where_has callback panicked: where has boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn where_has_propagates_child_scope_deferred_query_error() {
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .where_has(iteration_children_relation(), |query| {
+                query.scope(|_| panic!("child scope boom"))
+            })
+            .to_compiled_sql()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("scope callback panicked: child scope boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_callback_error_remains_unchanged() {
+        let executor = IterationExecutor::new([vec![iteration_record(1)]]);
+
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .chunk(&executor, 10, |_batch| async {
+                Err(Error::message("chunk callback failed"))
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "chunk callback failed");
+    }
+
+    #[tokio::test]
+    async fn chunk_callback_factory_panic_becomes_query_error() {
+        let executor = IterationExecutor::new([vec![iteration_record(1)]]);
+
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .chunk(&executor, 10, |_batch| -> std::future::Ready<Result<()>> {
+                panic!("chunk factory boom");
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("chunk callback panicked: chunk factory boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_callback_future_panic_becomes_query_error() {
+        let executor = IterationExecutor::new([vec![iteration_record(1)]]);
+
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .chunk(&executor, 10, |_batch| async {
+                panic!("chunk future boom");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("chunk callback panicked: chunk future boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_by_id_callback_panic_becomes_query_error() {
+        let executor = IterationExecutor::new([vec![iteration_record(1)]]);
+
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .chunk_by_id(&executor, IterationUser::ID, 10, |_batch| async {
+                panic!("chunk by id boom");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("chunk_by_id callback panicked: chunk by id boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_by_id_callback_panic_becomes_query_error() {
+        let executor = IterationExecutor::new([vec![iteration_record(1)]]);
+
+        let error = ModelQuery::new(IterationUser::table_meta())
+            .each_by_id(&executor, IterationUser::ID, 10, |_model| async {
+                panic!("each by id boom");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("each_by_id callback panicked: each by id boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn create_many_row_builder_panic_becomes_deferred_query_error() {
+        let error = CreateManyModel::new(IterationUser::table_meta())
+            .row(|_row| -> CreateRow<IterationUser> {
+                panic!("row builder boom");
+            })
+            .to_compiled_sql()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("row callback panicked: row builder boom"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn create_many_row_builder_panic_takes_precedence_over_later_valid_rows() {
+        let error = CreateManyModel::new(IterationUser::table_meta())
+            .row(|_row| -> CreateRow<IterationUser> {
+                panic!("first row boom");
+            })
+            .row(|row| row.set(IterationUser::ID, 1_i64))
+            .to_compiled_sql()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("row callback panicked: first row boom"),
+            "unexpected error: {error}"
+        );
     }
 }

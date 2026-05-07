@@ -40,10 +40,45 @@ fn is_safe_test_database_name(database_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
     use super::assert_safe_to_wipe;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct WipeOverrideEnv {
+        previous: Option<OsString>,
+    }
+
+    impl WipeOverrideEnv {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var_os("FORGE_ALLOW_TEST_DB_WIPE");
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var("FORGE_ALLOW_TEST_DB_WIPE", value),
+                    None => std::env::remove_var("FORGE_ALLOW_TEST_DB_WIPE"),
+                }
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for WipeOverrideEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("FORGE_ALLOW_TEST_DB_WIPE", value),
+                    None => std::env::remove_var("FORGE_ALLOW_TEST_DB_WIPE"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn rejects_non_test_database_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = WipeOverrideEnv::set(None);
         let error = assert_safe_to_wipe("postgres://user@localhost/myapp").unwrap_err();
         assert!(error
             .to_string()
@@ -52,22 +87,22 @@ mod tests {
 
     #[test]
     fn allows_test_suffix_database_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = WipeOverrideEnv::set(None);
         assert!(assert_safe_to_wipe("postgres://user@localhost/myapp_test").is_ok());
     }
 
     #[test]
     fn allows_explicit_override() {
-        unsafe {
-            std::env::set_var("FORGE_ALLOW_TEST_DB_WIPE", "1");
-        }
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = WipeOverrideEnv::set(Some("1"));
         assert!(assert_safe_to_wipe("postgres://user@localhost/myapp").is_ok());
-        unsafe {
-            std::env::remove_var("FORGE_ALLOW_TEST_DB_WIPE");
-        }
     }
 
     #[test]
     fn rejects_urls_without_database_segment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = WipeOverrideEnv::set(None);
         let error = assert_safe_to_wipe("postgres://user@localhost").unwrap_err();
         assert!(error
             .to_string()

@@ -344,11 +344,18 @@ impl AppContext {
             Ok(tasks) => tasks,
             Err(_) => return Ok(None),
         };
+        let name = name.into();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
-        let task = build_task(shutdown_rx)?;
+        let task = match catch_unwind(AssertUnwindSafe(|| build_task(shutdown_rx))) {
+            Ok(task) => task?,
+            Err(panic) => return Err(managed_background_task_panic_error(&name, "factory", panic)),
+        };
+        let task_name = name.clone();
         let handle = tokio::spawn(async move {
-            task.await;
+            if let Err(panic) = AssertUnwindSafe(task).catch_unwind().await {
+                let _ = managed_background_task_panic_error(&task_name, "future", panic);
+            }
             let _ = completed_tx.send(());
         });
         tasks.register(name, shutdown_tx, completed_rx, handle.abort_handle());
@@ -487,6 +494,24 @@ fn after_commit_panic_error(panic: Box<dyn Any + Send>, phase: &'static str) -> 
         "after-commit callback panicked"
     );
     Error::message(format!("after-commit callback panicked: {message}"))
+}
+
+fn managed_background_task_panic_error(
+    name: &str,
+    phase: &'static str,
+    panic: Box<dyn Any + Send>,
+) -> Error {
+    let message = panic_payload_message(panic);
+    tracing::error!(
+        target: "forge::foundation::background_tasks",
+        task = name,
+        phase = phase,
+        panic = %message,
+        "managed background task panicked"
+    );
+    Error::message(format!(
+        "managed background task `{name}` {phase} panicked: {message}"
+    ))
 }
 
 async fn register_service_provider(
@@ -1670,6 +1695,63 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_background_task_factory_error_remains_unchanged() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+
+        let error = match kernel.app().spawn_managed_background_task(
+            "test.factory-error",
+            |_shutdown_rx| -> Result<std::future::Ready<()>> {
+                Err(Error::message("background factory failed"))
+            },
+        ) {
+            Ok(_) => panic!("expected background task factory error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "background factory failed");
+    }
+
+    #[tokio::test]
+    async fn managed_background_task_factory_panic_becomes_error() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+
+        let error = match kernel.app().spawn_managed_background_task(
+            "test.factory-panic",
+            |_shutdown_rx| -> Result<std::future::Ready<()>> {
+                panic!("background factory boom");
+            },
+        ) {
+            Ok(_) => panic!("expected background task factory panic error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "managed background task `test.factory-panic` factory panicked: background factory boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_background_task_future_panic_isolated_and_completes_handle() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let handle = kernel
+            .app()
+            .spawn_managed_background_task("test.future-panic", |_shutdown_rx| {
+                Ok(async move {
+                    panic!("background future boom");
+                })
+            })
+            .unwrap()
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        kernel.app().shutdown_background_tasks().await.unwrap();
     }
 
     #[tokio::test]

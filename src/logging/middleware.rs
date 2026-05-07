@@ -48,10 +48,18 @@ pub(crate) async fn request_context_middleware(
         path: path.clone(),
         request_id: Some(request_id.clone()),
     };
-    let response = super::scope_current_execution(
-        execution_context,
-        crate::database::scope_model_extensions(
-            crate::translations::CURRENT_LOCALE.scope(locale, next.run(request).instrument(span)),
+    let database_config = app.config().database().ok();
+    let response = crate::database::scope_http_sql_query_trace(
+        database_config,
+        method.to_string(),
+        path.clone(),
+        Some(request_id.clone()),
+        super::scope_current_execution(
+            execution_context,
+            crate::database::scope_model_extensions(
+                crate::translations::CURRENT_LOCALE
+                    .scope(locale, next.run(request).instrument(span)),
+            ),
         ),
     );
     let mut response = match catch_future_panic(response).await {

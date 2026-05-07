@@ -195,6 +195,9 @@ pub struct DatabaseConfig {
     pub default_per_page: u64,
     pub log_queries: bool,
     pub slow_query_threshold_ms: u64,
+    pub n_plus_one_detection: bool,
+    pub n_plus_one_min_repeats: u64,
+    pub n_plus_one_retention: usize,
     pub idle_timeout_seconds: u64,
     pub max_lifetime_seconds: u64,
     pub models: DatabaseModelConfig,
@@ -215,6 +218,9 @@ impl Default for DatabaseConfig {
             default_per_page: 15,
             log_queries: false,
             slow_query_threshold_ms: 500,
+            n_plus_one_detection: true,
+            n_plus_one_min_repeats: 10,
+            n_plus_one_retention: 100,
             idle_timeout_seconds: 600,
             max_lifetime_seconds: 1800,
             models: DatabaseModelConfig::default(),
@@ -1030,6 +1036,9 @@ mod tests {
                 migrations_path = "database/migrations"
                 seeders_path = "database/seeders"
                 max_connections = 2
+                n_plus_one_detection = false
+                n_plus_one_min_repeats = 7
+                n_plus_one_retention = 25
 
                 [redis]
                 url = "redis://127.0.0.1/"
@@ -1067,6 +1076,9 @@ mod tests {
         assert_eq!(database.migrations_path, "database/migrations");
         assert_eq!(database.seeders_path, "database/seeders");
         assert_eq!(database.max_connections, 2);
+        assert!(!database.n_plus_one_detection);
+        assert_eq!(database.n_plus_one_min_repeats, 7);
+        assert_eq!(database.n_plus_one_retention, 25);
         assert!(database.models.timestamps_default);
         assert!(!database.models.soft_deletes_default);
         assert_eq!(redis.url, "redis://127.0.0.1/");
@@ -1170,6 +1182,15 @@ mod tests {
 
         assert!(!database.models.timestamps_default);
         assert!(database.models.soft_deletes_default);
+    }
+
+    #[test]
+    fn database_config_defaults_sql_n_plus_one_observability() {
+        let database = DatabaseConfig::default();
+
+        assert!(database.n_plus_one_detection);
+        assert_eq!(database.n_plus_one_min_repeats, 10);
+        assert_eq!(database.n_plus_one_retention, 100);
     }
 
     #[test]

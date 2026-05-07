@@ -972,8 +972,15 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # acquire_timeout_ms = 5000
 # log_queries = false              # log all SQL
 # slow_query_threshold_ms = 500    # log slow queries
+# n_plus_one_detection = true      # detect repeated query shapes per HTTP request
+# n_plus_one_min_repeats = 10      # minimum repeats before retaining a suspect
+# n_plus_one_retention = 100       # retained N+1 suspect entries
 
 [database.models]
 # timestamps_default = true        # auto-manage created_at/updated_at
 # soft_deletes_default = false      # auto-manage deleted_at
 ```
+
+`GET /_forge/sql` exposes retained slow queries, a top-slowest ranking, and potential HTTP
+N+1 query suspects. N+1 detection groups repeated SQL fingerprints inside a single HTTP
+request; jobs and scheduler runs are intentionally excluded to avoid batch-work noise.

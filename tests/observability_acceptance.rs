@@ -312,7 +312,21 @@ struct FailedJobContract {
 
 #[derive(Debug, Deserialize)]
 struct SlowQueriesContract {
+    stats: SqlStatsContract,
+    top_slowest: Vec<SlowQueryContract>,
+    n_plus_one_suspects: Vec<NPlusOneSuspectContract>,
     slow_queries: Vec<SlowQueryContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SqlStatsContract {
+    retained_count: usize,
+    capacity: usize,
+    slow_query_threshold_ms: u64,
+    max_duration_ms: Option<u64>,
+    avg_duration_ms: Option<u64>,
+    latest_recorded_at: Option<String>,
+    n_plus_one_suspect_count: usize,
 }
 
 #[allow(dead_code)]
@@ -322,6 +336,25 @@ struct SlowQueryContract {
     duration_ms: u64,
     label: Option<String>,
     recorded_at: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct NPlusOneSuspectContract {
+    method: String,
+    path: String,
+    request_id: Option<String>,
+    fingerprint: String,
+    repeat_count: u64,
+    total_duration_ms: u64,
+    max_duration_ms: u64,
+    avg_duration_ms: u64,
+    rows_total: u64,
+    labels: Vec<String>,
+    kinds: Vec<String>,
+    sample_sql: String,
+    first_recorded_at: String,
+    latest_recorded_at: String,
 }
 
 fn write_websocket_config(dir: &Path, websocket_port: u16, namespace: &str) {
@@ -379,6 +412,24 @@ fn build_scheduler_app(config_dir: &Path) -> AppBuilder {
         .load_config_dir(config_dir)
         .register_provider(app::providers::WorkerServiceProvider)
         .register_schedule(app::schedules::register)
+}
+
+#[tokio::test]
+async fn sql_observability_endpoint_exposes_typed_stats_contract() {
+    let app = TestApp::builder().enable_observability().build().await;
+
+    let response = app.client().get("/_forge/sql").send().await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: SlowQueriesContract = response.json();
+
+    assert_eq!(body.stats.capacity, 100);
+    assert_eq!(body.stats.slow_query_threshold_ms, 500);
+    assert_eq!(body.stats.retained_count, body.slow_queries.len());
+    assert_eq!(
+        body.stats.n_plus_one_suspect_count,
+        body.n_plus_one_suspects.len()
+    );
+    assert_eq!(body.top_slowest.len(), body.slow_queries.len());
 }
 
 async fn wait_for_http_ready(base_url: &str) {
@@ -613,7 +664,25 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
     let sql_response = app.client().get("/_forge/sql").send().await;
     assert_eq!(sql_response.status(), reqwest::StatusCode::OK);
     let slow_queries: SlowQueriesContract = sql_response.json();
-    let _ = slow_queries.slow_queries;
+    assert_eq!(slow_queries.stats.capacity, 100);
+    assert_eq!(slow_queries.stats.slow_query_threshold_ms, 500);
+    assert_eq!(
+        slow_queries.stats.retained_count,
+        slow_queries.slow_queries.len()
+    );
+    assert_eq!(
+        slow_queries.stats.n_plus_one_suspect_count,
+        slow_queries.n_plus_one_suspects.len()
+    );
+    assert_eq!(
+        slow_queries.top_slowest.len(),
+        slow_queries.slow_queries.len()
+    );
+    if slow_queries.slow_queries.is_empty() {
+        assert_eq!(slow_queries.stats.max_duration_ms, None);
+        assert_eq!(slow_queries.stats.avg_duration_ms, None);
+        assert_eq!(slow_queries.stats.latest_recorded_at, None);
+    }
 }
 
 #[tokio::test]

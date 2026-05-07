@@ -82,4 +82,5 @@ fn init(config: &ConfigRepository) -> Result<()>
 
 - `/_forge/runtime` returns the structured `RuntimeSnapshot`; `/_forge/metrics` exposes the same runtime counter families in Prometheus text format.
 - Prometheus metric additions are additive so existing series names remain stable.
+- `/_forge/sql` returns slow-query stats, top-slowest ranking, and potential HTTP N+1 suspects while preserving the existing `slow_queries` key.
 

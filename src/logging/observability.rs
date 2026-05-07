@@ -10,7 +10,7 @@ use serde::Serialize;
 use super::metrics;
 use crate::auth::AccessScope;
 use crate::config::ObservabilityConfig;
-use crate::database::{DbValue, SlowQueryEntry};
+use crate::database::DbValue;
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::{
     wrap_http_authorize_callback, HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions,
@@ -139,11 +139,6 @@ struct FailedJobResponse {
     completed_at: Option<String>,
     duration_ms: Option<i64>,
     created_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct SlowQueriesResponse {
-    slow_queries: Vec<SlowQueryEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -386,9 +381,14 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
     }
 }
 
-async fn slow_queries(State(_app): State<AppContext>) -> Response {
-    let slow_queries = crate::database::recent_slow_queries();
-    (StatusCode::OK, Json(SlowQueriesResponse { slow_queries })).into_response()
+async fn slow_queries(State(app): State<AppContext>) -> Response {
+    let database_config = match app.config().database() {
+        Ok(config) => config,
+        Err(error) => return internal_error_response(error),
+    };
+    let snapshot =
+        crate::database::sql_observability_snapshot(database_config.slow_query_threshold_ms);
+    (StatusCode::OK, Json(snapshot)).into_response()
 }
 
 async fn ws_channels(State(app): State<AppContext>) -> Response {

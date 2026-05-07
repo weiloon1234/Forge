@@ -54,4 +54,4 @@ pub(crate) use lifecycle::{
     SeederRegistryBuilder, SeederRegistryHandle,
 };
 pub(crate) use model::set_runtime_model_defaults;
-pub(crate) use runtime::recent_slow_queries;
+pub(crate) use runtime::{scope_http_sql_query_trace, sql_observability_snapshot};

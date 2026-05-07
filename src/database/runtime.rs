@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -35,6 +36,8 @@ use super::compiler::CompiledSql;
 // SQL query logging
 // ---------------------------------------------------------------------------
 
+const SLOW_QUERY_LOG_CAPACITY: usize = 100;
+
 #[derive(Clone, Debug)]
 pub(crate) struct SqlLogConfig {
     pub log_queries: bool,
@@ -70,15 +73,62 @@ pub struct SlowQueryEntry {
     pub recorded_at: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SqlObservabilitySnapshot {
+    pub stats: SqlObservabilityStats,
+    pub top_slowest: Vec<SlowQueryEntry>,
+    pub n_plus_one_suspects: Vec<NPlusOneSuspect>,
+    pub slow_queries: Vec<SlowQueryEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SqlObservabilityStats {
+    pub retained_count: usize,
+    pub capacity: usize,
+    pub slow_query_threshold_ms: u64,
+    pub max_duration_ms: Option<u64>,
+    pub avg_duration_ms: Option<u64>,
+    pub latest_recorded_at: Option<String>,
+    pub n_plus_one_suspect_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NPlusOneSuspect {
+    pub method: String,
+    pub path: String,
+    pub request_id: Option<String>,
+    pub fingerprint: String,
+    pub repeat_count: u64,
+    pub total_duration_ms: u64,
+    pub max_duration_ms: u64,
+    pub avg_duration_ms: u64,
+    pub rows_total: u64,
+    pub labels: Vec<String>,
+    pub kinds: Vec<String>,
+    pub sample_sql: String,
+    pub first_recorded_at: String,
+    pub latest_recorded_at: String,
+}
+
 static SLOW_QUERY_LOG: OnceLock<std::sync::Mutex<VecDeque<SlowQueryEntry>>> = OnceLock::new();
+static N_PLUS_ONE_LOG: OnceLock<std::sync::Mutex<VecDeque<NPlusOneSuspect>>> = OnceLock::new();
+
+tokio::task_local! {
+    static SQL_QUERY_TRACE: RefCell<SqlQueryTrace>;
+}
 
 fn slow_query_log() -> &'static std::sync::Mutex<VecDeque<SlowQueryEntry>> {
-    SLOW_QUERY_LOG.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(100)))
+    SLOW_QUERY_LOG
+        .get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(SLOW_QUERY_LOG_CAPACITY)))
+}
+
+fn n_plus_one_log() -> &'static std::sync::Mutex<VecDeque<NPlusOneSuspect>> {
+    N_PLUS_ONE_LOG.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(100)))
 }
 
 fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>) {
     let mut log = lock_unpoisoned(slow_query_log(), "slow query log");
-    if log.len() >= 100 {
+    if log.len() >= SLOW_QUERY_LOG_CAPACITY {
         log.pop_front();
     }
     log.push_back(SlowQueryEntry {
@@ -94,6 +144,370 @@ pub fn recent_slow_queries() -> Vec<SlowQueryEntry> {
         .iter()
         .cloned()
         .collect()
+}
+
+fn recent_n_plus_one_suspects() -> Vec<NPlusOneSuspect> {
+    lock_unpoisoned(n_plus_one_log(), "n+1 query log")
+        .iter()
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn sql_observability_snapshot(slow_query_threshold_ms: u64) -> SqlObservabilitySnapshot {
+    let slow_queries = recent_slow_queries();
+    let n_plus_one_suspects = recent_n_plus_one_suspects();
+    let retained_count = slow_queries.len();
+    let max_duration_ms = slow_queries.iter().map(|query| query.duration_ms).max();
+    let avg_duration_ms = if slow_queries.is_empty() {
+        None
+    } else {
+        Some(
+            slow_queries
+                .iter()
+                .map(|query| query.duration_ms)
+                .sum::<u64>()
+                / slow_queries.len() as u64,
+        )
+    };
+    let latest_recorded_at = slow_queries
+        .iter()
+        .map(|query| query.recorded_at.clone())
+        .max();
+    let mut top_slowest = slow_queries.clone();
+    top_slowest.sort_by(|left, right| {
+        right
+            .duration_ms
+            .cmp(&left.duration_ms)
+            .then_with(|| right.recorded_at.cmp(&left.recorded_at))
+    });
+
+    SqlObservabilitySnapshot {
+        stats: SqlObservabilityStats {
+            retained_count,
+            capacity: SLOW_QUERY_LOG_CAPACITY,
+            slow_query_threshold_ms,
+            max_duration_ms,
+            avg_duration_ms,
+            latest_recorded_at,
+            n_plus_one_suspect_count: n_plus_one_suspects.len(),
+        },
+        top_slowest,
+        n_plus_one_suspects,
+        slow_queries,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SqlQueryTraceConfig {
+    enabled: bool,
+    min_repeats: u64,
+    retention: usize,
+    method: String,
+    path: String,
+    request_id: Option<String>,
+}
+
+impl SqlQueryTraceConfig {
+    fn from_database_config(
+        config: Option<DatabaseConfig>,
+        method: String,
+        path: String,
+        request_id: Option<String>,
+    ) -> Self {
+        let Some(config) = config else {
+            return Self {
+                enabled: false,
+                min_repeats: 10,
+                retention: 0,
+                method,
+                path,
+                request_id,
+            };
+        };
+
+        Self {
+            enabled: config.n_plus_one_detection,
+            min_repeats: config.n_plus_one_min_repeats.max(1),
+            retention: config.n_plus_one_retention,
+            method,
+            path,
+            request_id,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SqlQueryTrace {
+    config: SqlQueryTraceConfig,
+    groups: HashMap<String, SqlQueryGroup>,
+    finished: bool,
+}
+
+impl SqlQueryTrace {
+    fn new(config: SqlQueryTraceConfig) -> Self {
+        Self {
+            config,
+            groups: HashMap::new(),
+            finished: false,
+        }
+    }
+
+    fn record(&mut self, sql: &str, duration_ms: u64, label: Option<&str>, kind: &str, rows: u64) {
+        if !self.config.enabled || self.config.retention == 0 {
+            return;
+        }
+
+        let fingerprint = sql_fingerprint(sql);
+        let recorded_at = ChronoUtc::now().to_rfc3339();
+        self.groups
+            .entry(fingerprint.clone())
+            .and_modify(|group| group.record(duration_ms, label, kind, rows, &recorded_at))
+            .or_insert_with(|| {
+                SqlQueryGroup::new(
+                    fingerprint,
+                    sql,
+                    duration_ms,
+                    label,
+                    kind,
+                    rows,
+                    recorded_at,
+                )
+            });
+    }
+
+    fn finish(&mut self) -> Vec<NPlusOneSuspect> {
+        if self.finished {
+            return Vec::new();
+        }
+        self.finished = true;
+
+        let mut suspects = std::mem::take(&mut self.groups)
+            .into_values()
+            .filter(|group| group.repeat_count >= self.config.min_repeats)
+            .map(|group| group.into_suspect(&self.config))
+            .collect::<Vec<_>>();
+        suspects.sort_by(|left, right| {
+            right
+                .repeat_count
+                .cmp(&left.repeat_count)
+                .then_with(|| right.total_duration_ms.cmp(&left.total_duration_ms))
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.fingerprint.cmp(&right.fingerprint))
+        });
+        suspects
+    }
+}
+
+impl Drop for SqlQueryTrace {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        let retention = self.config.retention;
+        let suspects = self.finish();
+        record_n_plus_one_suspects(suspects, retention);
+    }
+}
+
+#[derive(Debug)]
+struct SqlQueryGroup {
+    fingerprint: String,
+    sample_sql: String,
+    repeat_count: u64,
+    total_duration_ms: u64,
+    max_duration_ms: u64,
+    rows_total: u64,
+    labels: BTreeSet<String>,
+    kinds: BTreeSet<String>,
+    first_recorded_at: String,
+    latest_recorded_at: String,
+}
+
+impl SqlQueryGroup {
+    fn new(
+        fingerprint: String,
+        sql: &str,
+        duration_ms: u64,
+        label: Option<&str>,
+        kind: &str,
+        rows: u64,
+        recorded_at: String,
+    ) -> Self {
+        let mut group = Self {
+            fingerprint,
+            sample_sql: sql.to_string(),
+            repeat_count: 0,
+            total_duration_ms: 0,
+            max_duration_ms: 0,
+            rows_total: 0,
+            labels: BTreeSet::new(),
+            kinds: BTreeSet::new(),
+            first_recorded_at: recorded_at.clone(),
+            latest_recorded_at: recorded_at,
+        };
+        let recorded_at = group.latest_recorded_at.clone();
+        group.record(duration_ms, label, kind, rows, &recorded_at);
+        group
+    }
+
+    fn record(
+        &mut self,
+        duration_ms: u64,
+        label: Option<&str>,
+        kind: &str,
+        rows: u64,
+        recorded_at: &str,
+    ) {
+        self.repeat_count += 1;
+        self.total_duration_ms += duration_ms;
+        self.max_duration_ms = self.max_duration_ms.max(duration_ms);
+        self.rows_total += rows;
+        if let Some(label) = label.filter(|value| !value.trim().is_empty()) {
+            self.labels.insert(label.to_string());
+        }
+        self.kinds.insert(kind.to_string());
+        self.latest_recorded_at = recorded_at.to_string();
+    }
+
+    fn into_suspect(self, config: &SqlQueryTraceConfig) -> NPlusOneSuspect {
+        NPlusOneSuspect {
+            method: config.method.clone(),
+            path: config.path.clone(),
+            request_id: config.request_id.clone(),
+            fingerprint: self.fingerprint,
+            repeat_count: self.repeat_count,
+            total_duration_ms: self.total_duration_ms,
+            max_duration_ms: self.max_duration_ms,
+            avg_duration_ms: self.total_duration_ms / self.repeat_count,
+            rows_total: self.rows_total,
+            labels: self.labels.into_iter().collect(),
+            kinds: self.kinds.into_iter().collect(),
+            sample_sql: self.sample_sql,
+            first_recorded_at: self.first_recorded_at,
+            latest_recorded_at: self.latest_recorded_at,
+        }
+    }
+}
+
+pub(crate) async fn scope_http_sql_query_trace<F, T>(
+    config: Option<DatabaseConfig>,
+    method: String,
+    path: String,
+    request_id: Option<String>,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    let trace_config = SqlQueryTraceConfig::from_database_config(config, method, path, request_id);
+    if !trace_config.enabled || trace_config.retention == 0 {
+        return future.await;
+    }
+
+    SQL_QUERY_TRACE
+        .scope(RefCell::new(SqlQueryTrace::new(trace_config)), async move {
+            let output = future.await;
+            finish_current_sql_query_trace();
+            output
+        })
+        .await
+}
+
+fn finish_current_sql_query_trace() {
+    let _ = SQL_QUERY_TRACE.try_with(|trace| {
+        let mut trace = trace.borrow_mut();
+        let retention = trace.config.retention;
+        let suspects = trace.finish();
+        record_n_plus_one_suspects(suspects, retention);
+    });
+}
+
+fn record_sql_observation(sql: &str, duration_ms: u64, label: Option<&str>, kind: &str, rows: u64) {
+    let _ = SQL_QUERY_TRACE.try_with(|trace| {
+        trace
+            .borrow_mut()
+            .record(sql, duration_ms, label, kind, rows);
+    });
+}
+
+fn record_n_plus_one_suspects(suspects: Vec<NPlusOneSuspect>, retention: usize) {
+    if suspects.is_empty() || retention == 0 {
+        return;
+    }
+
+    let mut log = lock_unpoisoned(n_plus_one_log(), "n+1 query log");
+    for suspect in suspects {
+        log.push_back(suspect);
+        while log.len() > retention {
+            log.pop_front();
+        }
+    }
+}
+
+pub(crate) fn sql_fingerprint(sql: &str) -> String {
+    let mut normalized = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut pending_space = false;
+
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+
+        if ch == '\'' {
+            push_normalized_char(&mut normalized, &mut pending_space, '?');
+            while let Some(next) = chars.next() {
+                if next == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        chars.next();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if ch == '$' && matches!(chars.peek(), Some(next) if next.is_ascii_digit()) {
+            push_normalized_char(&mut normalized, &mut pending_space, '?');
+            while matches!(chars.peek(), Some(next) if next.is_ascii_digit()) {
+                chars.next();
+            }
+            continue;
+        }
+
+        if ch == '?' {
+            push_normalized_char(&mut normalized, &mut pending_space, '?');
+            continue;
+        }
+
+        let previous_is_identifier = !pending_space
+            && normalized
+                .chars()
+                .last()
+                .is_some_and(|last| last.is_ascii_alphanumeric() || last == '_');
+        if ch.is_ascii_digit() && !previous_is_identifier {
+            push_normalized_char(&mut normalized, &mut pending_space, '?');
+            while matches!(chars.peek(), Some(next) if next.is_ascii_digit() || *next == '.') {
+                chars.next();
+            }
+            continue;
+        }
+
+        push_normalized_char(&mut normalized, &mut pending_space, ch.to_ascii_lowercase());
+    }
+
+    normalized.trim().to_string()
+}
+
+fn push_normalized_char(normalized: &mut String, pending_space: &mut bool, ch: char) {
+    if *pending_space && !normalized.is_empty() {
+        normalized.push(' ');
+    }
+    normalized.push(ch);
+    *pending_space = false;
 }
 
 pub type DbRecordStream<'a> = BoxStream<'a, Result<DbRecord>>;
@@ -900,6 +1314,7 @@ async fn query_records_on_connection(
         sql,
         start.elapsed(),
         &options.label,
+        "query",
         rows.len() as u64,
     );
     result
@@ -923,7 +1338,14 @@ async fn execute_on_connection(
     reset_statement_timeout(connection, timeout_mode).await?;
     let rows_affected = result.rows_affected();
 
-    log_sql_complete(sql_log, sql, start.elapsed(), &options.label, rows_affected);
+    log_sql_complete(
+        sql_log,
+        sql,
+        start.elapsed(),
+        &options.label,
+        "execute",
+        rows_affected,
+    );
     Ok(rows_affected)
 }
 
@@ -950,9 +1372,11 @@ fn log_sql_complete(
     sql: &str,
     elapsed: Duration,
     label: &Option<String>,
+    kind: &str,
     rows: u64,
 ) {
     let elapsed_ms = elapsed.as_millis() as u64;
+    record_sql_observation(sql, elapsed_ms, label.as_deref(), kind, rows);
 
     if sql_log.log_queries {
         tracing::debug!(
@@ -960,6 +1384,7 @@ fn log_sql_complete(
             duration_ms = elapsed_ms,
             rows,
             label = ?label,
+            kind,
             "completed"
         );
     }
@@ -1700,18 +2125,25 @@ fn format_query_context(sql: &str, label: Option<&str>) -> String {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use futures_util::StreamExt;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::{mpsc, oneshot, Mutex};
 
-    use crate::logging::catch_sync_panic;
+    use crate::logging::{catch_future_panic, catch_sync_panic};
     use crate::support::sync::lock_unpoisoned;
 
     use super::{
-        normalize_type_name, receiver_stream, recent_slow_queries, record_slow_query,
-        slow_query_log, spawn_stream_task, DbRecord, Result, SlowQueryEntry,
+        n_plus_one_log, normalize_type_name, receiver_stream, recent_n_plus_one_suspects,
+        recent_slow_queries, record_slow_query, record_sql_observation, scope_http_sql_query_trace,
+        slow_query_log, spawn_stream_task, sql_fingerprint, sql_observability_snapshot, DbRecord,
+        Result, SlowQueryEntry,
     };
+
+    fn sql_observability_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn normalize_type_name_maps_array_aliases_to_internal_lookup_keys() {
@@ -1726,6 +2158,7 @@ mod tests {
 
     #[test]
     fn slow_query_log_recovers_after_poison() {
+        let _guard = sql_observability_test_lock().blocking_lock();
         lock_unpoisoned(slow_query_log(), "slow query log test setup").clear();
 
         let result = catch_sync_panic(|| {
@@ -1751,6 +2184,182 @@ mod tests {
             && query.label.as_deref() == Some("poison-recovery")));
 
         *lock_unpoisoned(slow_query_log(), "slow query log test cleanup") = VecDeque::new();
+    }
+
+    #[test]
+    fn sql_fingerprint_normalizes_bindings_literals_and_whitespace() {
+        assert_eq!(
+            sql_fingerprint(
+                r#"SELECT  * FROM "users" WHERE id = $1 AND email = 'USER@example.com' LIMIT 10"#
+            ),
+            r#"select * from "users" where id = ? and email = ? limit ?"#
+        );
+        assert_eq!(
+            sql_fingerprint("select * from api_v2_users where token = ? and score > 42.5"),
+            "select * from api_v2_users where token = ? and score > ?"
+        );
+    }
+
+    #[test]
+    fn sql_observability_snapshot_summarizes_and_ranks_slow_queries() {
+        let _guard = sql_observability_test_lock().blocking_lock();
+        lock_unpoisoned(slow_query_log(), "slow query snapshot setup").clear();
+        lock_unpoisoned(n_plus_one_log(), "n+1 snapshot setup").clear();
+
+        record_slow_query("SELECT slow", 750, Some("slow"));
+        record_slow_query("SELECT slower", 1_200, None);
+
+        let snapshot = sql_observability_snapshot(500);
+        assert_eq!(snapshot.stats.retained_count, 2);
+        assert_eq!(snapshot.stats.capacity, 100);
+        assert_eq!(snapshot.stats.slow_query_threshold_ms, 500);
+        assert_eq!(snapshot.stats.max_duration_ms, Some(1_200));
+        assert_eq!(snapshot.stats.avg_duration_ms, Some(975));
+        assert!(snapshot.stats.latest_recorded_at.is_some());
+        assert_eq!(snapshot.top_slowest[0].sql, "SELECT slower");
+        assert_eq!(snapshot.top_slowest[1].sql, "SELECT slow");
+
+        lock_unpoisoned(slow_query_log(), "slow query snapshot cleanup").clear();
+    }
+
+    #[tokio::test]
+    async fn http_query_trace_records_n_plus_one_suspects_at_threshold() {
+        use crate::config::DatabaseConfig;
+
+        let _guard = sql_observability_test_lock().lock().await;
+        lock_unpoisoned(n_plus_one_log(), "n+1 threshold setup").clear();
+
+        let config = DatabaseConfig {
+            n_plus_one_min_repeats: 3,
+            n_plus_one_retention: 5,
+            ..DatabaseConfig::default()
+        };
+        scope_http_sql_query_trace(
+            Some(config),
+            "GET".to_string(),
+            "/users".to_string(),
+            Some("req-n-plus-one".to_string()),
+            async {
+                for _ in 0..3 {
+                    record_sql_observation(
+                        "SELECT * FROM users WHERE id = $1",
+                        12,
+                        Some("user.lookup"),
+                        "query",
+                        1,
+                    );
+                }
+            },
+        )
+        .await;
+
+        let suspects = recent_n_plus_one_suspects();
+        assert_eq!(suspects.len(), 1);
+        let suspect = &suspects[0];
+        assert_eq!(suspect.method, "GET");
+        assert_eq!(suspect.path, "/users");
+        assert_eq!(suspect.request_id.as_deref(), Some("req-n-plus-one"));
+        assert_eq!(suspect.repeat_count, 3);
+        assert_eq!(suspect.total_duration_ms, 36);
+        assert_eq!(suspect.max_duration_ms, 12);
+        assert_eq!(suspect.avg_duration_ms, 12);
+        assert_eq!(suspect.rows_total, 3);
+        assert_eq!(suspect.labels, vec!["user.lookup"]);
+        assert_eq!(suspect.kinds, vec!["query"]);
+        assert_eq!(suspect.fingerprint, "select * from users where id = ?");
+
+        lock_unpoisoned(n_plus_one_log(), "n+1 threshold cleanup").clear();
+    }
+
+    #[tokio::test]
+    async fn query_trace_flushes_when_http_scope_panics() {
+        use crate::config::DatabaseConfig;
+
+        let _guard = sql_observability_test_lock().lock().await;
+        lock_unpoisoned(n_plus_one_log(), "n+1 panic setup").clear();
+
+        let config = DatabaseConfig {
+            n_plus_one_min_repeats: 2,
+            n_plus_one_retention: 5,
+            ..DatabaseConfig::default()
+        };
+        let result: std::result::Result<(), _> = catch_future_panic(scope_http_sql_query_trace(
+            Some(config),
+            "GET".to_string(),
+            "/panic".to_string(),
+            Some("req-panic".to_string()),
+            async {
+                for _ in 0..2 {
+                    record_sql_observation(
+                        "SELECT * FROM users WHERE id = $1",
+                        20,
+                        Some("user.lookup"),
+                        "query",
+                        1,
+                    );
+                }
+                panic!("request exploded");
+            },
+        ))
+        .await;
+
+        assert!(result.is_err());
+        let suspects = recent_n_plus_one_suspects();
+        assert_eq!(suspects.len(), 1);
+        assert_eq!(suspects[0].path, "/panic");
+        assert_eq!(suspects[0].repeat_count, 2);
+
+        lock_unpoisoned(n_plus_one_log(), "n+1 panic cleanup").clear();
+    }
+
+    #[tokio::test]
+    async fn query_trace_ignores_repeats_below_threshold() {
+        use crate::config::DatabaseConfig;
+
+        let _guard = sql_observability_test_lock().lock().await;
+        lock_unpoisoned(n_plus_one_log(), "n+1 below setup").clear();
+
+        let config = DatabaseConfig {
+            n_plus_one_min_repeats: 4,
+            n_plus_one_retention: 5,
+            ..DatabaseConfig::default()
+        };
+        scope_http_sql_query_trace(
+            Some(config),
+            "GET".to_string(),
+            "/users".to_string(),
+            Some("req-below".to_string()),
+            async {
+                for _ in 0..3 {
+                    record_sql_observation(
+                        "SELECT * FROM users WHERE id = $1",
+                        12,
+                        None,
+                        "query",
+                        1,
+                    );
+                }
+            },
+        )
+        .await;
+
+        assert!(recent_n_plus_one_suspects().is_empty());
+    }
+
+    #[test]
+    fn query_trace_does_not_record_outside_http_scope() {
+        let _guard = sql_observability_test_lock().blocking_lock();
+        lock_unpoisoned(n_plus_one_log(), "n+1 outside setup").clear();
+
+        record_sql_observation(
+            "SELECT * FROM scheduled_jobs WHERE id = $1",
+            15,
+            Some("scheduler"),
+            "query",
+            1,
+        );
+
+        assert!(recent_n_plus_one_suspects().is_empty());
     }
 
     #[tokio::test]

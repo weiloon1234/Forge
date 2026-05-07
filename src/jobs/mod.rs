@@ -184,14 +184,25 @@ pub struct JobContext {
     app: AppContext,
     queue: QueueId,
     attempt: u32,
+    trace: Option<crate::logging::TraceContext>,
 }
 
 impl JobContext {
     fn new(app: AppContext, queue: QueueId, attempt: u32) -> Self {
+        Self::new_with_trace(app, queue, attempt, crate::logging::current_trace_context())
+    }
+
+    fn new_with_trace(
+        app: AppContext,
+        queue: QueueId,
+        attempt: u32,
+        trace: Option<crate::logging::TraceContext>,
+    ) -> Self {
         Self {
             app,
             queue,
             attempt,
+            trace,
         }
     }
 
@@ -205,6 +216,16 @@ impl JobContext {
 
     pub fn attempt(&self) -> u32 {
         self.attempt
+    }
+
+    pub fn trace_id(&self) -> Option<&str> {
+        self.trace.as_ref().map(|trace| trace.trace_id.as_str())
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.trace
+            .as_ref()
+            .and_then(|trace| trace.request_id.as_deref())
     }
 }
 
@@ -368,12 +389,16 @@ impl JobDispatcher {
             let queue = J::QUEUE
                 .clone()
                 .unwrap_or_else(|| self.runtime.config.queue.clone());
+            let trace = crate::logging::trace_context_for_child(
+                crate::logging::current_execution_trace_parent(),
+            );
             let envelope = JobEnvelope {
                 job: J::ID,
                 queue: queue.clone(),
                 attempts: 0,
                 scheduled_at: run_at_millis,
                 payload: serde_json::to_value(job).map_err(Error::other)?,
+                trace: Some(trace),
                 batch_id: None,
                 chain_remaining: None,
             };
@@ -470,6 +495,9 @@ impl JobBatchBuilder {
         }
 
         let batch_id = format!("batch-{}-{}", self.name, next_delivery_token());
+        let trace = crate::logging::trace_context_for_child(
+            crate::logging::current_execution_trace_parent(),
+        );
         let on_complete_payload = match &self.on_complete {
             Some((job_id, queue, payload)) => {
                 let envelope = JobEnvelope {
@@ -478,6 +506,7 @@ impl JobBatchBuilder {
                     attempts: 0,
                     scheduled_at: 0,
                     payload: payload.clone(),
+                    trace: Some(trace.clone()),
                     batch_id: None,
                     chain_remaining: None,
                 };
@@ -496,6 +525,7 @@ impl JobBatchBuilder {
                 attempts: 0,
                 scheduled_at: now,
                 payload,
+                trace: Some(trace.clone()),
                 batch_id: Some(batch_id.clone()),
                 chain_remaining: None,
             };
@@ -578,12 +608,16 @@ impl JobChainBuilder {
         };
 
         let now = Utc::now().timestamp_millis();
+        let trace = crate::logging::trace_context_for_child(
+            crate::logging::current_execution_trace_parent(),
+        );
         let envelope = JobEnvelope {
             job: first.job,
             queue: first.queue.clone(),
             attempts: 0,
             scheduled_at: now,
             payload: first.payload,
+            trace: Some(trace),
             batch_id: None,
             chain_remaining: remaining,
         };
@@ -803,16 +837,25 @@ impl Worker {
         let envelope: JobEnvelope = match serde_json::from_str(&lease.payload) {
             Ok(envelope) => envelope,
             Err(error) => {
+                let trace_context = crate::logging::TraceContext::generated().with_parent(Some(
+                    crate::logging::TraceParent::new("job", lease.token.clone()),
+                ));
                 let poison_envelope = JobEnvelope {
                     job: INVALID_JOB_ENVELOPE_ID,
                     queue: lease.queue.clone(),
                     attempts: 0,
                     scheduled_at: started_at,
                     payload: serde_json::Value::String(lease.payload.clone()),
+                    trace: Some(trace_context.clone()),
                     batch_id: None,
                     chain_remaining: None,
                 };
-                let job_context = JobContext::new(self.app.clone(), lease.queue.clone(), 1);
+                let job_context = JobContext::new_with_trace(
+                    self.app.clone(),
+                    lease.queue.clone(),
+                    1,
+                    Some(trace_context),
+                );
                 self.dead_letter_claimed_job(DeadLetterClaimedJob {
                     lease: &lease,
                     envelope: poison_envelope,
@@ -838,11 +881,28 @@ impl Worker {
                 return Ok(());
             }
         };
+        let trace_context = envelope
+            .trace
+            .clone()
+            .unwrap_or_else(crate::logging::TraceContext::generated)
+            .with_parent(Some(crate::logging::TraceParent::new(
+                "job",
+                lease.token.clone(),
+            )));
+        let envelope = JobEnvelope {
+            trace: Some(trace_context.clone()),
+            ..envelope
+        };
         let context = ClaimedJobContext::from_envelope(&lease, &envelope, envelope.attempts + 1);
         let Some(registration) = self.runtime.registry.jobs.get(&envelope.job) else {
             let attempts = envelope.attempts + 1;
             let context = ClaimedJobContext::from_envelope(&lease, &envelope, attempts);
-            let job_context = JobContext::new(self.app.clone(), envelope.queue.clone(), attempts);
+            let job_context = JobContext::new_with_trace(
+                self.app.clone(),
+                envelope.queue.clone(),
+                attempts,
+                Some(trace_context.clone()),
+            );
             let error = format!("job `{}` is not registered", envelope.job);
             self.dead_letter_claimed_job(DeadLetterClaimedJob {
                 lease: &lease,
@@ -925,28 +985,36 @@ impl Worker {
             }
         }
 
-        let job_context = JobContext::new(
+        let job_context = JobContext::new_with_trace(
             self.app.clone(),
             envelope.queue.clone(),
             envelope.attempts + 1,
+            Some(trace_context.clone()),
         );
 
         // Before hooks
         if let Some(ref mw) = middleware {
-            mw.run_before(&envelope.job, &job_context).await;
+            crate::logging::scope_current_trace(
+                trace_context.clone(),
+                mw.run_before(&envelope.job, &job_context),
+            )
+            .await;
         }
 
         let default_timeout = Duration::from_secs(self.runtime.config.timeout_seconds.max(1));
-        let execution = crate::logging::scope_current_execution(
-            crate::logging::ExecutionContext::Job {
-                class: envelope.job.to_string(),
-                id: lease.token.clone(),
-            },
-            registration.handler.execute(
-                &self.app,
-                &envelope,
-                self.runtime.config.max_retries,
-                default_timeout,
+        let execution = crate::logging::scope_current_trace(
+            trace_context.clone(),
+            crate::logging::scope_current_execution(
+                crate::logging::ExecutionContext::Job {
+                    class: envelope.job.to_string(),
+                    id: lease.token.clone(),
+                },
+                registration.handler.execute(
+                    &self.app,
+                    &envelope,
+                    self.runtime.config.max_retries,
+                    default_timeout,
+                ),
             ),
         )
         .await;
@@ -955,12 +1023,19 @@ impl Worker {
         match execution {
             JobExecutionOutcome::Success => {
                 if let Some(ref mw) = middleware {
-                    mw.run_after(&envelope.job, &job_context).await;
+                    crate::logging::scope_current_trace(
+                        trace_context.clone(),
+                        mw.run_after(&envelope.job, &job_context),
+                    )
+                    .await;
                 }
                 let chain_effect = claimed_job_result(
                     ClaimedJobPhase::BuildChainContinuation,
                     &context,
-                    Self::build_chain_continuation(envelope.chain_remaining.clone()),
+                    Self::build_chain_continuation(
+                        envelope.chain_remaining.clone(),
+                        Some(trace_context.clone()),
+                    ),
                 )?;
                 let success = claimed_job_result(
                     ClaimedJobPhase::SuccessFinalization,
@@ -1008,6 +1083,7 @@ impl Worker {
                     error: None,
                     started_at,
                     duration_ms,
+                    payload: job_history_trace_payload(&envelope),
                 })
                 .await;
 
@@ -1064,7 +1140,11 @@ impl Worker {
                 error,
             } => {
                 if let Some(ref mw) = middleware {
-                    mw.run_failed(&envelope.job, &job_context, &error).await;
+                    crate::logging::scope_current_trace(
+                        trace_context.clone(),
+                        mw.run_failed(&envelope.job, &job_context, &error),
+                    )
+                    .await;
                 }
                 let retry_job_id = envelope.job.clone();
                 let retry_queue = envelope.queue.clone();
@@ -1114,6 +1194,7 @@ impl Worker {
                     error: Some(&error),
                     started_at,
                     duration_ms,
+                    payload: job_history_trace_payload(&retry_envelope),
                 })
                 .await;
 
@@ -1121,7 +1202,11 @@ impl Worker {
             }
             JobExecutionOutcome::DeadLetter { error, attempts } => {
                 if let Some(ref mw) = middleware {
-                    mw.run_failed(&envelope.job, &job_context, &error).await;
+                    crate::logging::scope_current_trace(
+                        trace_context.clone(),
+                        mw.run_failed(&envelope.job, &job_context, &error),
+                    )
+                    .await;
                 }
                 let job_name = envelope.job.clone();
                 let queue_name = envelope.queue.clone();
@@ -1180,18 +1265,22 @@ impl Worker {
                     error: Some(&error),
                     started_at,
                     duration_ms,
+                    payload: job_history_trace_payload(&dead_letter.envelope),
                 })
                 .await;
 
                 if let Some(ref mw) = middleware {
-                    mw.run_dead_lettered(&JobDeadLetterContext {
-                        class: job_name.to_string(),
-                        id: lease.token.clone(),
-                        attempts,
-                        last_error: error.clone(),
-                        payload: payload_json,
-                        app: self.app.clone(),
-                    })
+                    crate::logging::scope_current_trace(
+                        trace_context,
+                        mw.run_dead_lettered(&JobDeadLetterContext {
+                            class: job_name.to_string(),
+                            id: lease.token.clone(),
+                            attempts,
+                            last_error: error.clone(),
+                            payload: payload_json,
+                            app: self.app.clone(),
+                        }),
+                    )
                     .await;
                 }
 
@@ -1212,9 +1301,12 @@ impl Worker {
         } = job;
 
         if let (Some(middleware), Some(job_context)) = (middleware, job_context) {
-            middleware
-                .run_failed(&envelope.job, job_context, &error)
-                .await;
+            let failed = middleware.run_failed(&envelope.job, job_context, &error);
+            if let Some(trace_context) = envelope.trace.clone() {
+                crate::logging::scope_current_trace(trace_context, failed).await;
+            } else {
+                failed.await;
+            }
         }
 
         let job_name = envelope.job.clone();
@@ -1263,20 +1355,25 @@ impl Worker {
             error: Some(&error),
             started_at,
             duration_ms,
+            payload: job_history_trace_payload(&dead_letter.envelope),
         })
         .await;
 
         if let Some(middleware) = middleware {
-            middleware
-                .run_dead_lettered(&JobDeadLetterContext {
-                    class: job_name.to_string(),
-                    id: lease.token.clone(),
-                    attempts,
-                    last_error: error,
-                    payload: payload_json,
-                    app: self.app.clone(),
-                })
-                .await;
+            let dead_letter_context = JobDeadLetterContext {
+                class: job_name.to_string(),
+                id: lease.token.clone(),
+                attempts,
+                last_error: error,
+                payload: payload_json,
+                app: self.app.clone(),
+            };
+            let dead_lettered = middleware.run_dead_lettered(&dead_letter_context);
+            if let Some(trace_context) = dead_letter.envelope.trace {
+                crate::logging::scope_current_trace(trace_context, dead_lettered).await;
+            } else {
+                dead_lettered.await;
+            }
         }
 
         Ok(())
@@ -1288,6 +1385,7 @@ impl Worker {
 
     fn build_chain_continuation(
         remaining: Option<Vec<ChainedJob>>,
+        trace: Option<crate::logging::TraceContext>,
     ) -> Result<Option<JobToEnqueue>> {
         let Some(mut remaining) = remaining else {
             return Ok(None);
@@ -1310,6 +1408,7 @@ impl Worker {
             attempts: 0,
             scheduled_at: now,
             payload: next.payload,
+            trace,
             batch_id: None,
             chain_remaining,
         };
@@ -1530,6 +1629,14 @@ struct JobHistoryEntry<'a> {
     error: Option<&'a str>,
     started_at: i64,
     duration_ms: i64,
+    payload: Option<serde_json::Value>,
+}
+
+fn job_history_trace_payload(envelope: &JobEnvelope) -> Option<serde_json::Value> {
+    envelope
+        .trace
+        .as_ref()
+        .map(|trace| serde_json::json!({ "trace": trace }))
 }
 
 impl Worker {
@@ -1542,6 +1649,7 @@ impl Worker {
             error,
             started_at,
             duration_ms,
+            payload,
         } = entry;
         if !self.runtime.config.track_history {
             return;
@@ -1555,11 +1663,14 @@ impl Worker {
 
         if let Err(error) = db
             .raw_execute(
-                "INSERT INTO job_history (job_id, queue, status, attempt, error, started_at, completed_at, duration_ms) VALUES ($1, $2, $3, $4, $5, to_timestamp($6::double precision / 1000), NOW(), $7)",
+                "INSERT INTO job_history (job_id, queue, status, payload, attempt, error, started_at, completed_at, duration_ms) VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::double precision / 1000), NOW(), $8)",
                 &[
                     DbValue::Text(job_id.to_string()),
                     DbValue::Text(queue.to_string()),
                     DbValue::Text(status.to_string()),
+                    payload
+                        .map(DbValue::Json)
+                        .unwrap_or(DbValue::Null(DbType::Json)),
                     DbValue::Int32(attempt as i32),
                     if let Some(e) = error {
                         DbValue::Text(e.to_string())
@@ -1910,6 +2021,8 @@ struct JobEnvelope {
     attempts: u32,
     scheduled_at: i64,
     payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<crate::logging::TraceContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3173,6 +3286,26 @@ mod tests {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
+    struct TraceCaptureJob {
+        tag: String,
+    }
+
+    #[async_trait]
+    impl Job for TraceCaptureJob {
+        const ID: JobId = JobId::new("trace.capture.job");
+
+        async fn handle(&self, context: JobContext) -> crate::Result<()> {
+            append_log(format!(
+                "{}:{}:{}",
+                self.tag,
+                context.trace_id().unwrap_or("none"),
+                context.request_id().unwrap_or("none")
+            ));
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
     struct CompletionJob {
         tag: String,
         label: String,
@@ -3219,6 +3352,7 @@ mod tests {
         let mut registry = JobRegistryBuilder::default();
         registry.register::<FailingJob>().unwrap();
         registry.register::<StepJob>().unwrap();
+        registry.register::<TraceCaptureJob>().unwrap();
         registry.register::<CompletionJob>().unwrap();
         registry.register::<RateLimitedJob>().unwrap();
 
@@ -3289,6 +3423,7 @@ mod tests {
             attempts: 0,
             scheduled_at: chrono::Utc::now().timestamp_millis(),
             payload: serde_json::json!({ "id": 123 }),
+            trace: None,
             batch_id: None,
             chain_remaining: None,
         };
@@ -3372,6 +3507,29 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatched_job_preserves_current_trace_context() {
+        let tag = "trace-dispatch";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("trace-dispatch");
+        let app = build_app(runtime, diagnostics);
+
+        crate::logging::scope_current_trace(
+            crate::logging::TraceContext::http("req-job-trace".to_string()),
+            dispatcher.dispatch(TraceCaptureJob { tag: tag.into() }),
+        )
+        .await
+        .unwrap();
+
+        let worker = Worker::from_app(app).unwrap();
+        assert!(worker.run_once().await.unwrap());
+
+        assert_eq!(
+            read_log_filtered(&format!("{tag}:")),
+            vec!["req-job-trace:req-job-trace"]
+        );
     }
 
     #[tokio::test]
@@ -3505,6 +3663,7 @@ mod tests {
             attempts: 0,
             scheduled_at: chrono::Utc::now().timestamp_millis(),
             payload: serde_json::to_value(first).unwrap(),
+            trace: None,
             batch_id: None,
             chain_remaining: Some(vec![ChainedJob {
                 job: StepJob::ID,
@@ -3552,6 +3711,7 @@ mod tests {
             attempts: 0,
             scheduled_at: chrono::Utc::now().timestamp_millis(),
             payload: serde_json::to_value(RateLimitedJob { tag: tag.into() }).unwrap(),
+            trace: None,
             batch_id: None,
             chain_remaining: None,
         };
@@ -3629,6 +3789,7 @@ mod tests {
             attempts: 0,
             scheduled_at: chrono::Utc::now().timestamp_millis(),
             payload: serde_json::to_value(duplicate).unwrap(),
+            trace: None,
             batch_id: Some(batch_id),
             chain_remaining: None,
         };

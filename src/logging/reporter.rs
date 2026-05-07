@@ -13,7 +13,10 @@ use crate::foundation::AppContext;
 use crate::jobs::{JobDeadLetterContext, JobMiddleware};
 use crate::support::sync::lock_unpoisoned;
 
-use super::{catch_async_panic, current_execution, CurrentRequest, ExecutionContext};
+use super::{
+    catch_async_panic, current_execution, current_trace_context, scope_current_trace,
+    CurrentRequest, ExecutionContext, TraceContext,
+};
 
 #[async_trait]
 pub trait ErrorReporter: Send + Sync + 'static {
@@ -139,6 +142,17 @@ where
     }
 }
 
+async fn deliver_with_trace_context<F, T>(trace_context: Option<TraceContext>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    if let Some(trace_context) = trace_context {
+        scope_current_trace(trace_context, future).await
+    } else {
+        future.await
+    }
+}
+
 fn error_reporter_delivery_active() -> bool {
     ERROR_REPORTER_DELIVERY.try_with(|_| ()).is_ok()
 }
@@ -174,12 +188,22 @@ pub(crate) async fn report_handler_error_response(
         return;
     };
 
+    let trace_context = current_trace_context().or_else(|| {
+        request
+            .request_id
+            .as_ref()
+            .map(|request_id| TraceContext::http(request_id.clone()))
+    });
+    let trace_id = trace_context
+        .as_ref()
+        .map(|context| context.trace_id.clone());
     if extension.status >= 500 {
         tracing::error!(
             method = %method,
             path = %path,
             status = extension.status,
             request_id = ?request.request_id,
+            trace_id = ?trace_id,
             error = %extension.error,
             chain = ?extension.chain,
             "Handler returned server error response"
@@ -190,6 +214,7 @@ pub(crate) async fn report_handler_error_response(
             path = %path,
             status = extension.status,
             request_id = ?request.request_id,
+            trace_id = ?trace_id,
             error = %extension.error,
             chain = ?extension.chain,
             "Handler returned client error response"
@@ -211,7 +236,7 @@ pub(crate) async fn report_handler_error_response(
         request_id: request.request_id.clone(),
     };
 
-    registry.report_handler_error(report).await;
+    deliver_with_trace_context(trace_context, registry.report_handler_error(report)).await;
 }
 
 pub(crate) async fn report_job_dead_lettered(app: &AppContext, report: JobDeadLetteredReport) {
@@ -219,7 +244,11 @@ pub(crate) async fn report_job_dead_lettered(app: &AppContext, report: JobDeadLe
         return;
     };
 
-    registry.report_job_dead_lettered(report).await;
+    deliver_with_trace_context(
+        current_trace_context(),
+        registry.report_job_dead_lettered(report),
+    )
+    .await;
 }
 
 pub(crate) fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
@@ -261,10 +290,11 @@ pub(crate) fn report_panic_from_hook(message: String, location: String) {
             .map(panic_context_from_execution)
             .unwrap_or(PanicContext::Other),
     };
+    let trace_context = current_trace_context();
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
-            registry.report_panic(report).await;
+            deliver_with_trace_context(trace_context, registry.report_panic(report)).await;
         });
     }
 }
@@ -330,19 +360,34 @@ mod tests {
         handler_reports: Mutex<Vec<HandlerErrorReport>>,
         panic_reports: Mutex<Vec<PanicReport>>,
         dead_letter_reports: Mutex<Vec<JobDeadLetteredReport>>,
+        handler_trace_ids: Mutex<Vec<Option<String>>>,
+        panic_trace_ids: Mutex<Vec<Option<String>>>,
+        dead_letter_trace_ids: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait]
     impl ErrorReporter for StubReporter {
         async fn report_handler_error(&self, report: HandlerErrorReport) {
+            self.handler_trace_ids
+                .lock()
+                .unwrap()
+                .push(crate::logging::current_trace_id());
             self.handler_reports.lock().unwrap().push(report);
         }
 
         async fn report_panic(&self, report: PanicReport) {
+            self.panic_trace_ids
+                .lock()
+                .unwrap()
+                .push(crate::logging::current_trace_id());
             self.panic_reports.lock().unwrap().push(report);
         }
 
         async fn report_job_dead_lettered(&self, report: JobDeadLetteredReport) {
+            self.dead_letter_trace_ids
+                .lock()
+                .unwrap()
+                .push(crate::logging::current_trace_id());
             self.dead_letter_reports.lock().unwrap().push(report);
         }
     }
@@ -470,6 +515,10 @@ mod tests {
         assert_eq!(reports[0].status, 500);
         assert_eq!(reports[0].request_id.as_deref(), Some("req-handler"));
         assert_eq!(
+            reporter.handler_trace_ids.lock().unwrap().as_slice(),
+            &[Some("req-handler".to_string())]
+        );
+        assert_eq!(
             reports[0]
                 .origin
                 .as_ref()
@@ -486,14 +535,17 @@ mod tests {
         let registry = Arc::new(ErrorReporterRegistry::new(vec![reporter.clone()]));
         set_global_panic_reporters(registry);
 
-        crate::logging::scope_current_execution(
-            ExecutionContext::Job {
-                class: "email.send".to_string(),
-                id: "job-1".to_string(),
-            },
-            async {
-                report_panic_from_hook("oops".to_string(), "src/tests.rs:1".to_string());
-            },
+        crate::logging::scope_current_trace(
+            crate::logging::TraceContext::new("trace-panic"),
+            crate::logging::scope_current_execution(
+                ExecutionContext::Job {
+                    class: "email.send".to_string(),
+                    id: "job-1".to_string(),
+                },
+                async {
+                    report_panic_from_hook("oops".to_string(), "src/tests.rs:1".to_string());
+                },
+            ),
         )
         .await;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -510,6 +562,11 @@ mod tests {
             }
             other => panic!("unexpected panic context: {other:?}"),
         }
+        assert!(reporter
+            .panic_trace_ids
+            .lock()
+            .unwrap()
+            .contains(&Some("trace-panic".to_string())));
     }
 
     #[tokio::test]

@@ -20,6 +20,8 @@ struct JobContext
   fn app(&self) -> &AppContext
   fn queue(&self) -> &QueueId
   fn attempt(&self) -> u32
+  fn trace_id(&self) -> Option<&str>
+  fn request_id(&self) -> Option<&str>
 struct JobDeadLetterContext
 struct JobDispatcher
   async fn dispatch<J>(&self, job: J) -> Result<()>

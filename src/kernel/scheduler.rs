@@ -131,18 +131,23 @@ impl SchedulerKernel {
             let schedule_id = task_id.clone();
             let panic_schedule_id = schedule_id.clone();
             let handle = tokio::spawn(async move {
-                let result = catch_future_panic(crate::logging::scope_current_execution(
-                    crate::logging::ExecutionContext::Scheduler {
-                        id: schedule_id.to_string(),
-                    },
-                    run_spawned_schedule_task(
-                        schedule_id,
-                        kind_label,
-                        app,
-                        handler,
-                        options,
-                        backend,
-                        diagnostics,
+                let execution_id = schedule_id.to_string();
+                let trace_context = crate::logging::TraceContext::generated().with_parent(Some(
+                    crate::logging::TraceParent::new("scheduler", execution_id.clone()),
+                ));
+                let result = catch_future_panic(crate::logging::scope_current_trace(
+                    trace_context,
+                    crate::logging::scope_current_execution(
+                        crate::logging::ExecutionContext::Scheduler { id: execution_id },
+                        run_spawned_schedule_task(
+                            schedule_id,
+                            kind_label,
+                            app,
+                            handler,
+                            options,
+                            backend,
+                            diagnostics,
+                        ),
                     ),
                 ))
                 .await;
@@ -1027,15 +1032,19 @@ mod tests {
     #[tokio::test]
     async fn scheduler_execution_context_is_scoped_for_schedule_lifecycle() {
         let saw_context = Arc::new(AtomicBool::new(false));
+        let saw_trace = Arc::new(AtomicBool::new(false));
         let schedule_saw_context = saw_context.clone();
+        let schedule_saw_trace = saw_trace.clone();
         let kernel = crate::App::builder()
             .register_schedule(move |registry| {
                 let saw_context = schedule_saw_context.clone();
+                let saw_trace = schedule_saw_trace.clone();
                 registry.cron(
                     ScheduleId::new("scheduler.context.visible"),
                     CronExpression::every_minute()?,
                     move |_| {
                         let saw_context = saw_context.clone();
+                        let saw_trace = saw_trace.clone();
                         async move {
                             if matches!(
                                 crate::logging::current_execution(),
@@ -1043,6 +1052,12 @@ mod tests {
                                     if id == "scheduler.context.visible"
                             ) {
                                 saw_context.store(true, Ordering::SeqCst);
+                            }
+                            if crate::logging::current_trace_id()
+                                .as_deref()
+                                .is_some_and(|trace_id| trace_id.starts_with("forge-trace-"))
+                            {
+                                saw_trace.store(true, Ordering::SeqCst);
                             }
                             Ok(())
                         }
@@ -1060,6 +1075,7 @@ mod tests {
             .unwrap();
 
         wait_for_flag(&saw_context).await;
+        wait_for_flag(&saw_trace).await;
         kernel.prune_finished_tasks().await;
     }
 }

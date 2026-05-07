@@ -1,7 +1,9 @@
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::Actor;
 use crate::http::middleware::RealIp;
@@ -34,6 +36,21 @@ pub(crate) enum ExecutionContext {
     Other,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TraceContext {
+    pub trace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<TraceParent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TraceParent {
+    pub kind: String,
+    pub id: String,
+}
+
 tokio::task_local! {
     static CURRENT_REQUEST: CurrentRequest;
 }
@@ -44,6 +61,10 @@ tokio::task_local! {
 
 tokio::task_local! {
     static CURRENT_EXECUTION: ExecutionContext;
+}
+
+tokio::task_local! {
+    static CURRENT_TRACE: TraceContext;
 }
 
 impl CurrentRequest {
@@ -73,6 +94,42 @@ impl CurrentRequest {
     }
 }
 
+impl TraceContext {
+    pub(crate) fn new(trace_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            request_id: None,
+            parent: None,
+        }
+    }
+
+    pub(crate) fn http(request_id: String) -> Self {
+        Self {
+            trace_id: request_id.clone(),
+            request_id: Some(request_id),
+            parent: None,
+        }
+    }
+
+    pub(crate) fn generated() -> Self {
+        Self::new(generate_trace_id())
+    }
+
+    pub(crate) fn with_parent(mut self, parent: Option<TraceParent>) -> Self {
+        self.parent = parent;
+        self
+    }
+}
+
+impl TraceParent {
+    pub(crate) fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
+    }
+}
+
 impl<S> FromRequestParts<S> for CurrentRequest
 where
     S: Send + Sync,
@@ -96,6 +153,24 @@ pub(crate) fn current_execution() -> Option<ExecutionContext> {
     CURRENT_EXECUTION.try_with(|context| context.clone()).ok()
 }
 
+pub(crate) fn current_trace_context() -> Option<TraceContext> {
+    CURRENT_TRACE.try_with(|context| context.clone()).ok()
+}
+
+pub fn current_trace_id() -> Option<String> {
+    current_trace_context().map(|context| context.trace_id)
+}
+
+pub(crate) fn current_execution_trace_parent() -> Option<TraceParent> {
+    current_execution().and_then(|context| trace_parent_from_execution(&context))
+}
+
+pub(crate) fn trace_context_for_child(parent: Option<TraceParent>) -> TraceContext {
+    current_trace_context()
+        .unwrap_or_else(TraceContext::generated)
+        .with_parent(parent)
+}
+
 pub(crate) async fn scope_current_request<F, T>(request: CurrentRequest, future: F) -> T
 where
     F: std::future::Future<Output = T>,
@@ -115,4 +190,27 @@ where
     F: std::future::Future<Output = T>,
 {
     CURRENT_EXECUTION.scope(context, future).await
+}
+
+pub(crate) async fn scope_current_trace<F, T>(context: TraceContext, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT_TRACE.scope(context, future).await
+}
+
+fn trace_parent_from_execution(context: &ExecutionContext) -> Option<TraceParent> {
+    match context {
+        ExecutionContext::Http { request_id, .. } => request_id
+            .as_ref()
+            .map(|request_id| TraceParent::new("http", request_id.clone())),
+        ExecutionContext::Job { id, .. } => Some(TraceParent::new("job", id.clone())),
+        ExecutionContext::Scheduler { id } => Some(TraceParent::new("scheduler", id.clone())),
+        ExecutionContext::Other => None,
+    }
+}
+
+fn generate_trace_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    format!("forge-trace-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }

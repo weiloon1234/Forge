@@ -139,6 +139,8 @@ struct FailedJobResponse {
     completed_at: Option<String>,
     duration_ms: Option<i64>,
     created_at: Option<String>,
+    request_id: Option<String>,
+    trace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,7 +351,7 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
 
     match db
         .raw_query(
-            "SELECT job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at FROM job_history WHERE status IN ('dead_lettered', 'retried') ORDER BY created_at DESC LIMIT 50",
+            "SELECT job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at, payload #>> '{trace,request_id}' AS request_id, payload #>> '{trace,trace_id}' AS trace_id FROM job_history WHERE status IN ('dead_lettered', 'retried') ORDER BY created_at DESC LIMIT 50",
             &[],
         )
         .await
@@ -368,6 +370,8 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
                         completed_at: db_string(row.get("completed_at")),
                         duration_ms: db_i64(row.get("duration_ms")),
                         created_at: db_string(row.get("created_at")),
+                        request_id: db_string(row.get("request_id")),
+                        trace_id: db_string(row.get("trace_id")),
                     }
                 })
                 .collect();

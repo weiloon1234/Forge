@@ -7,7 +7,10 @@ use tracing::Instrument;
 
 use super::context::CurrentRequest;
 use super::request_id::{generate_request_id, RequestId, REQUEST_ID_HEADER};
-use super::{catch_future_panic, panic_payload_message, scope_current_request};
+use super::{
+    catch_future_panic, panic_payload_message, scope_current_request, scope_current_trace,
+    TraceContext,
+};
 use crate::foundation::AppContext;
 
 pub(crate) async fn request_context_middleware(
@@ -38,27 +41,32 @@ pub(crate) async fn request_context_middleware(
         "forge.http.request",
         method = %method,
         path = %path,
-        request_id = %request_id
+        request_id = %request_id,
+        trace_id = %request_id
     );
 
     let locale = resolve_request_locale(&request, &app);
     let start = std::time::Instant::now();
+    let trace_context = TraceContext::http(request_id.clone());
     let execution_context = super::ExecutionContext::Http {
         method: method.to_string(),
         path: path.clone(),
         request_id: Some(request_id.clone()),
     };
     let database_config = app.config().database().ok();
-    let response = crate::database::scope_http_sql_query_trace(
-        database_config,
-        method.to_string(),
-        path.clone(),
-        Some(request_id.clone()),
-        super::scope_current_execution(
-            execution_context,
-            crate::database::scope_model_extensions(
-                crate::translations::CURRENT_LOCALE
-                    .scope(locale, next.run(request).instrument(span)),
+    let response = scope_current_trace(
+        trace_context,
+        crate::database::scope_http_sql_query_trace(
+            database_config,
+            method.to_string(),
+            path.clone(),
+            Some(request_id.clone()),
+            super::scope_current_execution(
+                execution_context,
+                crate::database::scope_model_extensions(
+                    crate::translations::CURRENT_LOCALE
+                        .scope(locale, next.run(request).instrument(span)),
+                ),
             ),
         ),
     );
@@ -70,6 +78,7 @@ pub(crate) async fn request_context_middleware(
                 method = %method,
                 path = %path,
                 request_id = %request_id,
+                trace_id = %request_id,
                 panic = %message,
                 "HTTP request panicked"
             );
@@ -119,6 +128,7 @@ pub(crate) async fn request_context_middleware(
         status = status.as_u16(),
         duration_ms = duration_ms,
         request_id = %request_id,
+        trace_id = %request_id,
         "Request completed"
     );
 

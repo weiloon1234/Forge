@@ -97,11 +97,11 @@ pub use crate::jobs::{
 };
 pub use crate::kernel::worker::WorkerKernel;
 pub use crate::logging::{
-    AuthOutcome, CurrentRequest, ErrorReporter, HandlerErrorReport, HttpOutcomeClass,
-    JobDeadLetteredReport, JobOutcome, LivenessReport, LogFormat, LogLevel, ObservabilityOptions,
-    PanicContext, PanicReport, ProbeResult, ProbeState, ReadinessCheck, ReadinessReport, RequestId,
-    RuntimeBackendKind, RuntimeDiagnostics, RuntimeSnapshot, SchedulerLeadershipState,
-    WebSocketConnectionState,
+    current_trace_id, AuthOutcome, CurrentRequest, ErrorReporter, HandlerErrorReport,
+    HttpOutcomeClass, JobDeadLetteredReport, JobOutcome, LivenessReport, LogFormat, LogLevel,
+    ObservabilityOptions, PanicContext, PanicReport, ProbeResult, ProbeState, ReadinessCheck,
+    ReadinessReport, RequestId, RuntimeBackendKind, RuntimeDiagnostics, RuntimeSnapshot,
+    SchedulerLeadershipState, WebSocketConnectionState,
 };
 pub use crate::metadata::{HasMetadata, ModelMeta};
 pub use crate::notifications::{

@@ -75,6 +75,7 @@ trait ErrorReporter
   fn report_job_dead_lettered<'life0, 'async_trait>(
 trait ReadinessCheck
   fn run<'life0, 'life1, 'async_trait>(
+fn current_trace_id() -> Option<String>
 fn init(config: &ConfigRepository) -> Result<()>
 ```
 

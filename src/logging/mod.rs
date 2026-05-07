@@ -46,11 +46,12 @@ pub use types::{
     SchedulerLeadershipState, WebSocketConnectionState,
 };
 
-pub use context::CurrentRequest;
 pub(crate) use context::{
-    current_actor, current_execution, current_request, scope_current_actor,
-    scope_current_execution, scope_current_request, ExecutionContext,
+    current_actor, current_execution, current_execution_trace_parent, current_request,
+    current_trace_context, scope_current_actor, scope_current_execution, scope_current_request,
+    scope_current_trace, trace_context_for_child, ExecutionContext, TraceContext, TraceParent,
 };
+pub use context::{current_trace_id, CurrentRequest};
 pub(crate) use middleware::{request_context_middleware, request_origin_middleware};
 pub(crate) use observability::register_observability_routes;
 pub(crate) use observability::{register_openapi_route, set_openapi_spec};

@@ -24,9 +24,9 @@ Load only the file you need — don't read them all at once.
 | [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 278L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
-| [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 57L |
+| [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 59L |
 | [kernel](modules/kernel.md) | 5 runtime kernels: HTTP, CLI, Scheduler, Worker, WebSocket | 67L |
-| [logging](modules/logging.md) | Structured logging, observability, health probes, diagnostics | 86L |
+| [logging](modules/logging.md) | Structured logging, observability, health probes, diagnostics | 87L |
 | [metadata](modules/metadata.md) | Key-value metadata for models (HasMetadata) | 21L |
 | [notifications](modules/notifications.md) | Multi-channel notifications: email, database, broadcast | 35L |
 | [openapi](modules/openapi.md) | OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc) | 38L |
@@ -43,4 +43,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 35 modules, 3312 lines across all files.**
+**Total: 35 modules, 3315 lines across all files.**

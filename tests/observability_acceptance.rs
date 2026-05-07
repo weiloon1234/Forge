@@ -308,6 +308,8 @@ struct FailedJobContract {
     completed_at: Option<String>,
     duration_ms: Option<i64>,
     created_at: Option<String>,
+    request_id: Option<String>,
+    trace_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +337,8 @@ struct SlowQueryContract {
     sql: String,
     duration_ms: u64,
     label: Option<String>,
+    request_id: Option<String>,
+    trace_id: Option<String>,
     recorded_at: String,
 }
 
@@ -344,6 +348,7 @@ struct NPlusOneSuspectContract {
     method: String,
     path: String,
     request_id: Option<String>,
+    trace_id: Option<String>,
     fingerprint: String,
     repeat_count: u64,
     total_duration_ms: u64,
@@ -614,11 +619,11 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
     db.raw_execute(
         r#"
         INSERT INTO job_history
-            (id, job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at)
+            (id, job_id, queue, status, payload, attempt, error, started_at, completed_at, duration_ms, created_at)
         VALUES
-            ('00000000-0000-0000-0000-000000000001', 'job-succeeded', 'default', 'succeeded', 1, NULL, '2026-04-08T12:00:00Z', '2026-04-08T12:00:01Z', 100, '2026-04-08T12:00:01Z'),
-            ('00000000-0000-0000-0000-000000000002', 'job-retried', 'emails', 'retried', 2, 'retry me', '2026-04-08T12:01:00Z', '2026-04-08T12:01:03Z', 3000, '2026-04-08T12:01:03Z'),
-            ('00000000-0000-0000-0000-000000000003', 'job-dead', 'critical', 'dead_lettered', 3, NULL, NULL, NULL, NULL, '2026-04-08T12:02:00Z')
+            ('00000000-0000-0000-0000-000000000001', 'job-succeeded', 'default', 'succeeded', NULL, 1, NULL, '2026-04-08T12:00:00Z', '2026-04-08T12:00:01Z', 100, '2026-04-08T12:00:01Z'),
+            ('00000000-0000-0000-0000-000000000002', 'job-retried', 'emails', 'retried', '{"trace":{"trace_id":"trace-job-retried","request_id":"req-job-retried"}}'::jsonb, 2, 'retry me', '2026-04-08T12:01:00Z', '2026-04-08T12:01:03Z', 3000, '2026-04-08T12:01:03Z'),
+            ('00000000-0000-0000-0000-000000000003', 'job-dead', 'critical', 'dead_lettered', NULL, 3, NULL, NULL, NULL, NULL, '2026-04-08T12:02:00Z')
         "#,
         &[],
     )
@@ -649,6 +654,8 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
     assert_eq!(failed.failed_jobs[0].started_at, None);
     assert_eq!(failed.failed_jobs[0].completed_at, None);
     assert_eq!(failed.failed_jobs[0].duration_ms, None);
+    assert_eq!(failed.failed_jobs[0].request_id, None);
+    assert_eq!(failed.failed_jobs[0].trace_id, None);
     DateTime::parse(failed.failed_jobs[0].created_at.as_deref().unwrap()).unwrap();
 
     assert_eq!(failed.failed_jobs[1].job_id, "job-retried");
@@ -657,6 +664,14 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
     assert_eq!(failed.failed_jobs[1].attempt, Some(2));
     assert_eq!(failed.failed_jobs[1].error.as_deref(), Some("retry me"));
     assert_eq!(failed.failed_jobs[1].duration_ms, Some(3000));
+    assert_eq!(
+        failed.failed_jobs[1].request_id.as_deref(),
+        Some("req-job-retried")
+    );
+    assert_eq!(
+        failed.failed_jobs[1].trace_id.as_deref(),
+        Some("trace-job-retried")
+    );
     DateTime::parse(failed.failed_jobs[1].started_at.as_deref().unwrap()).unwrap();
     DateTime::parse(failed.failed_jobs[1].completed_at.as_deref().unwrap()).unwrap();
     DateTime::parse(failed.failed_jobs[1].created_at.as_deref().unwrap()).unwrap();

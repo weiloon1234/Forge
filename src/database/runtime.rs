@@ -70,6 +70,8 @@ pub struct SlowQueryEntry {
     pub sql: String,
     pub duration_ms: u64,
     pub label: Option<String>,
+    pub request_id: Option<String>,
+    pub trace_id: Option<String>,
     pub recorded_at: String,
 }
 
@@ -97,6 +99,7 @@ pub(crate) struct NPlusOneSuspect {
     pub method: String,
     pub path: String,
     pub request_id: Option<String>,
+    pub trace_id: Option<String>,
     pub fingerprint: String,
     pub repeat_count: u64,
     pub total_duration_ms: u64,
@@ -131,10 +134,15 @@ fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>) {
     if log.len() >= SLOW_QUERY_LOG_CAPACITY {
         log.pop_front();
     }
+    let trace = crate::logging::current_trace_context();
     log.push_back(SlowQueryEntry {
         sql: sql.to_string(),
         duration_ms,
         label: label.map(|s| s.to_string()),
+        request_id: trace
+            .as_ref()
+            .and_then(|context| context.request_id.clone()),
+        trace_id: trace.map(|context| context.trace_id),
         recorded_at: ChronoUtc::now().to_rfc3339(),
     });
 }
@@ -205,6 +213,7 @@ struct SqlQueryTraceConfig {
     method: String,
     path: String,
     request_id: Option<String>,
+    trace_id: Option<String>,
 }
 
 impl SqlQueryTraceConfig {
@@ -222,16 +231,23 @@ impl SqlQueryTraceConfig {
                 method,
                 path,
                 request_id,
+                trace_id: None,
             };
         };
 
+        let trace = crate::logging::current_trace_context();
         Self {
             enabled: config.n_plus_one_detection,
             min_repeats: config.n_plus_one_min_repeats.max(1),
             retention: config.n_plus_one_retention,
             method,
             path,
-            request_id,
+            request_id: request_id.or_else(|| {
+                trace
+                    .as_ref()
+                    .and_then(|context| context.request_id.clone())
+            }),
+            trace_id: trace.map(|context| context.trace_id),
         }
     }
 }
@@ -375,6 +391,7 @@ impl SqlQueryGroup {
             method: config.method.clone(),
             path: config.path.clone(),
             request_id: config.request_id.clone(),
+            trace_id: config.trace_id.clone(),
             fingerprint: self.fingerprint,
             repeat_count: self.repeat_count,
             total_duration_ms: self.total_duration_ms,
@@ -2170,6 +2187,8 @@ mod tests {
                 sql: "SELECT before panic".to_string(),
                 duration_ms: 1,
                 label: None,
+                request_id: None,
+                trace_id: None,
                 recorded_at: "before".to_string(),
             });
             panic!("poison slow query log");
@@ -2220,6 +2239,63 @@ mod tests {
         assert_eq!(snapshot.top_slowest[1].sql, "SELECT slow");
 
         lock_unpoisoned(slow_query_log(), "slow query snapshot cleanup").clear();
+    }
+
+    #[tokio::test]
+    async fn sql_observability_attaches_current_trace_context() {
+        use crate::config::DatabaseConfig;
+        use crate::logging::TraceContext;
+
+        let _guard = sql_observability_test_lock().lock().await;
+        lock_unpoisoned(slow_query_log(), "slow query trace setup").clear();
+        lock_unpoisoned(n_plus_one_log(), "n+1 trace setup").clear();
+
+        let config = DatabaseConfig {
+            n_plus_one_min_repeats: 2,
+            n_plus_one_retention: 5,
+            ..DatabaseConfig::default()
+        };
+        crate::logging::scope_current_trace(
+            TraceContext::http("req-sql-trace".to_string()),
+            async {
+                record_slow_query("SELECT trace slow", 900, Some("trace.slow"));
+                scope_http_sql_query_trace(
+                    Some(config),
+                    "GET".to_string(),
+                    "/trace".to_string(),
+                    None,
+                    async {
+                        for _ in 0..2 {
+                            record_sql_observation(
+                                "SELECT * FROM users WHERE id = $1",
+                                15,
+                                Some("trace.lookup"),
+                                "query",
+                                1,
+                            );
+                        }
+                    },
+                )
+                .await;
+            },
+        )
+        .await;
+
+        let slow_queries = recent_slow_queries();
+        let slow_query = slow_queries
+            .iter()
+            .find(|query| query.sql == "SELECT trace slow")
+            .expect("expected traced slow query");
+        assert_eq!(slow_query.request_id.as_deref(), Some("req-sql-trace"));
+        assert_eq!(slow_query.trace_id.as_deref(), Some("req-sql-trace"));
+
+        let suspects = recent_n_plus_one_suspects();
+        assert_eq!(suspects.len(), 1);
+        assert_eq!(suspects[0].request_id.as_deref(), Some("req-sql-trace"));
+        assert_eq!(suspects[0].trace_id.as_deref(), Some("req-sql-trace"));
+
+        lock_unpoisoned(slow_query_log(), "slow query trace cleanup").clear();
+        lock_unpoisoned(n_plus_one_log(), "n+1 trace cleanup").clear();
     }
 
     #[tokio::test]

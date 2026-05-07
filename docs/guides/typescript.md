@@ -96,11 +96,25 @@ pub struct MyRequest { ... }
 
 ### `forge::AppEnum` (enums)
 
-Auto-registers for TypeScript export on its own:
+Auto-registers for TypeScript export on its own, and also implements `ts_rs::TS`
+for DTO fields:
 
 ```rust
 #[derive(Clone, Debug, PartialEq, forge::AppEnum)]
 pub enum MyEnum { ... }
+```
+
+Use AppEnum fields directly in request/response DTOs. Manual
+`#[ts(type = "import(...)")]` overrides are not needed, including for
+`Option<MyEnum>` and collections:
+
+```rust
+#[derive(Debug, serde::Serialize, ts_rs::TS, forge::ApiSchema)]
+pub struct OrderResponse {
+    pub status: OrderStatus,
+    pub previous_status: Option<OrderStatus>,
+    pub allowed_statuses: Vec<OrderStatus>,
+}
 ```
 
 Default metadata follows Forge conventions:

@@ -338,6 +338,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let serialize = generate_serialize_impl(&ident, &variant_infos, is_int_backed)?;
     let deserialize = generate_deserialize_impl(&ident, &variant_infos, is_int_backed)?;
     let api_schema = generate_api_schema_impl(&ident, &variant_infos, is_int_backed);
+    let ts = generate_ts_impl(&ident, &variant_infos, is_int_backed);
     let typed_id = generate_typed_id_impl(&ident, &variant_infos, enum_args.id_type.as_ref());
 
     Ok(quote! {
@@ -347,8 +348,86 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         #serialize
         #deserialize
         #api_schema
+        #ts
         #typed_id
     })
+}
+
+fn ts_string_literal(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn generate_ts_impl(
+    ident: &syn::Ident,
+    variants: &[VariantInfo],
+    is_int_backed: bool,
+) -> TokenStream {
+    let name = ident.to_string();
+    let output_path = format!("{name}.ts");
+    let union = if is_int_backed {
+        variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .discriminant
+                    .expect("int-backed variant missing discriminant")
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    } else {
+        variants
+            .iter()
+            .map(|variant| ts_string_literal(&variant.key_str))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let decl = format!("type {name} = {union};");
+
+    quote! {
+        impl ::forge::ts_rs::TS for #ident {
+            type WithoutGenerics = Self;
+
+            fn name() -> String {
+                #name.to_string()
+            }
+
+            fn inline() -> String {
+                <Self as ::forge::ts_rs::TS>::name()
+            }
+
+            fn inline_flattened() -> String {
+                <Self as ::forge::ts_rs::TS>::inline()
+            }
+
+            fn decl() -> String {
+                #decl.to_string()
+            }
+
+            fn decl_concrete() -> String {
+                <Self as ::forge::ts_rs::TS>::decl()
+            }
+
+            fn output_path() -> ::core::option::Option<&'static ::std::path::Path> {
+                ::core::option::Option::Some(::std::path::Path::new(#output_path))
+            }
+        }
+    }
 }
 
 fn generate_typed_id_impl(

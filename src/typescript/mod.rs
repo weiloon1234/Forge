@@ -767,6 +767,14 @@ mod tests {
         ObservabilityView,
     }
 
+    #[allow(dead_code)]
+    #[derive(Clone, Debug, serde::Serialize, ts_rs::TS, crate::ApiSchema)]
+    struct MinimalExportAppEnumDto {
+        status: MinimalExportStatus,
+        priority: Option<MinimalExportPriority>,
+        permissions: Vec<MinimalExportPermission>,
+    }
+
     fn string_meta(values: &[&str]) -> EnumMeta {
         EnumMeta {
             id: "permission".to_string(),
@@ -817,6 +825,7 @@ mod tests {
             "TokenResponse.ts",
             "WsTokenResponse.ts",
             "RouteManifest.ts",
+            "MinimalExportAppEnumDto.ts",
         ] {
             assert!(
                 dir.path().join(file).exists(),
@@ -978,6 +987,38 @@ mod tests {
         assert!(
             minimal_permission.contains("observability: { view: \"observability.view\" }"),
             "expected non-read/manage actions to stay available in groups:\n{minimal_permission}"
+        );
+
+        let app_enum_dto =
+            fs::read_to_string(dir.path().join("MinimalExportAppEnumDto.ts")).unwrap();
+        assert!(
+            app_enum_dto
+                .contains("import type { MinimalExportStatus } from \"./MinimalExportStatus\";"),
+            "expected DTO to import string AppEnum without field override:\n{app_enum_dto}"
+        );
+        assert!(
+            app_enum_dto.contains(
+                "import type { MinimalExportPriority } from \"./MinimalExportPriority\";"
+            ),
+            "expected DTO to import numeric AppEnum without field override:\n{app_enum_dto}"
+        );
+        assert!(
+            app_enum_dto.contains(
+                "import type { MinimalExportPermission } from \"./MinimalExportPermission\";"
+            ),
+            "expected DTO to import vector AppEnum without field override:\n{app_enum_dto}"
+        );
+        assert!(
+            app_enum_dto.contains("status: MinimalExportStatus"),
+            "expected DTO field to reference AppEnum by name:\n{app_enum_dto}"
+        );
+        assert!(
+            app_enum_dto.contains("priority: MinimalExportPriority | null"),
+            "expected optional DTO field to reference nullable AppEnum by name:\n{app_enum_dto}"
+        );
+        assert!(
+            app_enum_dto.contains("permissions: Array<MinimalExportPermission>"),
+            "expected Vec AppEnum field to reference AppEnum array by name:\n{app_enum_dto}"
         );
 
         let index = fs::read_to_string(dir.path().join("index.ts")).unwrap();

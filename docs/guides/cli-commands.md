@@ -272,8 +272,8 @@ These are available automatically — no registration needed:
 
 | Command | Description |
 |---------|-------------|
-| `config:publish` | Generate sample config file, including auth lockout and MFA sections |
-| `env:publish` | Generate `.env.example`, including lockout and MFA env overrides |
+| `config:publish` | Generate sample config file, including auth credential lifecycle, lockout, and MFA sections |
+| `env:publish` | Generate `.env.example`, including auth credential lifecycle, lockout, and MFA env overrides |
 | `key:generate` | Generate signing + encryption keys |
 | `doctor` | Run runtime health checks; accepts `--deploy` and `--json` for deploy tooling |
 | `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
@@ -291,7 +291,7 @@ These are available automatically — no registration needed:
 | `down` | Enter maintenance mode |
 | `up` | Exit maintenance mode |
 | `routes:list` | List named routes |
-| `token:prune` | Prune expired tokens |
+| `token:prune` | Manually prune expired/revoked personal access tokens |
 | `plugin:list` | List plugins |
 | `plugin:install-assets` | Install plugin assets |
 | `plugin:scaffold` | Run plugin scaffold |
@@ -304,9 +304,11 @@ database, runtime backend, readiness probes, and migration drift, then exits non
 check fails. Warnings, such as an intentionally unconfigured database, are reported but do not
 block the command.
 
-`config:publish` writes the current framework-owned auth sections, including `[auth.lockout]` and
-`[auth.mfa]`. `env:publish` writes the matching `AUTH__LOCKOUT__*`, `AUTH__MFA__*`, and
-`AUTH__MFA__REQUIRED_ROLES__<GUARD>` entries. Built-in audit logging is code-driven via
+`config:publish` writes the current framework-owned auth sections, including token pruning,
+per-guard token TTL examples, `[auth.password_resets]`, `[auth.email_verification]`,
+`[auth.lockout]`, and `[auth.mfa]`. `env:publish` writes the matching `AUTH__TOKENS__*`,
+`AUTH__PASSWORD_RESETS__*`, `AUTH__EMAIL_VERIFICATION__*`, `AUTH__LOCKOUT__*`,
+`AUTH__MFA__*`, and `AUTH__MFA__REQUIRED_ROLES__<GUARD>` entries. Built-in audit logging is code-driven via
 `audit_area(...)`, so it no longer appears in generated config files. Error reporters are
 registered in code with `AppBuilder::register_error_reporter*()`, so they are intentionally not
 part of the generated config files either.

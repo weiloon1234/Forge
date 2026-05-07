@@ -1021,6 +1021,8 @@ impl AppBuilder {
             redis.clone(),
             auth_config.sessions.clone(),
         ));
+        let password_reset_expiry_minutes = auth_config.password_resets.expiry_minutes;
+        let email_verification_expiry_minutes = auth_config.email_verification.expiry_minutes;
         {
             let mut guards = lock_unpoisoned(&registries.guard, "guard registry");
             for (guard_name, driver_config) in &auth_config.guards {
@@ -1144,13 +1146,13 @@ impl AppBuilder {
         let password_reset_manager =
             Arc::new(crate::auth::password_reset::PasswordResetManager::new(
                 database.clone(),
-                60, // 60 minutes expiry
+                password_reset_expiry_minutes,
             ));
 
         let email_verification_manager = Arc::new(
             crate::auth::email_verification::EmailVerificationManager::new(
                 database.clone(),
-                1440, // 24 hours expiry for email verification
+                email_verification_expiry_minutes,
             ),
         );
 

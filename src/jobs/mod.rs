@@ -641,11 +641,26 @@ pub struct Worker {
     runtime: Arc<JobRuntime>,
     diagnostics: Arc<RuntimeDiagnostics>,
     history_prune: Arc<Mutex<JobHistoryPruneState>>,
+    auth_prune: Arc<Mutex<AuthCredentialPruneState>>,
 }
 
 #[derive(Default)]
 struct JobHistoryPruneState {
     last_attempt: Option<Instant>,
+}
+
+#[derive(Default)]
+struct AuthCredentialPruneState {
+    tokens_last_attempt: Option<Instant>,
+    password_resets_last_attempt: Option<Instant>,
+    email_verification_last_attempt: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+enum AuthCredentialPruneKind {
+    Tokens,
+    PasswordResets,
+    EmailVerification,
 }
 
 impl Worker {
@@ -657,6 +672,7 @@ impl Worker {
             runtime,
             diagnostics,
             history_prune: Arc::new(Mutex::new(JobHistoryPruneState::default())),
+            auth_prune: Arc::new(Mutex::new(AuthCredentialPruneState::default())),
         })
     }
 
@@ -720,6 +736,7 @@ impl Worker {
                             maintenance_worker.diagnostics.record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);
                         }
                         maintenance_worker.prune_job_history_if_due().await;
+                        maintenance_worker.prune_auth_credentials_if_due().await;
                     }
                 }
             }
@@ -868,11 +885,180 @@ impl Worker {
         .await
     }
 
+    async fn prune_auth_credentials_if_due(&self) {
+        let auth = match self.app.config().auth() {
+            Ok(auth) => auth,
+            Err(error) => {
+                tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to load auth config for credential pruning"
+                );
+                return;
+            }
+        };
+
+        if auth.tokens.prune_retention_days > 0
+            && auth.tokens.prune_batch_size > 0
+            && self.auth_credential_prune_due(
+                AuthCredentialPruneKind::Tokens,
+                auth.tokens.prune_interval_ms,
+            )
+        {
+            match self
+                .prune_personal_access_tokens(
+                    auth.tokens.prune_retention_days,
+                    auth.tokens.prune_batch_size,
+                )
+                .await
+            {
+                Ok(deleted) if deleted > 0 => tracing::info!(
+                    target: "forge.worker",
+                    deleted,
+                    retention_days = auth.tokens.prune_retention_days,
+                    "pruned personal access tokens"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to prune personal access tokens"
+                ),
+            }
+        }
+
+        if auth.password_resets.expiry_minutes > 0
+            && auth.password_resets.prune_batch_size > 0
+            && self.auth_credential_prune_due(
+                AuthCredentialPruneKind::PasswordResets,
+                auth.password_resets.prune_interval_ms,
+            )
+        {
+            match self
+                .prune_password_reset_tokens(auth.password_resets.prune_batch_size)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => tracing::info!(
+                    target: "forge.worker",
+                    deleted,
+                    expiry_minutes = auth.password_resets.expiry_minutes,
+                    "pruned password reset tokens"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to prune password reset tokens"
+                ),
+            }
+        }
+
+        if auth.email_verification.expiry_minutes > 0
+            && auth.email_verification.prune_batch_size > 0
+            && self.auth_credential_prune_due(
+                AuthCredentialPruneKind::EmailVerification,
+                auth.email_verification.prune_interval_ms,
+            )
+        {
+            match self
+                .prune_email_verification_tokens(auth.email_verification.prune_batch_size)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => tracing::info!(
+                    target: "forge.worker",
+                    deleted,
+                    expiry_minutes = auth.email_verification.expiry_minutes,
+                    "pruned email verification tokens"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to prune email verification tokens"
+                ),
+            }
+        }
+    }
+
+    fn auth_credential_prune_due(&self, kind: AuthCredentialPruneKind, interval_ms: u64) -> bool {
+        let interval = Duration::from_millis(interval_ms.max(1));
+        let now = Instant::now();
+        let mut state = lock_unpoisoned(&self.auth_prune, "auth credential prune state");
+        let last_attempt = match kind {
+            AuthCredentialPruneKind::Tokens => &mut state.tokens_last_attempt,
+            AuthCredentialPruneKind::PasswordResets => &mut state.password_resets_last_attempt,
+            AuthCredentialPruneKind::EmailVerification => {
+                &mut state.email_verification_last_attempt
+            }
+        };
+        if last_attempt.is_some_and(|last| now.duration_since(last) < interval) {
+            return false;
+        }
+        *last_attempt = Some(now);
+        true
+    }
+
+    async fn prune_personal_access_tokens(
+        &self,
+        retention_days: u64,
+        batch_size: u64,
+    ) -> Result<u64> {
+        let Ok(lock) = self.app.lock() else {
+            return Ok(0);
+        };
+        let Some(_guard) = lock
+            .acquire("auth:tokens_prune", Duration::from_secs(60))
+            .await?
+        else {
+            return Ok(0);
+        };
+
+        self.app
+            .tokens()?
+            .prune_limited(retention_days, batch_size)
+            .await
+    }
+
+    async fn prune_password_reset_tokens(&self, batch_size: u64) -> Result<u64> {
+        let Ok(lock) = self.app.lock() else {
+            return Ok(0);
+        };
+        let Some(_guard) = lock
+            .acquire("auth:password_resets_prune", Duration::from_secs(60))
+            .await?
+        else {
+            return Ok(0);
+        };
+
+        self.app
+            .password_resets()?
+            .prune_expired_limited(batch_size)
+            .await
+    }
+
+    async fn prune_email_verification_tokens(&self, batch_size: u64) -> Result<u64> {
+        let Ok(lock) = self.app.lock() else {
+            return Ok(0);
+        };
+        let Some(_guard) = lock
+            .acquire("auth:email_verification_prune", Duration::from_secs(60))
+            .await?
+        else {
+            return Ok(0);
+        };
+
+        self.app
+            .email_verification()?
+            .prune_expired_limited(batch_size)
+            .await
+    }
+
     pub async fn run_once(&self) -> Result<bool> {
         let now_millis = Utc::now().timestamp_millis();
         let promoted = self.runtime.promote_due_jobs(now_millis).await?;
         let requeued = self.runtime.requeue_expired_jobs(now_millis).await?;
         self.prune_job_history_if_due().await;
+        self.prune_auth_credentials_if_due().await;
         for _ in 0..requeued {
             self.diagnostics
                 .record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);

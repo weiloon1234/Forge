@@ -461,6 +461,8 @@ pub struct AuthConfig {
     pub bearer_prefix: String,
     pub tokens: TokenConfig,
     pub sessions: SessionConfig,
+    pub password_resets: PasswordResetConfig,
+    pub email_verification: EmailVerificationConfig,
     pub lockout: LockoutConfig,
     pub mfa: MfaConfig,
     #[serde(default)]
@@ -474,6 +476,8 @@ impl Default for AuthConfig {
             bearer_prefix: "Bearer".to_string(),
             tokens: TokenConfig::default(),
             sessions: SessionConfig::default(),
+            password_resets: PasswordResetConfig::default(),
+            email_verification: EmailVerificationConfig::default(),
             lockout: LockoutConfig::default(),
             mfa: MfaConfig::default(),
             guards: std::collections::HashMap::new(),
@@ -530,6 +534,11 @@ pub struct TokenConfig {
     pub refresh_token_ttl_days: u64,
     pub token_length: usize,
     pub rotate_refresh_tokens: bool,
+    pub prune_retention_days: u64,
+    pub prune_interval_ms: u64,
+    pub prune_batch_size: u64,
+    #[serde(default)]
+    pub guards: std::collections::HashMap<String, TokenGuardConfig>,
 }
 
 impl Default for TokenConfig {
@@ -539,6 +548,69 @@ impl Default for TokenConfig {
             refresh_token_ttl_days: 30,
             token_length: 32,
             rotate_refresh_tokens: true,
+            prune_retention_days: 30,
+            prune_interval_ms: 3_600_000,
+            prune_batch_size: 1_000,
+            guards: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl TokenConfig {
+    pub fn access_token_ttl_minutes_for_guard(&self, guard: &GuardId) -> u64 {
+        self.guards
+            .get(guard.as_ref())
+            .and_then(|config| config.access_token_ttl_minutes)
+            .unwrap_or(self.access_token_ttl_minutes)
+    }
+
+    pub fn refresh_token_ttl_days_for_guard(&self, guard: &GuardId) -> u64 {
+        self.guards
+            .get(guard.as_ref())
+            .and_then(|config| config.refresh_token_ttl_days)
+            .unwrap_or(self.refresh_token_ttl_days)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TokenGuardConfig {
+    pub access_token_ttl_minutes: Option<u64>,
+    pub refresh_token_ttl_days: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct PasswordResetConfig {
+    pub expiry_minutes: u64,
+    pub prune_interval_ms: u64,
+    pub prune_batch_size: u64,
+}
+
+impl Default for PasswordResetConfig {
+    fn default() -> Self {
+        Self {
+            expiry_minutes: 60,
+            prune_interval_ms: 3_600_000,
+            prune_batch_size: 1_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct EmailVerificationConfig {
+    pub expiry_minutes: u64,
+    pub prune_interval_ms: u64,
+    pub prune_batch_size: u64,
+}
+
+impl Default for EmailVerificationConfig {
+    fn default() -> Self {
+        Self {
+            expiry_minutes: 1_440,
+            prune_interval_ms: 3_600_000,
+            prune_batch_size: 1_000,
         }
     }
 }
@@ -1376,6 +1448,29 @@ mod tests {
                 [auth]
                 default_guard = "admin"
                 bearer_prefix = "Token"
+
+                [auth.tokens]
+                access_token_ttl_minutes = 20
+                refresh_token_ttl_days = 40
+                prune_retention_days = 45
+                prune_interval_ms = 120000
+                prune_batch_size = 50
+
+                [auth.tokens.guards.admin]
+                access_token_ttl_minutes = 43200
+
+                [auth.tokens.guards.user]
+                refresh_token_ttl_days = 3
+
+                [auth.password_resets]
+                expiry_minutes = 30
+                prune_interval_ms = 60000
+                prune_batch_size = 25
+
+                [auth.email_verification]
+                expiry_minutes = 720
+                prune_interval_ms = 90000
+                prune_batch_size = 30
             "#,
         )
         .unwrap();
@@ -1385,6 +1480,37 @@ mod tests {
 
         assert_eq!(auth.default_guard, GuardId::new("admin"));
         assert_eq!(auth.bearer_prefix, "Token");
+        assert_eq!(auth.tokens.access_token_ttl_minutes, 20);
+        assert_eq!(auth.tokens.refresh_token_ttl_days, 40);
+        assert_eq!(auth.tokens.prune_retention_days, 45);
+        assert_eq!(auth.tokens.prune_interval_ms, 120_000);
+        assert_eq!(auth.tokens.prune_batch_size, 50);
+        assert_eq!(
+            auth.tokens
+                .access_token_ttl_minutes_for_guard(&GuardId::new("admin")),
+            43_200
+        );
+        assert_eq!(
+            auth.tokens
+                .refresh_token_ttl_days_for_guard(&GuardId::new("admin")),
+            40
+        );
+        assert_eq!(
+            auth.tokens
+                .access_token_ttl_minutes_for_guard(&GuardId::new("user")),
+            20
+        );
+        assert_eq!(
+            auth.tokens
+                .refresh_token_ttl_days_for_guard(&GuardId::new("user")),
+            3
+        );
+        assert_eq!(auth.password_resets.expiry_minutes, 30);
+        assert_eq!(auth.password_resets.prune_interval_ms, 60_000);
+        assert_eq!(auth.password_resets.prune_batch_size, 25);
+        assert_eq!(auth.email_verification.expiry_minutes, 720);
+        assert_eq!(auth.email_verification.prune_interval_ms, 90_000);
+        assert_eq!(auth.email_verification.prune_batch_size, 30);
     }
 
     #[test]

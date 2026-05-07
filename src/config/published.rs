@@ -417,6 +417,30 @@ const AUTH_TOKEN_FIELDS: &[PublishedField] = &[
     field("refresh_token_ttl_days", "30", "30", false, false, None),
     field("token_length", "32", "32", false, false, None),
     field("rotate_refresh_tokens", "true", "true", false, false, None),
+    field(
+        "prune_retention_days",
+        "30",
+        "30",
+        false,
+        false,
+        Some("Auto-prune expired/revoked tokens older than N days (0 = app-owned/manual)"),
+    ),
+    field(
+        "prune_interval_ms",
+        "3600000",
+        "3600000",
+        false,
+        false,
+        Some("How often workers attempt token pruning"),
+    ),
+    field(
+        "prune_batch_size",
+        "1000",
+        "1000",
+        false,
+        false,
+        Some("Max tokens deleted per prune pass"),
+    ),
 ];
 
 const AUTH_SESSION_FIELDS: &[PublishedField] = &[
@@ -433,6 +457,60 @@ const AUTH_SESSION_FIELDS: &[PublishedField] = &[
     field("cookie_path", "\"/\"", "/", false, false, None),
     field("sliding_expiry", "true", "true", false, false, None),
     field("remember_ttl_days", "30", "30", false, false, None),
+];
+
+const AUTH_PASSWORD_RESET_FIELDS: &[PublishedField] = &[
+    field(
+        "expiry_minutes",
+        "60",
+        "60",
+        false,
+        false,
+        Some("Password reset token lifetime (0 = no expiry/auto-prune)"),
+    ),
+    field(
+        "prune_interval_ms",
+        "3600000",
+        "3600000",
+        false,
+        false,
+        Some("How often workers attempt reset-token pruning"),
+    ),
+    field(
+        "prune_batch_size",
+        "1000",
+        "1000",
+        false,
+        false,
+        Some("Max reset tokens deleted per prune pass"),
+    ),
+];
+
+const AUTH_EMAIL_VERIFICATION_FIELDS: &[PublishedField] = &[
+    field(
+        "expiry_minutes",
+        "1440",
+        "1440",
+        false,
+        false,
+        Some("Email verification token lifetime (0 = no expiry/auto-prune)"),
+    ),
+    field(
+        "prune_interval_ms",
+        "3600000",
+        "3600000",
+        false,
+        false,
+        Some("How often workers attempt verification-token pruning"),
+    ),
+    field(
+        "prune_batch_size",
+        "1000",
+        "1000",
+        false,
+        false,
+        Some("Max verification tokens deleted per prune pass"),
+    ),
 ];
 
 const AUTH_LOCKOUT_FIELDS: &[PublishedField] = &[
@@ -793,11 +871,42 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                 false,
                 AUTH_TOKEN_FIELDS,
             ),
+            example(
+                Some("Optional per-guard token TTL overrides:"),
+                Some("Optional per-guard token TTL overrides:"),
+                &[
+                    "# [auth.tokens.guards.admin]",
+                    "# access_token_ttl_minutes = 43200",
+                    "# refresh_token_ttl_days = 30",
+                    "#",
+                    "# [auth.tokens.guards.user]",
+                    "# access_token_ttl_minutes = 4320",
+                    "# refresh_token_ttl_days = 3",
+                ],
+                &[
+                    "# AUTH__TOKENS__GUARDS__ADMIN__ACCESS_TOKEN_TTL_MINUTES=43200",
+                    "# AUTH__TOKENS__GUARDS__ADMIN__REFRESH_TOKEN_TTL_DAYS=30",
+                    "# AUTH__TOKENS__GUARDS__USER__ACCESS_TOKEN_TTL_MINUTES=4320",
+                    "# AUTH__TOKENS__GUARDS__USER__REFRESH_TOKEN_TTL_DAYS=3",
+                ],
+            ),
             table(
                 &["auth", "sessions"],
                 Some("Session Settings"),
                 false,
                 AUTH_SESSION_FIELDS,
+            ),
+            table(
+                &["auth", "password_resets"],
+                Some("Password Reset Tokens"),
+                false,
+                AUTH_PASSWORD_RESET_FIELDS,
+            ),
+            table(
+                &["auth", "email_verification"],
+                Some("Email Verification Tokens"),
+                false,
+                AUTH_EMAIL_VERIFICATION_FIELDS,
             ),
             table(
                 &["auth", "lockout"],
@@ -1287,6 +1396,25 @@ mod tests {
         assert!(env.contains("# HTTP__MAX_BODY_SIZE_BYTES=0"));
         assert!(env.contains("# HTTP__TRUSTED_PROXY__TRUSTED_CIDRS=[]"));
         assert!(env.contains("# HTTP__RATE_LIMIT__BY=actor_or_ip"));
+    }
+
+    #[test]
+    fn published_auth_lifecycle_config_includes_worker_pruning_defaults() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("# prune_retention_days = 30  # Auto-prune expired/revoked tokens older than N days (0 = app-owned/manual)"));
+        assert!(output.contains("# [auth.tokens.guards.admin]"));
+        assert!(output.contains("# access_token_ttl_minutes = 43200"));
+        assert!(output.contains("[auth.password_resets]"));
+        assert!(output.contains(
+            "# expiry_minutes = 60  # Password reset token lifetime (0 = no expiry/auto-prune)"
+        ));
+        assert!(output.contains("[auth.email_verification]"));
+        assert!(output.contains("# expiry_minutes = 1440  # Email verification token lifetime (0 = no expiry/auto-prune)"));
+        assert!(env.contains("# AUTH__TOKENS__PRUNE_RETENTION_DAYS=30"));
+        assert!(env.contains("# AUTH__PASSWORD_RESETS__EXPIRY_MINUTES=60"));
+        assert!(env.contains("# AUTH__EMAIL_VERIFICATION__EXPIRY_MINUTES=1440"));
     }
 
     fn config_repository_root_sections() -> BTreeSet<String> {

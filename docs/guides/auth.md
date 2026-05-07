@@ -341,7 +341,7 @@ app.tokens()?.revoke_all::<User>(&user_id).await?;
 // Or from the model instance
 user.revoke_all_tokens(&app).await?;
 
-// Cleanup expired tokens (run on a schedule)
+// Manual cleanup is still available; workers also prune automatically by default.
 app.tokens()?.prune(30).await?;
 ```
 
@@ -353,7 +353,23 @@ access_token_ttl_minutes = 15       # short-lived access token
 refresh_token_ttl_days = 30         # long-lived refresh token
 token_length = 32                   # random bytes in token
 rotate_refresh_tokens = true        # issue new refresh token on refresh
+prune_retention_days = 30           # auto-prune expired/revoked rows older than N days
+prune_interval_ms = 3600000         # worker prune interval
+prune_batch_size = 1000             # max rows deleted per pass
+
+# Optional per-guard TTL overrides. Missing values inherit [auth.tokens].
+[auth.tokens.guards.admin]
+access_token_ttl_minutes = 43200    # 30 days
+refresh_token_ttl_days = 30
+
+[auth.tokens.guards.user]
+access_token_ttl_minutes = 4320     # 3 days
+refresh_token_ttl_days = 3
 ```
+
+Set `prune_retention_days = 0` if an app-owned schedule should remain the only
+token cleanup owner. Existing calls to `token:prune` and `app.tokens()?.prune(...)`
+continue to work.
 
 ## Login Lockout
 
@@ -674,6 +690,11 @@ async fn reset_password(State(app): State<AppContext>, Json(body): Json<ResetReq
 }
 ```
 
+Forge stores password reset tokens in `password_reset_tokens`. Tokens are single
+use and expire after `[auth.password_resets].expiry_minutes`. Workers prune
+expired rows automatically; set `expiry_minutes = 0` to disable expiry and
+automatic pruning.
+
 ## Email Verification
 
 Same pattern:
@@ -685,6 +706,9 @@ let token = app.email_verification()?.create_token::<User>(&user.email).await?;
 app.email_verification()?.validate_token::<User>(&email, &token).await?;
 // Mark email as verified in your database
 ```
+
+Email verification uses the same table with a `verify:` guard prefix. It has its
+own expiry/prune controls under `[auth.email_verification]`.
 
 ---
 
@@ -764,6 +788,13 @@ access_token_ttl_minutes = 15
 refresh_token_ttl_days = 30
 token_length = 32
 rotate_refresh_tokens = true
+prune_retention_days = 30
+prune_interval_ms = 3600000
+prune_batch_size = 1000
+
+# [auth.tokens.guards.admin]
+# access_token_ttl_minutes = 43200
+# refresh_token_ttl_days = 30
 
 [auth.sessions]
 ttl_minutes = 120
@@ -772,6 +803,16 @@ cookie_secure = true
 cookie_path = "/"
 sliding_expiry = true
 remember_ttl_days = 30
+
+[auth.password_resets]
+expiry_minutes = 60
+prune_interval_ms = 3600000
+prune_batch_size = 1000
+
+[auth.email_verification]
+expiry_minutes = 1440
+prune_interval_ms = 3600000
+prune_batch_size = 1000
 
 [auth.lockout]
 enabled = true

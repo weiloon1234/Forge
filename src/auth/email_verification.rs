@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::database::DatabaseManager;
 use crate::foundation::Result;
 
-use super::token_store::TokenStore;
+use super::token_store::{TokenStore, TokenStorePruneScope};
 use super::Authenticatable;
 
 /// Manages email verification token generation and validation.
@@ -51,6 +51,15 @@ impl EmailVerificationManager {
 
     /// Remove all expired verification tokens.
     pub async fn prune_expired(&self) -> Result<u64> {
-        self.store.prune_expired(Some("verify:")).await
+        self.store
+            .prune_expired(TokenStorePruneScope::EmailVerification)
+            .await
+    }
+
+    /// Remove expired verification tokens in a bounded batch.
+    pub async fn prune_expired_limited(&self, batch_size: u64) -> Result<u64> {
+        self.store
+            .prune_expired_limited(TokenStorePruneScope::EmailVerification, batch_size)
+            .await
     }
 }

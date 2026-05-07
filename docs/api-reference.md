@@ -334,9 +334,12 @@ TOML-based configuration with environment overlay.
 | `WebSocketConfig` | `host`, `port`, `path`, heartbeat, rate limits, origin allow-list, outbound buffer, history buffer/TTL |
 | `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency`, `shutdown_timeout_ms`, `job_history` retention |
 | `SchedulerConfig` | `tick_interval_ms`, `leader_lease_ttl_ms`, `shutdown_timeout_ms` |
-| `AuthConfig` | `guards`, `tokens`, `sessions`, `bearer_prefix` |
-| `TokenConfig` | TTLs, rotation, length |
+| `AuthConfig` | `guards`, `tokens`, `sessions`, credential lifecycle, `bearer_prefix` |
+| `TokenConfig` | TTLs, rotation, length, pruning, per-guard TTL overrides |
+| `TokenGuardConfig` | optional per-guard token TTL overrides |
 | `SessionConfig` | TTL, cookie settings, sliding expiry |
+| `PasswordResetConfig` | expiry and worker pruning for password reset tokens |
+| `EmailVerificationConfig` | expiry and worker pruning for email verification tokens |
 | `GuardDriverConfig` | Individual guard driver config |
 | `LoggingConfig` | `level`, `format`, `directory`, `retention` |
 | `I18nConfig` | `locales`, `resource_path` |

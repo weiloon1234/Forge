@@ -51,6 +51,7 @@ struct ConfigRepository
 struct CryptConfig
 struct DatabaseConfig
 struct DatabaseModelConfig
+struct EmailVerificationConfig
 struct GuardDriverConfig
 struct HashingConfig
 struct HttpConfig
@@ -64,11 +65,15 @@ struct LockoutConfig
 struct LoggingConfig
 struct MfaConfig
 struct ObservabilityConfig
+struct PasswordResetConfig
 struct RedisConfig
 struct SchedulerConfig
 struct ServerConfig
 struct SessionConfig
 struct TokenConfig
+  fn access_token_ttl_minutes_for_guard(&self, guard: &GuardId) -> u64
+  fn refresh_token_ttl_days_for_guard(&self, guard: &GuardId) -> u64
+struct TokenGuardConfig
 struct TypeScriptConfig
 struct WebSocketConfig
 struct WebSocketObservabilityConfig

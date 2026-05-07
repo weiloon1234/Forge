@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::database::DatabaseManager;
 use crate::foundation::Result;
 
-use super::token_store::TokenStore;
+use super::token_store::{TokenStore, TokenStorePruneScope};
 use super::Authenticatable;
 
 /// Manages password reset token generation and validation.
@@ -41,6 +41,15 @@ impl PasswordResetManager {
 
     /// Remove all expired tokens from the database.
     pub async fn prune_expired(&self) -> Result<u64> {
-        self.store.prune_expired(None).await
+        self.store
+            .prune_expired(TokenStorePruneScope::PasswordResets)
+            .await
+    }
+
+    /// Remove expired password reset tokens in a bounded batch.
+    pub async fn prune_expired_limited(&self, batch_size: u64) -> Result<u64> {
+        self.store
+            .prune_expired_limited(TokenStorePruneScope::PasswordResets, batch_size)
+            .await
     }
 }

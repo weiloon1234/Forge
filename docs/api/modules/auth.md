@@ -81,6 +81,7 @@ struct EmailVerificationManager
   async fn create_token<M: Authenticatable>( &self, email: &str, ) -> Result<String>
   async fn validate_token<M: Authenticatable>( &self, email: &str, token: &str, ) -> Result<()>
   async fn prune_expired(&self) -> Result<u64>
+  async fn prune_expired_limited(&self, batch_size: u64) -> Result<u64>
 ```
 
 ## forge::auth::lockout
@@ -151,6 +152,7 @@ struct PasswordResetManager
   async fn create_token<M: Authenticatable>( &self, email: &str, ) -> Result<String>
   async fn validate_token<M: Authenticatable>( &self, email: &str, token: &str, ) -> Result<()>
   async fn prune_expired(&self) -> Result<u64>
+  async fn prune_expired_limited(&self, batch_size: u64) -> Result<u64>
 ```
 
 ## forge::auth::session
@@ -188,6 +190,7 @@ struct TokenManager
   async fn revoke(&self, access_token: &str) -> Result<()>
   async fn revoke_all<M: Authenticatable>( &self, actor_id: &str, ) -> Result<u64>
   async fn prune(&self, older_than_days: u64) -> Result<u64>
+  async fn prune_limited( &self, older_than_days: u64, batch_size: u64, ) -> Result<u64>
 struct TokenPair
 struct TokenResponse
   fn new(tokens: TokenPair) -> Self

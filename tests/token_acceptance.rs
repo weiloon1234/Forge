@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use forge::kernel::cli::CliKernel;
 use forge::prelude::*;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 
 const PAT_TABLE: &str = "personal_access_tokens";
+const RESET_TABLE: &str = "password_reset_tokens";
 
 fn postgres_url() -> Option<String> {
     std::env::var("FORGE_TEST_POSTGRES_URL")
@@ -28,6 +30,10 @@ struct TokenTestRuntime {
 
 impl TokenTestRuntime {
     async fn new() -> Option<Self> {
+        Self::new_with_config("").await
+    }
+
+    async fn new_with_config(extra_config: &str) -> Option<Self> {
         let url = postgres_url()?;
         let dir = tempfile::tempdir().ok()?;
         fs::write(
@@ -36,6 +42,8 @@ impl TokenTestRuntime {
                 r#"
                 [database]
                 url = "{url}"
+
+                {extra_config}
                 "#
             ),
         )
@@ -50,6 +58,7 @@ impl TokenTestRuntime {
         let database = app.database().ok()?;
 
         reset_personal_access_tokens(database.as_ref()).await;
+        reset_password_reset_tokens(database.as_ref()).await;
 
         Some(Self {
             _dir: dir,
@@ -62,6 +71,10 @@ impl TokenTestRuntime {
         let _ = self
             .database
             .raw_execute(&format!("DROP TABLE IF EXISTS {PAT_TABLE}"), &[])
+            .await;
+        let _ = self
+            .database
+            .raw_execute(&format!("DROP TABLE IF EXISTS {RESET_TABLE}"), &[])
             .await;
     }
 
@@ -77,6 +90,43 @@ impl TokenTestRuntime {
                 "#,
                 &[DbValue::Text(guard.to_string())],
             )
+            .await
+            .unwrap()
+    }
+
+    async fn pat_count(&self) -> i64 {
+        self.database
+            .raw_query(&format!("SELECT COUNT(*) AS count FROM {PAT_TABLE}"), &[])
+            .await
+            .unwrap()[0]
+            .decode("count")
+            .unwrap()
+    }
+
+    async fn reset_count(&self, guard_like: &str) -> i64 {
+        self.database
+            .raw_query(
+                &format!("SELECT COUNT(*) AS count FROM {RESET_TABLE} WHERE guard LIKE $1"),
+                &[DbValue::Text(guard_like.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .decode("count")
+            .unwrap()
+    }
+
+    async fn cli(&self) -> CliKernel {
+        App::builder()
+            .load_config_dir(self._dir.path())
+            .build_cli_kernel()
+            .await
+            .unwrap()
+    }
+
+    async fn worker(&self) -> WorkerKernel {
+        App::builder()
+            .load_config_dir(self._dir.path())
+            .build_worker_kernel()
             .await
             .unwrap()
     }
@@ -130,6 +180,36 @@ async fn reset_personal_access_tokens(database: &DatabaseManager) {
     database
         .raw_execute(
             "CREATE INDEX idx_pat_actor ON personal_access_tokens (guard, actor_id)",
+            &[],
+        )
+        .await
+        .unwrap();
+}
+
+async fn reset_password_reset_tokens(database: &DatabaseManager) {
+    database
+        .raw_execute(&format!("DROP TABLE IF EXISTS {RESET_TABLE}"), &[])
+        .await
+        .unwrap();
+
+    database
+        .raw_execute(
+            r#"
+            CREATE TABLE password_reset_tokens (
+                email TEXT NOT NULL,
+                guard TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    database
+        .raw_execute(
+            "CREATE UNIQUE INDEX idx_password_reset_email_guard ON password_reset_tokens (email, guard)",
             &[],
         )
         .await
@@ -379,4 +459,256 @@ async fn uuid_backed_authenticatables_store_actor_ids_as_text() {
         .is_none());
 
     runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn token_ttl_can_be_overridden_per_guard() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new_with_config(
+        r#"
+        [auth.tokens]
+        access_token_ttl_minutes = 15
+        refresh_token_ttl_days = 30
+
+        [auth.tokens.guards.text_api]
+        access_token_ttl_minutes = 43200
+        refresh_token_ttl_days = 3
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let tokens = runtime.app.tokens().unwrap();
+    let pair = tokens
+        .issue_named::<DirectManagerActor>("acct-ttl", "ttl")
+        .await
+        .unwrap();
+
+    assert_eq!(pair.expires_in, 43_200 * 60);
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn token_prune_cli_uses_safe_prune_path() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new().await else {
+        return;
+    };
+
+    let tokens = runtime.app.tokens().unwrap();
+    let old = tokens
+        .issue_named::<DirectManagerActor>("old", "old")
+        .await
+        .unwrap();
+    let active = tokens
+        .issue_named::<DirectManagerActor>("active", "active")
+        .await
+        .unwrap();
+    mark_access_token_expired(&runtime.database, &old.access_token, 31).await;
+    assert!(tokens
+        .validate(&active.access_token)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(runtime.pat_count().await, 2);
+
+    runtime
+        .cli()
+        .await
+        .run_with_args(["forge", "token:prune", "--days", "30"])
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.pat_count().await, 1);
+    assert!(tokens
+        .validate(&active.access_token)
+        .await
+        .unwrap()
+        .is_some());
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn worker_prunes_auth_credentials_with_retention_and_batches() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new_with_config(
+        r#"
+        [jobs]
+        history_retention_days = 0
+
+        [auth.tokens]
+        prune_retention_days = 30
+        prune_interval_ms = 1
+        prune_batch_size = 10
+
+        [auth.password_resets]
+        expiry_minutes = 60
+        prune_interval_ms = 1
+        prune_batch_size = 10
+
+        [auth.email_verification]
+        expiry_minutes = 60
+        prune_interval_ms = 1
+        prune_batch_size = 10
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let tokens = runtime.app.tokens().unwrap();
+    let old = tokens
+        .issue_named::<DirectManagerActor>("old-worker", "old")
+        .await
+        .unwrap();
+    let active = tokens
+        .issue_named::<DirectManagerActor>("active-worker", "active")
+        .await
+        .unwrap();
+    mark_access_token_expired(&runtime.database, &old.access_token, 31).await;
+    insert_reset_token(&runtime.database, "reset-old@example.com", "text_api", 120).await;
+    insert_reset_token(&runtime.database, "reset-new@example.com", "text_api", 10).await;
+    insert_reset_token(
+        &runtime.database,
+        "verify-old@example.com",
+        "verify:text_api",
+        120,
+    )
+    .await;
+    insert_reset_token(
+        &runtime.database,
+        "verify-new@example.com",
+        "verify:text_api",
+        10,
+    )
+    .await;
+
+    runtime.worker().await.run_once().await.unwrap();
+
+    assert_eq!(runtime.pat_count().await, 1);
+    assert!(tokens
+        .validate(&active.access_token)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(runtime.reset_count("text_api").await, 1);
+    assert_eq!(runtime.reset_count("verify:%").await, 1);
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn worker_auth_pruning_respects_zero_disable_and_distributed_lock() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new_with_config(
+        r#"
+        [jobs]
+        history_retention_days = 0
+
+        [auth.tokens]
+        prune_retention_days = 30
+        prune_interval_ms = 1
+        prune_batch_size = 10
+
+        [auth.password_resets]
+        expiry_minutes = 0
+        prune_interval_ms = 1
+        prune_batch_size = 10
+
+        [auth.email_verification]
+        expiry_minutes = 0
+        prune_interval_ms = 1
+        prune_batch_size = 10
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let worker = runtime.worker().await;
+    let app = worker.app().clone();
+    let lock = app
+        .lock()
+        .unwrap()
+        .acquire("auth:tokens_prune", std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("test should acquire prune lock");
+
+    let tokens = runtime.app.tokens().unwrap();
+    let old = tokens
+        .issue_named::<DirectManagerActor>("old-locked", "old")
+        .await
+        .unwrap();
+    mark_access_token_expired(&runtime.database, &old.access_token, 31).await;
+    insert_reset_token(
+        &runtime.database,
+        "reset-disabled@example.com",
+        "text_api",
+        120,
+    )
+    .await;
+    insert_reset_token(
+        &runtime.database,
+        "verify-disabled@example.com",
+        "verify:text_api",
+        120,
+    )
+    .await;
+
+    worker.run_once().await.unwrap();
+
+    assert_eq!(runtime.pat_count().await, 1);
+    assert_eq!(runtime.reset_count("text_api").await, 1);
+    assert_eq!(runtime.reset_count("verify:%").await, 1);
+
+    drop(lock);
+    runtime.cleanup().await;
+}
+
+async fn mark_access_token_expired(database: &DatabaseManager, access_token: &str, days_ago: i64) {
+    database
+        .raw_execute(
+            r#"
+            UPDATE personal_access_tokens
+            SET expires_at = NOW() - ($2::double precision * INTERVAL '1 day'),
+                created_at = NOW() - ($2::double precision * INTERVAL '1 day')
+            WHERE access_token_hash = $1
+            "#,
+            &[
+                DbValue::Text(forge::sha256_hex_str(access_token)),
+                DbValue::Int64(days_ago),
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+async fn insert_reset_token(
+    database: &DatabaseManager,
+    email: &str,
+    guard: &str,
+    minutes_ago: i64,
+) {
+    database
+        .raw_execute(
+            r#"
+            INSERT INTO password_reset_tokens (email, guard, token_hash, created_at)
+            VALUES ($1, $2, $3, NOW() - ($4::double precision * INTERVAL '1 minute'))
+            "#,
+            &[
+                DbValue::Text(email.to_string()),
+                DbValue::Text(guard.to_string()),
+                DbValue::Text(format!("hash:{email}")),
+                DbValue::Int64(minutes_ago),
+            ],
+        )
+        .await
+        .unwrap();
 }

@@ -15,6 +15,12 @@ pub(crate) struct TokenStore {
     kind: &'static str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum TokenStorePruneScope {
+    PasswordResets,
+    EmailVerification,
+}
+
 impl TokenStore {
     pub fn new(database: Arc<DatabaseManager>, expiry: Duration, kind: &'static str) -> Self {
         Self {
@@ -79,7 +85,9 @@ impl TokenStore {
         };
 
         let now = DateTime::now();
-        if (now.as_chrono() - created_at.as_chrono()).num_seconds() > expiry_seconds {
+        if expiry_seconds > 0
+            && (now.as_chrono() - created_at.as_chrono()).num_seconds() > expiry_seconds
+        {
             self.delete_token(email, &guard).await?;
             return Err(Error::message(format!("{} token has expired", self.kind)));
         }
@@ -101,19 +109,57 @@ impl TokenStore {
         Ok(())
     }
 
-    pub async fn prune_expired(&self, guard_filter: Option<&str>) -> Result<u64> {
+    pub async fn prune_expired(&self, scope: TokenStorePruneScope) -> Result<u64> {
+        self.prune_expired_limited(scope, i64::MAX as u64).await
+    }
+
+    pub async fn prune_expired_limited(
+        &self,
+        scope: TokenStorePruneScope,
+        batch_size: u64,
+    ) -> Result<u64> {
+        if self.expiry.as_secs() == 0 || batch_size == 0 || !self.database.is_configured() {
+            return Ok(0);
+        }
+
         let expiry_seconds = self.expiry.as_secs() as i64;
-        let sql = match guard_filter {
-            Some(filter) => format!(
-                "DELETE FROM password_reset_tokens \
-                 WHERE guard LIKE '{filter}%' \
-                 AND created_at < NOW() - INTERVAL '{expiry_seconds} seconds'"
-            ),
-            None => format!(
-                "DELETE FROM password_reset_tokens \
-                 WHERE created_at < NOW() - INTERVAL '{expiry_seconds} seconds'"
-            ),
+        let sql = match scope {
+            TokenStorePruneScope::PasswordResets => {
+                r#"
+                DELETE FROM password_reset_tokens
+                WHERE (email, guard) IN (
+                    SELECT email, guard
+                    FROM password_reset_tokens
+                    WHERE guard NOT LIKE $3
+                      AND created_at < NOW() - ($1::double precision * INTERVAL '1 second')
+                    ORDER BY created_at ASC
+                    LIMIT $2
+                )
+                "#
+            }
+            TokenStorePruneScope::EmailVerification => {
+                r#"
+                DELETE FROM password_reset_tokens
+                WHERE (email, guard) IN (
+                    SELECT email, guard
+                    FROM password_reset_tokens
+                    WHERE guard LIKE $3
+                      AND created_at < NOW() - ($1::double precision * INTERVAL '1 second')
+                    ORDER BY created_at ASC
+                    LIMIT $2
+                )
+                "#
+            }
         };
-        self.database.raw_execute(&sql, &[]).await
+        self.database
+            .raw_execute(
+                sql,
+                &[
+                    DbValue::Int64(expiry_seconds),
+                    DbValue::Int64(batch_size.min(i64::MAX as u64) as i64),
+                    DbValue::Text("verify:%".to_string()),
+                ],
+            )
+            .await
     }
 }

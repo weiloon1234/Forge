@@ -344,14 +344,36 @@ impl TokenManager {
     ///
     /// Returns the number of tokens deleted.
     pub async fn prune(&self, older_than_days: u64) -> Result<u64> {
+        self.prune_limited(older_than_days, i64::MAX as u64).await
+    }
+
+    /// Delete tokens in bounded batches.
+    ///
+    /// `batch_size = 0` is a no-op. This is used by Forge-owned worker
+    /// maintenance so long-running apps do not need to register their own
+    /// scheduler just to clean old credential rows.
+    pub async fn prune_limited(&self, older_than_days: u64, batch_size: u64) -> Result<u64> {
+        if older_than_days == 0 || batch_size == 0 || !self.db.is_configured() {
+            return Ok(0);
+        }
+
         self.db
             .raw_execute(
                 r#"
                 DELETE FROM personal_access_tokens
-                WHERE (revoked_at IS NOT NULL AND revoked_at < NOW() - $1 * INTERVAL '1 day')
-                   OR (expires_at < NOW() - $1 * INTERVAL '1 day')
+                WHERE id IN (
+                    SELECT id
+                    FROM personal_access_tokens
+                    WHERE (revoked_at IS NOT NULL AND revoked_at < NOW() - ($1::double precision * INTERVAL '1 day'))
+                       OR (expires_at < NOW() - ($1::double precision * INTERVAL '1 day'))
+                    ORDER BY created_at ASC
+                    LIMIT $2
+                )
                 "#,
-                &[DbValue::Int64(older_than_days as i64)],
+                &[
+                    DbValue::Int64(older_than_days as i64),
+                    DbValue::Int64(batch_size.min(i64::MAX as u64) as i64),
+                ],
             )
             .await
     }
@@ -364,8 +386,10 @@ impl TokenManager {
         name: &str,
         abilities: &[String],
     ) -> Result<TokenPair> {
-        let expires_in_secs = self.config.access_token_ttl_minutes * 60;
-        let refresh_expires_in_secs = self.config.refresh_token_ttl_days * 24 * 60 * 60;
+        let guard_id = GuardId::owned(guard.to_string());
+        let expires_in_secs = self.config.access_token_ttl_minutes_for_guard(&guard_id) * 60;
+        let refresh_expires_in_secs =
+            self.config.refresh_token_ttl_days_for_guard(&guard_id) * 24 * 60 * 60;
         self.insert_token_pair_with_ttl(
             guard,
             actor_id,
@@ -533,6 +557,9 @@ async fn token_prune_command(invocation: CommandInvocation) -> Result<()> {
     let days: u64 = days_str
         .parse()
         .map_err(|_| Error::message("--days must be a positive integer"))?;
+    if days == 0 {
+        return Err(Error::message("--days must be a positive integer"));
+    }
 
     let tokens = invocation.app().tokens()?;
     let deleted = tokens.prune(days).await?;

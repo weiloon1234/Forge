@@ -17,6 +17,7 @@ enum Environment { Development, Production, Staging, Testing, Custom }
   fn is_staging(&self) -> bool
   fn is_testing(&self) -> bool
 enum GuardDriver { Token, Session, Custom }
+enum HttpRateLimitByConfig { Ip, Actor, ActorOrIp }
 struct AppConfig
   fn signing_key_bytes(&self) -> Result<Vec<u8>>
 struct AuthConfig
@@ -30,6 +31,7 @@ struct ConfigRepository
   fn string(&self, path: &str) -> Option<String>
   fn section<T>(&self, section: &str) -> Result<T>
   fn server(&self) -> Result<ServerConfig>
+  fn http(&self) -> Result<HttpConfig>
   fn app(&self) -> Result<AppConfig>
   fn redis(&self) -> Result<RedisConfig>
   fn database(&self) -> Result<DatabaseConfig>
@@ -51,6 +53,11 @@ struct DatabaseConfig
 struct DatabaseModelConfig
 struct GuardDriverConfig
 struct HashingConfig
+struct HttpConfig
+struct HttpCorsConfig
+struct HttpRateLimitConfig
+struct HttpSecurityHeadersConfig
+struct HttpTrustedProxyConfig
 struct I18nConfig
 struct JobsConfig
 struct LockoutConfig
@@ -70,6 +77,7 @@ struct WebSocketObservabilityConfig
 ## Notes
 
 - `AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.
+- `HttpConfig` is optional and additive: global body cap, request timeout, CORS, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.
 - `DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.
 - `JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.
 - `JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.

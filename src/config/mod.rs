@@ -148,6 +148,128 @@ impl Default for ServerConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HttpConfig {
+    pub max_body_size_bytes: usize,
+    pub request_timeout_ms: u64,
+    pub security_headers: HttpSecurityHeadersConfig,
+    pub trusted_proxy: HttpTrustedProxyConfig,
+    pub cors: HttpCorsConfig,
+    pub rate_limit: HttpRateLimitConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HttpSecurityHeadersConfig {
+    pub enabled: bool,
+    pub hsts: bool,
+    pub frame_options: String,
+    pub referrer_policy: String,
+    pub content_security_policy: String,
+}
+
+impl Default for HttpSecurityHeadersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hsts: false,
+            frame_options: "DENY".to_string(),
+            referrer_policy: "strict-origin-when-cross-origin".to_string(),
+            content_security_policy: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HttpTrustedProxyConfig {
+    pub enabled: bool,
+    pub trusted_cidrs: Vec<String>,
+    pub headers: Vec<String>,
+}
+
+impl Default for HttpTrustedProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trusted_cidrs: Vec::new(),
+            headers: vec![
+                "cf-connecting-ip".to_string(),
+                "x-real-ip".to_string(),
+                "x-forwarded-for".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HttpCorsConfig {
+    pub enabled: bool,
+    pub allowed_origins: Vec<String>,
+    pub allowed_methods: Vec<String>,
+    pub allowed_headers: Vec<String>,
+    pub allow_credentials: bool,
+    pub max_age_seconds: u64,
+}
+
+impl Default for HttpCorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_origins: Vec::new(),
+            allowed_methods: vec![
+                "GET".to_string(),
+                "POST".to_string(),
+                "PUT".to_string(),
+                "PATCH".to_string(),
+                "DELETE".to_string(),
+                "OPTIONS".to_string(),
+            ],
+            allowed_headers: vec![
+                "authorization".to_string(),
+                "content-type".to_string(),
+                "x-request-id".to_string(),
+                "x-csrf-token".to_string(),
+            ],
+            allow_credentials: false,
+            max_age_seconds: 600,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpRateLimitByConfig {
+    Ip,
+    Actor,
+    #[default]
+    ActorOrIp,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HttpRateLimitConfig {
+    pub enabled: bool,
+    pub max_requests: u32,
+    pub window_seconds: u64,
+    pub by: HttpRateLimitByConfig,
+    pub key_prefix: String,
+}
+
+impl Default for HttpRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_requests: 600,
+            window_seconds: 60,
+            by: HttpRateLimitByConfig::ActorOrIp,
+            key_prefix: "http:".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct RedisConfig {
@@ -719,6 +841,10 @@ impl ConfigRepository {
         self.section("server")
     }
 
+    pub fn http(&self) -> Result<HttpConfig> {
+        self.section("http")
+    }
+
     pub fn app(&self) -> Result<AppConfig> {
         self.section("app")
     }
@@ -883,9 +1009,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, Environment, JobsConfig,
-        LoggingConfig, ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig,
-        WebSocketConfig,
+        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, Environment, HttpConfig,
+        HttpRateLimitByConfig, JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig,
+        SchedulerConfig, TypeScriptConfig, WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -1130,6 +1256,113 @@ mod tests {
         assert_eq!(jobs.history_retention_days, 30);
         assert_eq!(jobs.history_prune_interval_ms, 3_600_000);
         assert_eq!(jobs.history_prune_batch_size, 1_000);
+    }
+
+    #[test]
+    fn http_config_defaults_are_compatible_and_discoverable() {
+        let http: HttpConfig = ConfigRepository::empty().http().unwrap();
+
+        assert_eq!(http.max_body_size_bytes, 0);
+        assert_eq!(http.request_timeout_ms, 0);
+        assert!(http.security_headers.enabled);
+        assert!(!http.security_headers.hsts);
+        assert_eq!(http.security_headers.frame_options, "DENY");
+        assert!(!http.trusted_proxy.enabled);
+        assert!(http.trusted_proxy.trusted_cidrs.is_empty());
+        assert_eq!(
+            http.trusted_proxy.headers,
+            vec!["cf-connecting-ip", "x-real-ip", "x-forwarded-for"]
+        );
+        assert!(!http.cors.enabled);
+        assert_eq!(
+            http.cors.allowed_methods,
+            vec!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        );
+        assert_eq!(
+            http.cors.allowed_headers,
+            vec![
+                "authorization",
+                "content-type",
+                "x-request-id",
+                "x-csrf-token"
+            ]
+        );
+        assert!(!http.rate_limit.enabled);
+        assert_eq!(http.rate_limit.max_requests, 600);
+        assert_eq!(http.rate_limit.window_seconds, 60);
+        assert_eq!(http.rate_limit.by, HttpRateLimitByConfig::ActorOrIp);
+        assert_eq!(http.rate_limit.key_prefix, "http:");
+    }
+
+    #[test]
+    fn parses_http_config_section() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-http.toml"),
+            r#"
+                [http]
+                max_body_size_bytes = 1048576
+                request_timeout_ms = 2500
+
+                [http.security_headers]
+                hsts = true
+                frame_options = "SAMEORIGIN"
+                referrer_policy = "no-referrer"
+                content_security_policy = "default-src 'self'"
+
+                [http.trusted_proxy]
+                enabled = true
+                trusted_cidrs = ["10.0.0.0/8", "2001:db8::/32"]
+                headers = ["x-forwarded-for"]
+
+                [http.cors]
+                enabled = true
+                allowed_origins = ["https://example.com"]
+                allowed_methods = ["GET", "POST"]
+                allowed_headers = ["authorization"]
+                allow_credentials = true
+                max_age_seconds = 1200
+
+                [http.rate_limit]
+                enabled = true
+                max_requests = 25
+                window_seconds = 10
+                by = "actor_or_ip"
+                key_prefix = "edge:"
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let http: HttpConfig = config.http().unwrap();
+
+        assert_eq!(http.max_body_size_bytes, 1_048_576);
+        assert_eq!(http.request_timeout_ms, 2_500);
+        assert!(http.security_headers.hsts);
+        assert_eq!(http.security_headers.frame_options, "SAMEORIGIN");
+        assert_eq!(http.security_headers.referrer_policy, "no-referrer");
+        assert_eq!(
+            http.security_headers.content_security_policy,
+            "default-src 'self'"
+        );
+        assert!(http.trusted_proxy.enabled);
+        assert_eq!(
+            http.trusted_proxy.trusted_cidrs,
+            vec!["10.0.0.0/8", "2001:db8::/32"]
+        );
+        assert_eq!(http.trusted_proxy.headers, vec!["x-forwarded-for"]);
+        assert!(http.cors.enabled);
+        assert_eq!(http.cors.allowed_origins, vec!["https://example.com"]);
+        assert_eq!(http.cors.allowed_methods, vec!["GET", "POST"]);
+        assert_eq!(http.cors.allowed_headers, vec!["authorization"]);
+        assert!(http.cors.allow_credentials);
+        assert_eq!(http.cors.max_age_seconds, 1_200);
+        assert!(http.rate_limit.enabled);
+        assert_eq!(http.rate_limit.max_requests, 25);
+        assert_eq!(http.rate_limit.window_seconds, 10);
+        assert_eq!(http.rate_limit.by, HttpRateLimitByConfig::ActorOrIp);
+        assert_eq!(http.rate_limit.key_prefix, "edge:");
     }
 
     #[test]

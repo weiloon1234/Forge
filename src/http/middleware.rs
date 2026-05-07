@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::header::{self, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -13,7 +14,11 @@ use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::foundation::AppContext;
+use crate::config::{
+    HttpConfig, HttpCorsConfig, HttpRateLimitByConfig, HttpRateLimitConfig,
+    HttpSecurityHeadersConfig, HttpTrustedProxyConfig,
+};
+use crate::foundation::{AppContext, Error, Result};
 use crate::logging::RuntimeBackendKind;
 use crate::support::runtime::RuntimeBackend;
 
@@ -24,6 +29,14 @@ use crate::support::runtime::RuntimeBackend;
 /// Extension stored by `TrustedProxy` middleware carrying the resolved client IP.
 #[derive(Clone, Debug)]
 pub struct RealIp(pub IpAddr);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HttpEdgeRejection {
+    RateLimited,
+    PayloadTooLarge,
+    Timeout,
+    Cors,
+}
 
 // ---------------------------------------------------------------------------
 // MiddlewareConfig — enum of all middleware types
@@ -48,7 +61,36 @@ pub enum MiddlewareConfig {
     Compression(Compression),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MiddlewareKind {
+    TrustedProxy,
+    MaintenanceMode,
+    Cors,
+    SecurityHeaders,
+    Csrf,
+    RateLimit,
+    MaxBodySize,
+    RequestTimeout,
+    ETag,
+    Compression,
+}
+
 impl MiddlewareConfig {
+    pub(crate) fn kind(&self) -> MiddlewareKind {
+        match self {
+            Self::TrustedProxy(_) => MiddlewareKind::TrustedProxy,
+            Self::MaintenanceMode(_) => MiddlewareKind::MaintenanceMode,
+            Self::Cors(_) => MiddlewareKind::Cors,
+            Self::SecurityHeaders(_) => MiddlewareKind::SecurityHeaders,
+            Self::Csrf(_) => MiddlewareKind::Csrf,
+            Self::RateLimit(_) => MiddlewareKind::RateLimit,
+            Self::MaxBodySize(_) => MiddlewareKind::MaxBodySize,
+            Self::RequestTimeout(_) => MiddlewareKind::RequestTimeout,
+            Self::ETag(_) => MiddlewareKind::ETag,
+            Self::Compression(_) => MiddlewareKind::Compression,
+        }
+    }
+
     /// Priority for ordering: lower values are applied first (outermost layer).
     pub(crate) fn priority(&self) -> u8 {
         match self {
@@ -72,7 +114,7 @@ impl MiddlewareConfig {
         app: &AppContext,
     ) -> axum::Router<AppContext> {
         match self {
-            Self::TrustedProxy(config) => config.apply(router),
+            Self::TrustedProxy(config) => config.apply(router, app),
             Self::MaintenanceMode(config) => config.apply(router, app),
             Self::Cors(config) => config.apply(router),
             Self::SecurityHeaders(config) => config.apply(router),
@@ -104,6 +146,113 @@ pub(crate) fn apply_ordered_middlewares(
         router = mw.apply(router, app);
     }
     router
+}
+
+pub(crate) fn configured_global_middlewares(
+    config: &HttpConfig,
+    explicit: &[MiddlewareConfig],
+) -> Result<Vec<MiddlewareConfig>> {
+    let mut middlewares = Vec::new();
+
+    let has = |kind| explicit.iter().any(|middleware| middleware.kind() == kind);
+
+    if config.trusted_proxy.enabled && !has(MiddlewareKind::TrustedProxy) {
+        middlewares.push(TrustedProxy::from_config(&config.trusted_proxy)?.build());
+    }
+
+    if config.cors.enabled && !has(MiddlewareKind::Cors) {
+        middlewares.push(Cors::from_config(&config.cors)?.build());
+    }
+
+    if config.security_headers.enabled && !has(MiddlewareKind::SecurityHeaders) {
+        middlewares.push(SecurityHeaders::from_config(&config.security_headers)?.build());
+    }
+
+    if config.rate_limit.enabled && !has(MiddlewareKind::RateLimit) {
+        if matches!(config.rate_limit.by, HttpRateLimitByConfig::Actor) {
+            tracing::warn!(
+                "forge: http.rate_limit.by = \"actor\" only applies after an authenticated actor is available; use route-level rate limits or actor_or_ip for global fallback"
+            );
+        }
+        middlewares.push(RateLimit::from_config(&config.rate_limit)?.build());
+    }
+
+    if config.max_body_size_bytes > 0 && !has(MiddlewareKind::MaxBodySize) {
+        middlewares.push(MaxBodySize::bytes(config.max_body_size_bytes).build());
+    }
+
+    if config.request_timeout_ms > 0 && !has(MiddlewareKind::RequestTimeout) {
+        middlewares.push(RequestTimeout::millis(config.request_timeout_ms).build());
+    }
+
+    Ok(middlewares)
+}
+
+pub(crate) fn normalize_edge_rejection_response(response: Response) -> Response {
+    if response.extensions().get::<HttpEdgeRejection>().is_some() {
+        return response;
+    }
+
+    if response_is_json(&response) {
+        return response;
+    }
+
+    let Some(rejection) = edge_rejection_from_status(response.status()) else {
+        return response;
+    };
+    let status = response.status();
+    let original_headers = response.headers().clone();
+    let mut normalized = edge_error_response(status, rejection);
+    for (name, value) in original_headers {
+        let Some(name) = name else {
+            continue;
+        };
+        if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
+            continue;
+        }
+        normalized.headers_mut().insert(name, value);
+    }
+    normalized.extensions_mut().insert(rejection);
+    normalized
+}
+
+pub(crate) fn edge_rejection_from_response(response: &Response) -> Option<HttpEdgeRejection> {
+    response.extensions().get::<HttpEdgeRejection>().copied()
+}
+
+fn response_is_json(response: &Response) -> bool {
+    response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"))
+}
+
+fn edge_rejection_from_status(status: StatusCode) -> Option<HttpEdgeRejection> {
+    match status {
+        StatusCode::PAYLOAD_TOO_LARGE => Some(HttpEdgeRejection::PayloadTooLarge),
+        StatusCode::REQUEST_TIMEOUT => Some(HttpEdgeRejection::Timeout),
+        StatusCode::TOO_MANY_REQUESTS => Some(HttpEdgeRejection::RateLimited),
+        _ => None,
+    }
+}
+
+fn edge_error_response(status: StatusCode, rejection: HttpEdgeRejection) -> Response {
+    let message = match rejection {
+        HttpEdgeRejection::RateLimited => "Rate limit exceeded",
+        HttpEdgeRejection::PayloadTooLarge => "Payload too large",
+        HttpEdgeRejection::Timeout => "Request timed out",
+        HttpEdgeRejection::Cors => "CORS request rejected",
+    };
+
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "message": message,
+            "status": status.as_u16(),
+        })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +394,61 @@ impl Cors {
         self
     }
 
+    pub(crate) fn from_config(config: &HttpCorsConfig) -> Result<Self> {
+        let mut cors = Self::new();
+
+        if config.allowed_origins.iter().any(|origin| origin == "*") {
+            if config.allow_credentials {
+                return Err(Error::message(
+                    "http.cors.allow_credentials cannot be true when allowed_origins contains `*`",
+                ));
+            }
+            cors = cors.allow_any_origin();
+        } else if !config.allowed_origins.is_empty() {
+            for origin in &config.allowed_origins {
+                HeaderValue::from_str(origin).map_err(|error| {
+                    Error::message(format!(
+                        "invalid http.cors.allowed_origins value `{origin}`: {error}"
+                    ))
+                })?;
+            }
+            cors = cors.allow_origins(&config.allowed_origins);
+        }
+
+        let mut methods = Vec::with_capacity(config.allowed_methods.len());
+        for method in &config.allowed_methods {
+            methods.push(Method::from_bytes(method.as_bytes()).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.cors.allowed_methods value `{method}`: {error}"
+                ))
+            })?);
+        }
+        if !methods.is_empty() {
+            cors = cors.allow_methods(methods);
+        }
+
+        let mut headers = Vec::with_capacity(config.allowed_headers.len());
+        for header in &config.allowed_headers {
+            headers.push(HeaderName::from_str(header).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.cors.allowed_headers value `{header}`: {error}"
+                ))
+            })?);
+        }
+        if !headers.is_empty() {
+            cors = cors.allow_headers(headers);
+        }
+
+        if config.allow_credentials {
+            cors = cors.allow_credentials();
+        }
+        if config.max_age_seconds > 0 {
+            cors = cors.max_age(config.max_age_seconds);
+        }
+
+        Ok(cors)
+    }
+
     /// Convert into a `MiddlewareConfig`.
     pub fn build(self) -> MiddlewareConfig {
         MiddlewareConfig::Cors(self)
@@ -260,13 +464,27 @@ impl Cors {
                 if let Ok(value) = HeaderValue::from_str(&origins[0]) {
                     layer.allow_origin(value)
                 } else {
+                    tracing::warn!(
+                        origin = %origins[0],
+                        "forge: skipping invalid CORS origin"
+                    );
                     layer
                 }
             }
             CorsOrigins::List(ref origins) => {
                 let values: Vec<HeaderValue> = origins
                     .iter()
-                    .filter_map(|o| HeaderValue::from_str(o).ok())
+                    .filter_map(|origin| match HeaderValue::from_str(origin) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            tracing::warn!(
+                                origin = %origin,
+                                error = %error,
+                                "forge: skipping invalid CORS origin"
+                            );
+                            None
+                        }
+                    })
                     .collect();
                 layer.allow_origin(values)
             }
@@ -292,8 +510,27 @@ impl Cors {
             layer = layer.max_age(duration);
         }
 
-        router.layer(layer)
+        router
+            .layer(layer)
+            .layer(middleware::from_fn(cors_edge_rejection_marker))
     }
+}
+
+async fn cors_edge_rejection_marker(request: Request, next: Next) -> Response {
+    let is_cors_request = request.headers().contains_key(header::ORIGIN)
+        || request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    let mut response = next.run(request).await;
+    if is_cors_request
+        && matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN
+        )
+    {
+        response.extensions_mut().insert(HttpEdgeRejection::Cors);
+    }
+    response
 }
 
 impl Default for Cors {
@@ -352,6 +589,38 @@ impl SecurityHeaders {
     pub fn disable_hsts(mut self) -> Self {
         self.headers.retain(|(name, _)| *name != HSTS_HEADER);
         self
+    }
+
+    pub(crate) fn from_config(config: &HttpSecurityHeadersConfig) -> Result<Self> {
+        let mut headers = Self::new();
+        if !config.hsts {
+            headers = headers.disable_hsts();
+        }
+        if !config.frame_options.trim().is_empty() {
+            HeaderValue::from_str(&config.frame_options).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.security_headers.frame_options: {error}"
+                ))
+            })?;
+            headers = headers.frame_options(&config.frame_options);
+        }
+        if !config.referrer_policy.trim().is_empty() {
+            HeaderValue::from_str(&config.referrer_policy).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.security_headers.referrer_policy: {error}"
+                ))
+            })?;
+            headers = headers.referrer_policy(&config.referrer_policy);
+        }
+        if !config.content_security_policy.trim().is_empty() {
+            HeaderValue::from_str(&config.content_security_policy).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.security_headers.content_security_policy: {error}"
+                ))
+            })?;
+            headers = headers.content_security_policy(&config.content_security_policy);
+        }
+        Ok(headers)
     }
 
     /// Set the `X-Frame-Options` value.
@@ -699,6 +968,7 @@ pub(crate) enum RateLimitStore {
 pub struct RateLimit {
     max: u32,
     window: RateLimitWindow,
+    window_secs: u64,
     key_prefix: String,
     by: RateLimitBy,
 }
@@ -709,6 +979,7 @@ impl RateLimit {
         Self {
             max,
             window: RateLimitWindow::Minute,
+            window_secs: RateLimitWindow::Minute.duration_secs(),
             key_prefix: "rl:".to_string(),
             by: RateLimitBy::Ip,
         }
@@ -717,19 +988,54 @@ impl RateLimit {
     /// Use a per-second window.
     pub fn per_second(mut self) -> Self {
         self.window = RateLimitWindow::Second;
+        self.window_secs = self.window.duration_secs();
         self
     }
 
     /// Use a per-minute window.
     pub fn per_minute(mut self) -> Self {
         self.window = RateLimitWindow::Minute;
+        self.window_secs = self.window.duration_secs();
         self
     }
 
     /// Use a per-hour window.
     pub fn per_hour(mut self) -> Self {
         self.window = RateLimitWindow::Hour;
+        self.window_secs = self.window.duration_secs();
         self
+    }
+
+    pub(crate) fn from_config(config: &HttpRateLimitConfig) -> Result<Self> {
+        if config.max_requests == 0 {
+            return Err(Error::message(
+                "http.rate_limit.max_requests must be greater than 0 when rate limiting is enabled",
+            ));
+        }
+        if config.window_seconds == 0 {
+            return Err(Error::message(
+                "http.rate_limit.window_seconds must be greater than 0 when rate limiting is enabled",
+            ));
+        }
+
+        let window = match config.window_seconds {
+            1 => RateLimitWindow::Second,
+            3600 => RateLimitWindow::Hour,
+            _ => RateLimitWindow::Minute,
+        };
+        let by = match config.by {
+            HttpRateLimitByConfig::Ip => RateLimitBy::Ip,
+            HttpRateLimitByConfig::Actor => RateLimitBy::Actor,
+            HttpRateLimitByConfig::ActorOrIp => RateLimitBy::ActorOrIp,
+        };
+
+        Ok(Self {
+            max: config.max_requests,
+            window,
+            window_secs: config.window_seconds,
+            key_prefix: config.key_prefix.clone(),
+            by,
+        })
     }
 
     /// Set a custom key prefix for the rate-limit counter.
@@ -765,6 +1071,10 @@ impl RateLimit {
         self.window
     }
 
+    pub(crate) fn window_secs(&self) -> u64 {
+        self.window_secs
+    }
+
     /// Returns the key prefix.
     pub fn key_prefix_str(&self) -> &str {
         &self.key_prefix
@@ -779,8 +1089,9 @@ impl RateLimit {
         let store = create_rate_limit_store(app);
         let state = RateLimitState {
             max: self.max,
-            window: self.window,
+            window_secs: self.window_secs,
             key_prefix: self.key_prefix,
+            by: self.by,
             store,
         };
         router.layer(middleware::from_fn_with_state(state, rate_limit_middleware))
@@ -803,8 +1114,9 @@ pub(crate) fn create_rate_limit_store(app: &AppContext) -> RateLimitStore {
 #[derive(Clone)]
 pub(crate) struct RateLimitState {
     pub(crate) max: u32,
-    pub(crate) window: RateLimitWindow,
+    pub(crate) window_secs: u64,
     pub(crate) key_prefix: String,
+    pub(crate) by: RateLimitBy,
     pub(crate) store: RateLimitStore,
 }
 
@@ -813,39 +1125,13 @@ async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let ip = extract_client_ip(&request);
-    let key_identifier = format!("ip:{}", ip);
+    let Some(key_identifier) = rate_limit_key_from_request(&state, &request) else {
+        return next.run(request).await;
+    };
     let info = rate_limit_info(&state, &key_identifier).await;
 
     if info.current > info.limit {
-        let body = serde_json::json!({
-            "message": "Rate limit exceeded",
-            "status": 429
-        });
-
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [
-                (
-                    HeaderName::from_static("x-ratelimit-limit"),
-                    rate_limit_header_value(info.limit),
-                ),
-                (
-                    HeaderName::from_static("x-ratelimit-remaining"),
-                    HeaderValue::from_static("0"),
-                ),
-                (
-                    HeaderName::from_static("x-ratelimit-reset"),
-                    rate_limit_header_value(info.secs_until_reset),
-                ),
-                (
-                    header::RETRY_AFTER,
-                    rate_limit_header_value(info.secs_until_reset),
-                ),
-            ],
-            axum::Json(body),
-        )
-            .into_response();
+        return rate_limit_response(&info);
     }
 
     let mut response = next.run(request).await;
@@ -865,6 +1151,23 @@ async fn rate_limit_middleware(
     response
 }
 
+fn rate_limit_key_from_request(state: &RateLimitState, request: &Request) -> Option<String> {
+    match state.by {
+        RateLimitBy::Actor => request
+            .extensions()
+            .get::<crate::auth::Actor>()
+            .map(|actor| format!("actor:{}", actor.id)),
+        RateLimitBy::ActorOrIp => Some(
+            request
+                .extensions()
+                .get::<crate::auth::Actor>()
+                .map(|actor| format!("actor:{}", actor.id))
+                .unwrap_or_else(|| format!("ip:{}", extract_client_ip(request))),
+        ),
+        RateLimitBy::Ip => Some(format!("ip:{}", extract_client_ip(request))),
+    }
+}
+
 struct RateLimitInfo {
     current: u32,
     remaining: u32,
@@ -878,7 +1181,7 @@ fn rate_limit_header_value(value: impl ToString) -> HeaderValue {
 
 /// Increment the rate-limit counter for the given key and return current info.
 async fn rate_limit_info(state: &RateLimitState, key_identifier: &str) -> RateLimitInfo {
-    let window_secs = state.window.duration_secs();
+    let window_secs = state.window_secs.max(1);
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -937,42 +1240,61 @@ pub(crate) async fn enforce_rate_limit(
     let info = rate_limit_info(state, key_identifier).await;
 
     if info.current > info.limit {
-        let body = serde_json::json!({
-            "message": "Rate limit exceeded",
-            "status": 429
-        });
-
-        return Some(
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [
-                    (
-                        HeaderName::from_static("x-ratelimit-limit"),
-                        rate_limit_header_value(info.limit),
-                    ),
-                    (
-                        HeaderName::from_static("x-ratelimit-remaining"),
-                        HeaderValue::from_static("0"),
-                    ),
-                    (
-                        HeaderName::from_static("x-ratelimit-reset"),
-                        rate_limit_header_value(info.secs_until_reset),
-                    ),
-                    (
-                        header::RETRY_AFTER,
-                        rate_limit_header_value(info.secs_until_reset),
-                    ),
-                ],
-                axum::Json(body),
-            )
-                .into_response(),
-        );
+        return Some(rate_limit_response(&info));
     }
 
     None
 }
 
-fn extract_client_ip(request: &Request) -> IpAddr {
+pub(crate) async fn enforce_rate_limit_for_actor(
+    state: &RateLimitState,
+    actor: &crate::auth::Actor,
+    client_ip: IpAddr,
+) -> Option<Response> {
+    let key_identifier = match state.by {
+        RateLimitBy::Ip => format!("ip:{client_ip}"),
+        RateLimitBy::Actor | RateLimitBy::ActorOrIp => format!("actor:{}", actor.id),
+    };
+
+    enforce_rate_limit(state, &key_identifier).await
+}
+
+fn rate_limit_response(info: &RateLimitInfo) -> Response {
+    let body = serde_json::json!({
+        "message": "Rate limit exceeded",
+        "status": 429
+    });
+
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        [
+            (
+                HeaderName::from_static("x-ratelimit-limit"),
+                rate_limit_header_value(info.limit),
+            ),
+            (
+                HeaderName::from_static("x-ratelimit-remaining"),
+                HeaderValue::from_static("0"),
+            ),
+            (
+                HeaderName::from_static("x-ratelimit-reset"),
+                rate_limit_header_value(info.secs_until_reset),
+            ),
+            (
+                header::RETRY_AFTER,
+                rate_limit_header_value(info.secs_until_reset),
+            ),
+        ],
+        axum::Json(body),
+    )
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(HttpEdgeRejection::RateLimited);
+    response
+}
+
+pub(crate) fn extract_client_ip(request: &Request) -> IpAddr {
     // Prefer RealIp set by TrustedProxy middleware
     if let Some(RealIp(ip)) = request.extensions().get::<RealIp>() {
         return *ip;
@@ -980,6 +1302,9 @@ fn extract_client_ip(request: &Request) -> IpAddr {
     // Fall back to connect info
     if let Some(addr) = request.extensions().get::<ConnectInfoAddr>() {
         return addr.0.ip();
+    }
+    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return addr.ip();
     }
     IpAddr::V4(Ipv4Addr::UNSPECIFIED)
 }
@@ -1038,6 +1363,11 @@ impl MaxBodySize {
 pub struct RequestTimeout(Duration);
 
 impl RequestTimeout {
+    /// Timeout after `n` milliseconds.
+    pub fn millis(n: u64) -> Self {
+        Self(Duration::from_millis(n))
+    }
+
     /// Timeout after `n` seconds.
     pub fn secs(n: u64) -> Self {
         Self(Duration::from_secs(n))
@@ -1238,24 +1568,24 @@ const X_FORWARDED_FOR: &str = "x-forwarded-for";
 
 /// Trusted proxy middleware.
 ///
-/// Resolves the real client IP from proxy headers. Headers are checked in
-/// priority order:
-/// 1. `CF-Connecting-IP` (Cloudflare)
-/// 2. `X-Real-IP` (nginx)
-/// 3. `X-Forwarded-For` (first entry)
-/// 4. Any custom headers registered via `with_header()`
+/// Resolves the real client IP from proxy headers. Headers are checked in the
+/// configured priority order.
 ///
 /// The resolved IP is stored as a [`RealIp`] extension.
 #[derive(Clone, Debug)]
 pub struct TrustedProxy {
-    custom_headers: Vec<HeaderName>,
+    headers: Vec<HeaderName>,
+    trusted_cidrs: Vec<IpCidr>,
+    trust_all: bool,
 }
 
 impl TrustedProxy {
     /// Create with default header priority (CF-Connecting-IP, X-Real-IP, X-Forwarded-For).
     pub fn new() -> Self {
         Self {
-            custom_headers: Vec::new(),
+            headers: default_proxy_headers(),
+            trusted_cidrs: Vec::new(),
+            trust_all: true,
         }
     }
 
@@ -1266,8 +1596,52 @@ impl TrustedProxy {
 
     /// Append a custom header to the priority list (checked after the defaults).
     pub fn with_header(mut self, hdr: HeaderName) -> Self {
-        self.custom_headers.push(hdr);
+        self.headers.push(hdr);
         self
+    }
+
+    /// Trust a proxy CIDR range, such as `127.0.0.1/32` or `10.0.0.0/8`.
+    pub fn trusted_cidr(mut self, cidr: &str) -> Self {
+        match cidr.parse::<IpCidr>() {
+            Ok(cidr) => {
+                self.trust_all = false;
+                self.trusted_cidrs.push(cidr);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    cidr = %cidr,
+                    error = %error,
+                    "forge: skipping invalid trusted proxy CIDR"
+                );
+            }
+        }
+        self
+    }
+
+    pub(crate) fn from_config(config: &HttpTrustedProxyConfig) -> Result<Self> {
+        let mut headers = Vec::with_capacity(config.headers.len());
+        for header in &config.headers {
+            headers.push(HeaderName::from_str(header).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.trusted_proxy.headers value `{header}`: {error}"
+                ))
+            })?);
+        }
+
+        let mut trusted_cidrs = Vec::with_capacity(config.trusted_cidrs.len());
+        for cidr in &config.trusted_cidrs {
+            trusted_cidrs.push(cidr.parse::<IpCidr>().map_err(|error| {
+                Error::message(format!(
+                    "invalid http.trusted_proxy.trusted_cidrs value `{cidr}`: {error}"
+                ))
+            })?);
+        }
+
+        Ok(Self {
+            headers,
+            trusted_cidrs,
+            trust_all: false,
+        })
     }
 
     /// Convert into a `MiddlewareConfig`.
@@ -1275,11 +1649,26 @@ impl TrustedProxy {
         MiddlewareConfig::TrustedProxy(self)
     }
 
-    fn apply(self, router: axum::Router<AppContext>) -> axum::Router<AppContext> {
-        let custom_headers = self.custom_headers;
+    fn apply(self, router: axum::Router<AppContext>, app: &AppContext) -> axum::Router<AppContext> {
+        if self.trust_all
+            && app
+                .config()
+                .app()
+                .map(|config| config.environment.is_production_like())
+                .unwrap_or(false)
+        {
+            tracing::warn!(
+                "forge: TrustedProxy middleware trusts all proxy headers; configure http.trusted_proxy.trusted_cidrs for production"
+            );
+        }
+        let state = TrustedProxyState {
+            headers: self.headers,
+            trusted_cidrs: self.trusted_cidrs,
+            trust_all: self.trust_all,
+        };
         router.layer(middleware::from_fn(move |request: Request, next: Next| {
-            let custom_headers = custom_headers.clone();
-            async move { trusted_proxy_fn(request, next, &custom_headers).await }
+            let state = state.clone();
+            async move { trusted_proxy_fn(request, next, state).await }
         }))
     }
 }
@@ -1290,57 +1679,153 @@ impl Default for TrustedProxy {
     }
 }
 
-async fn trusted_proxy_fn(
-    mut request: Request,
-    next: Next,
-    custom_headers: &[HeaderName],
-) -> Response {
-    let ip = resolve_real_ip(request.headers(), custom_headers);
+#[derive(Clone)]
+struct TrustedProxyState {
+    headers: Vec<HeaderName>,
+    trusted_cidrs: Vec<IpCidr>,
+    trust_all: bool,
+}
+
+async fn trusted_proxy_fn(mut request: Request, next: Next, state: TrustedProxyState) -> Response {
+    let peer_ip = peer_ip(&request);
+    let ip = if state.trust_all || peer_ip.is_some_and(|ip| proxy_is_trusted(&state, ip)) {
+        resolve_real_ip(request.headers(), &state.headers).unwrap_or_else(|| fallback_ip(&request))
+    } else {
+        fallback_ip(&request)
+    };
     request.extensions_mut().insert(RealIp(ip));
     next.run(request).await
 }
 
-pub(crate) fn resolve_real_ip(headers: &HeaderMap, custom_headers: &[HeaderName]) -> IpAddr {
-    // 1. CF-Connecting-IP
-    if let Some(ip) = headers
-        .get(CF_CONNECTING_IP)
-        .and_then(|v: &HeaderValue| v.to_str().ok())
-        .and_then(|s: &str| s.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
+fn proxy_is_trusted(state: &TrustedProxyState, peer_ip: IpAddr) -> bool {
+    state
+        .trusted_cidrs
+        .iter()
+        .any(|cidr| cidr.contains(peer_ip))
+}
 
-    // 2. X-Real-IP
-    if let Some(ip) = headers
-        .get(X_REAL_IP)
-        .and_then(|v: &HeaderValue| v.to_str().ok())
-        .and_then(|s: &str| s.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
+fn peer_ip(request: &Request) -> Option<IpAddr> {
+    request
+        .extensions()
+        .get::<ConnectInfoAddr>()
+        .map(|addr| addr.0.ip())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip())
+        })
+}
 
-    // 3. X-Forwarded-For (first entry)
-    if let Some(ip) = headers
-        .get(X_FORWARDED_FOR)
-        .and_then(|v: &HeaderValue| v.to_str().ok())
-        .and_then(|s: &str| s.split(',').next())
-        .and_then(|s: &str| s.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
+fn fallback_ip(request: &Request) -> IpAddr {
+    peer_ip(request).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
 
-    // 4. Custom headers
-    for header_name in custom_headers {
-        if let Some(ip) = headers
-            .get(header_name)
-            .and_then(|v: &HeaderValue| v.to_str().ok())
-            .and_then(|s: &str| s.trim().parse::<IpAddr>().ok())
-        {
-            return ip;
+pub(crate) fn resolve_real_ip(
+    headers: &HeaderMap,
+    headers_to_check: &[HeaderName],
+) -> Option<IpAddr> {
+    for header_name in headers_to_check {
+        let Some(value) = headers.get(header_name).and_then(|v| v.to_str().ok()) else {
+            continue;
+        };
+        let raw = if header_name.as_str().eq_ignore_ascii_case(X_FORWARDED_FOR) {
+            value.split(',').next().unwrap_or(value)
+        } else {
+            value
+        };
+        if let Ok(ip) = raw.trim().parse::<IpAddr>() {
+            return Some(ip);
         }
     }
 
-    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    None
+}
+
+pub(crate) fn resolve_real_ip_from_default_headers(headers: &HeaderMap) -> Option<IpAddr> {
+    resolve_real_ip(headers, &default_proxy_headers())
+}
+
+fn default_proxy_headers() -> Vec<HeaderName> {
+    vec![
+        HeaderName::from_static(CF_CONNECTING_IP),
+        HeaderName::from_static(X_REAL_IP),
+        HeaderName::from_static(X_FORWARDED_FOR),
+    ]
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IpCidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl IpCidr {
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                let prefix = self.prefix.min(32);
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                u32::from(network) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                let prefix = self.prefix.min(128);
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                u128::from(network) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+impl FromStr for IpCidr {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(Error::message("CIDR value is empty"));
+        }
+
+        let (ip, prefix) = match value.split_once('/') {
+            Some((ip, prefix)) => {
+                let ip = ip.parse::<IpAddr>().map_err(Error::other)?;
+                let prefix = prefix.parse::<u8>().map_err(Error::other)?;
+                (ip, prefix)
+            }
+            None => {
+                let ip = value.parse::<IpAddr>().map_err(Error::other)?;
+                let prefix = match ip {
+                    IpAddr::V4(_) => 32,
+                    IpAddr::V6(_) => 128,
+                };
+                (ip, prefix)
+            }
+        };
+
+        let max_prefix = match ip {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix > max_prefix {
+            return Err(Error::message(format!(
+                "CIDR prefix {prefix} is invalid for {ip}"
+            )));
+        }
+
+        Ok(Self {
+            network: ip,
+            prefix,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +2021,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cors_config_rejects_wildcard_with_credentials() {
+        let config = crate::config::HttpCorsConfig {
+            enabled: true,
+            allowed_origins: vec!["*".to_string()],
+            allow_credentials: true,
+            ..Default::default()
+        };
+
+        let error = Cors::from_config(&config).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("http.cors.allow_credentials cannot be true"));
+    }
+
     fn build_cors_layer(cors: Cors) -> CorsLayer {
         let mut layer = CorsLayer::new();
         layer = match cors.origins {
@@ -1648,8 +2149,9 @@ mod tests {
     async fn rate_limit_allows_under_limit() {
         let state = RateLimitState {
             max: 2,
-            window: RateLimitWindow::Minute,
+            window_secs: 60,
             key_prefix: "test:".to_string(),
+            by: RateLimitBy::Ip,
             store: RateLimitStore::Memory(Arc::new(Mutex::new(HashMap::new()))),
         };
 
@@ -1670,8 +2172,9 @@ mod tests {
     async fn rate_limit_blocks_over_limit() {
         let state = RateLimitState {
             max: 1,
-            window: RateLimitWindow::Minute,
+            window_secs: 60,
             key_prefix: "test:".to_string(),
+            by: RateLimitBy::Ip,
             store: RateLimitStore::Memory(Arc::new(Mutex::new(HashMap::new()))),
         };
 
@@ -1691,26 +2194,38 @@ mod tests {
         assert!(response.headers().get(header::RETRY_AFTER).is_some());
     }
 
+    #[tokio::test]
+    async fn actor_rate_limit_does_not_fall_back_to_ip_before_auth() {
+        let state = RateLimitState {
+            max: 0,
+            window_secs: 60,
+            key_prefix: "test:".to_string(),
+            by: RateLimitBy::Actor,
+            store: RateLimitStore::Memory(Arc::new(Mutex::new(HashMap::new()))),
+        };
+
+        let router = axum::Router::new().route("/", get(ok_handler)).layer(
+            axum::middleware::from_fn_with_state(state.clone(), rate_limit_middleware),
+        );
+
+        let request = HttpRequest::builder().body(Body::empty()).unwrap();
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("x-ratelimit-limit").is_none());
+    }
+
     // ---- TrustedProxy tests ----
 
     #[tokio::test]
     async fn trusted_proxy_x_forwarded_for() {
-        let headers_to_check: Vec<HeaderName> = vec![];
-        let router =
-            axum::Router::<()>::new()
-                .route("/", get(ok_handler))
-                .layer(axum::middleware::from_fn(move |req, next| {
-                    let h = headers_to_check.clone();
-                    async move { trusted_proxy_fn(req, next, &h).await }
-                }));
+        let headers = HeaderMap::from_iter([(
+            HeaderName::from_static(X_FORWARDED_FOR),
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
+        )]);
+        let ip = resolve_real_ip(&headers, &default_proxy_headers());
 
-        let request = HttpRequest::builder()
-            .header(X_FORWARDED_FOR, "1.2.3.4, 5.6.7.8")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(ip, Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
     }
 
     #[tokio::test]
@@ -1726,9 +2241,9 @@ mod tests {
                     HeaderValue::from_static("10.0.0.2"),
                 ),
             ]),
-            &[],
+            &default_proxy_headers(),
         );
-        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
     }
 
     #[tokio::test]
@@ -1744,9 +2259,9 @@ mod tests {
                     HeaderValue::from_static("10.0.0.4"),
                 ),
             ]),
-            &[],
+            &default_proxy_headers(),
         );
-        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+        assert_eq!(ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))));
     }
 
     #[tokio::test]
@@ -1756,7 +2271,75 @@ mod tests {
             &HeaderMap::from_iter([(custom.clone(), HeaderValue::from_static("10.0.0.5"))]),
             &[custom],
         );
-        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+        assert_eq!(ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))));
+    }
+
+    #[test]
+    fn trusted_proxy_config_requires_valid_cidrs() {
+        let error = TrustedProxy::from_config(&crate::config::HttpTrustedProxyConfig {
+            enabled: true,
+            trusted_cidrs: vec!["10.0.0.0/99".to_string()],
+            ..Default::default()
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("CIDR prefix 99 is invalid"));
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_matching_supports_ipv4_and_ipv6() {
+        let proxy = TrustedProxy::from_config(&crate::config::HttpTrustedProxyConfig {
+            enabled: true,
+            trusted_cidrs: vec!["10.0.0.0/8".to_string(), "2001:db8::/32".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let state = TrustedProxyState {
+            headers: proxy.headers,
+            trusted_cidrs: proxy.trusted_cidrs,
+            trust_all: proxy.trust_all,
+        };
+
+        assert!(proxy_is_trusted(
+            &state,
+            IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40))
+        ));
+        assert!(!proxy_is_trusted(
+            &state,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
+        ));
+        assert!(proxy_is_trusted(&state, "2001:db8::1".parse().unwrap()));
+        assert!(!proxy_is_trusted(&state, "2001:dead::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn configured_http_middlewares_skip_explicit_duplicate_kinds() {
+        let http = crate::config::HttpConfig {
+            max_body_size_bytes: 1024,
+            security_headers: crate::config::HttpSecurityHeadersConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            rate_limit: crate::config::HttpRateLimitConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let middlewares =
+            configured_global_middlewares(&http, &[SecurityHeaders::new().build()]).unwrap();
+
+        assert!(middlewares
+            .iter()
+            .any(|middleware| matches!(middleware, MiddlewareConfig::MaxBodySize(_))));
+        assert!(middlewares
+            .iter()
+            .any(|middleware| matches!(middleware, MiddlewareConfig::RateLimit(_))));
+        assert!(!middlewares
+            .iter()
+            .any(|middleware| matches!(middleware, MiddlewareConfig::SecurityHeaders(_))));
     }
 
     // ---- MiddlewareConfig ordering ----

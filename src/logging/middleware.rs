@@ -93,6 +93,7 @@ pub(crate) async fn request_context_middleware(
                 .into_response()
         }
     };
+    response = crate::http::middleware::normalize_edge_rejection_response(response);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
@@ -126,6 +127,9 @@ pub(crate) async fn request_context_middleware(
     .await;
     let status = response.status();
     if let Ok(diagnostics) = app.diagnostics() {
+        if let Some(rejection) = crate::http::middleware::edge_rejection_from_response(&response) {
+            diagnostics.record_http_edge_rejection(rejection);
+        }
         if should_sample_http_request(&app, &path) {
             diagnostics.record_http_request(HttpRequestRecord {
                 method: method.to_string(),
@@ -223,6 +227,7 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::middleware;
+    use axum::response::IntoResponse;
     use axum::routing::get;
     use tower::ServiceExt;
 
@@ -396,6 +401,50 @@ mod tests {
         assert_eq!(snapshot.requests_total, 1);
         assert_eq!(snapshot.success_total, 1);
         assert_eq!(snapshot.server_error_total, 0);
+    }
+
+    #[tokio::test]
+    async fn request_context_middleware_normalizes_and_counts_edge_rejections() {
+        let reporter = Arc::new(StubReporter::default());
+        let (app, diagnostics) = test_app_with_reporter(reporter);
+        let router = axum::Router::new()
+            .route(
+                "/large",
+                get(|| async { StatusCode::PAYLOAD_TOO_LARGE.into_response() }),
+            )
+            .layer(middleware::from_fn_with_state(
+                app,
+                request_context_middleware,
+            ));
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/large")
+                    .header(REQUEST_ID_HEADER, "req-http-large")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/json"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["message"], "Payload too large");
+        assert_eq!(payload["status"], 413);
+
+        let snapshot = diagnostics.snapshot().http;
+        assert_eq!(snapshot.requests_total, 1);
+        assert_eq!(snapshot.client_error_total, 1);
+        assert_eq!(snapshot.edge_rejections.payload_too_large_total, 1);
     }
 
     #[tokio::test]

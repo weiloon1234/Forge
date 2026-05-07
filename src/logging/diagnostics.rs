@@ -12,6 +12,7 @@ use super::types::{
 };
 use super::{catch_async_panic, panic_payload_message};
 use crate::foundation::{AppContext, Result};
+use crate::http::middleware::HttpEdgeRejection;
 use crate::support::sync::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use crate::support::ChannelId;
 
@@ -60,7 +61,16 @@ pub struct HttpRuntimeSnapshot {
     pub redirection_total: u64,
     pub client_error_total: u64,
     pub server_error_total: u64,
+    pub edge_rejections: HttpEdgeRejectionSnapshot,
     pub duration_ms: HttpDurationHistogramSnapshot,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpEdgeRejectionSnapshot {
+    pub rate_limited_total: u64,
+    pub payload_too_large_total: u64,
+    pub timeout_total: u64,
+    pub cors_rejected_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -243,6 +253,10 @@ struct HttpCounters {
     redirection_total: AtomicU64,
     client_error_total: AtomicU64,
     server_error_total: AtomicU64,
+    rate_limited_total: AtomicU64,
+    payload_too_large_total: AtomicU64,
+    timeout_total: AtomicU64,
+    cors_rejected_total: AtomicU64,
     duration_ms: HttpDurationHistogram,
     requests: Mutex<VecDeque<HttpRequestObservation>>,
     sample_retention: usize,
@@ -257,6 +271,10 @@ impl HttpCounters {
             redirection_total: AtomicU64::new(0),
             client_error_total: AtomicU64::new(0),
             server_error_total: AtomicU64::new(0),
+            rate_limited_total: AtomicU64::new(0),
+            payload_too_large_total: AtomicU64::new(0),
+            timeout_total: AtomicU64::new(0),
+            cors_rejected_total: AtomicU64::new(0),
             duration_ms: HttpDurationHistogram::default(),
             requests: Mutex::new(VecDeque::with_capacity(sample_retention)),
             sample_retention,
@@ -273,7 +291,30 @@ impl HttpCounters {
             redirection_total: self.redirection_total.load(Ordering::Relaxed),
             client_error_total: self.client_error_total.load(Ordering::Relaxed),
             server_error_total: self.server_error_total.load(Ordering::Relaxed),
+            edge_rejections: HttpEdgeRejectionSnapshot {
+                rate_limited_total: self.rate_limited_total.load(Ordering::Relaxed),
+                payload_too_large_total: self.payload_too_large_total.load(Ordering::Relaxed),
+                timeout_total: self.timeout_total.load(Ordering::Relaxed),
+                cors_rejected_total: self.cors_rejected_total.load(Ordering::Relaxed),
+            },
             duration_ms: self.duration_ms.snapshot(),
+        }
+    }
+
+    fn record_edge_rejection(&self, rejection: HttpEdgeRejection) {
+        match rejection {
+            HttpEdgeRejection::RateLimited => {
+                self.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+            }
+            HttpEdgeRejection::PayloadTooLarge => {
+                self.payload_too_large_total.fetch_add(1, Ordering::Relaxed);
+            }
+            HttpEdgeRejection::Timeout => {
+                self.timeout_total.fetch_add(1, Ordering::Relaxed);
+            }
+            HttpEdgeRejection::Cors => {
+                self.cors_rejected_total.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -797,6 +838,13 @@ impl RuntimeDiagnostics {
         let duration_ms = request.duration_ms;
         self.record_http_response_inner(status, Some(duration_ms));
         self.http.record_request(request);
+    }
+
+    pub(crate) fn record_http_edge_rejection(&self, rejection: HttpEdgeRejection) {
+        if !self.capture_enabled {
+            return;
+        }
+        self.http.record_edge_rejection(rejection);
     }
 
     fn record_http_response_inner(&self, status: axum::http::StatusCode, duration_ms: Option<u64>) {

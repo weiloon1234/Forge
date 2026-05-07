@@ -420,6 +420,49 @@ App::builder()
     .run_http()?;
 ```
 
+### Global HTTP Config
+
+Forge can also derive global edge middleware from `config/forge.toml`. This is additive: existing
+route middleware and code-registered global middleware keep working, and an explicitly registered
+middleware kind wins over the config-derived duplicate.
+
+```toml
+[http]
+max_body_size_bytes = 0        # 0 = no global cap
+request_timeout_ms = 0         # 0 = no global timeout
+
+[http.security_headers]
+enabled = true
+hsts = false                   # enable only after HTTPS is guaranteed
+frame_options = "DENY"
+referrer_policy = "strict-origin-when-cross-origin"
+content_security_policy = ""
+
+[http.trusted_proxy]
+enabled = false
+trusted_cidrs = []
+headers = ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"]
+
+[http.cors]
+enabled = false
+allowed_origins = []
+allowed_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+allowed_headers = ["authorization", "content-type", "x-request-id", "x-csrf-token"]
+allow_credentials = false
+max_age_seconds = 600
+
+[http.rate_limit]
+enabled = false
+max_requests = 600
+window_seconds = 60
+by = "actor_or_ip"             # ip | actor | actor_or_ip
+key_prefix = "http:"
+```
+
+Compatibility defaults keep hard caps, CORS, trusted proxy, and rate limiting opt-in. Security
+headers are enabled by default with HSTS off, so local HTTP and first deploys stay usable while
+still publishing the production hardening knobs.
+
 ### Execution Order
 
 Middleware runs in **priority order** — lower numbers run first (outermost layer):
@@ -565,6 +608,16 @@ X-RateLimit-Reset: 1704067200
 ```
 
 On limit exceeded: **429 Too Many Requests** with `Retry-After` header.
+Forge returns a JSON error body:
+
+```json
+{ "message": "Rate limit exceeded", "status": 429 }
+```
+
+Actor-only limits run only after an authenticated actor exists, so use route-level rate limits for
+strict per-actor limits. `actor_or_ip` uses the actor once authenticated and the client IP
+otherwise, which is the safer global fallback. IP keys use `RealIp` from `TrustedProxy` when
+available and fall back to TCP peer connect info on the real server path.
 
 ### Max Body Size
 
@@ -574,7 +627,7 @@ MiddlewareConfig::from(MaxBodySize::kb(512))   // 512 KB limit
 MiddlewareConfig::from(MaxBodySize::bytes(1024)) // 1024 bytes
 ```
 
-Returns **413 Payload Too Large** if exceeded.
+Returns **413 Payload Too Large** with a JSON error body if exceeded.
 
 ### Request Timeout
 
@@ -583,7 +636,7 @@ MiddlewareConfig::from(RequestTimeout::secs(30))
 MiddlewareConfig::from(RequestTimeout::mins(5))
 ```
 
-Returns **408 Request Timeout** if exceeded.
+Returns **408 Request Timeout** with a JSON error body if exceeded.
 
 ### ETag
 
@@ -604,6 +657,10 @@ MiddlewareConfig::from(TrustedProxy::cloudflare())
 ```
 
 Resolution order: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` (first entry).
+When configured through `[http.trusted_proxy]`, Forge only honors those headers if the TCP peer IP
+matches `trusted_cidrs`. Code-registered `TrustedProxy::cloudflare()` remains source-compatible and
+trusts all proxy headers; production-like environments log a warning so operators can move to CIDR
+configuration.
 
 The resolved IP is available via the `RealIp` extractor:
 

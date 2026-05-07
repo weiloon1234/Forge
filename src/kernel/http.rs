@@ -62,8 +62,14 @@ impl HttpKernel {
         // Ignore error if already registered (e.g. build_router called multiple times)
         let _ = self.app.container().singleton_arc(route_registry);
 
-        let mut router =
-            registrar.into_router_with_middlewares(self.app.clone(), self.middlewares.clone());
+        let http_config = self.app.config().http()?;
+        let mut middlewares = crate::http::middleware::configured_global_middlewares(
+            &http_config,
+            &self.middlewares,
+        )?;
+        middlewares.extend(self.middlewares.clone());
+
+        let mut router = registrar.into_router_with_middlewares(self.app.clone(), middlewares);
 
         if let Some(ref spa_dir) = self.spa_dir {
             router = router.fallback_service(crate::http::spa::spa_fallback(spa_dir.clone()));
@@ -102,10 +108,14 @@ impl BoundHttpServer {
     }
 
     pub async fn serve(self) -> Result<()> {
-        axum::serve(self.listener, self.router)
-            .with_graceful_shutdown(super::shutdown::shutdown_signal())
-            .await
-            .map_err(Error::other)
+        axum::serve(
+            self.listener,
+            self.router
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(super::shutdown::shutdown_signal())
+        .await
+        .map_err(Error::other)
     }
 }
 

@@ -551,7 +551,7 @@ fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
 }
 
 fn extract_client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
-    let ip = crate::http::middleware::resolve_real_ip(headers, &[]);
+    let ip = crate::http::middleware::resolve_real_ip_from_default_headers(headers)?;
     if ip.is_unspecified() {
         None
     } else {

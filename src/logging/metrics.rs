@@ -60,6 +60,40 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
     );
     write_help_type(
         &mut out,
+        "forge_http_edge_rejections_total",
+        "Total HTTP edge rejections by reason",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_edge_rejections_total",
+        "reason",
+        "rate_limited",
+        snapshot.http.edge_rejections.rate_limited_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_edge_rejections_total",
+        "reason",
+        "payload_too_large",
+        snapshot.http.edge_rejections.payload_too_large_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_edge_rejections_total",
+        "reason",
+        "timeout",
+        snapshot.http.edge_rejections.timeout_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_http_edge_rejections_total",
+        "reason",
+        "cors",
+        snapshot.http.edge_rejections.cors_rejected_total,
+    );
+    write_help_type(
+        &mut out,
         "forge_http_request_duration_ms",
         "HTTP request duration histogram in milliseconds",
         "histogram",
@@ -444,8 +478,8 @@ mod tests {
     use super::*;
     use crate::logging::diagnostics::{
         AuthRuntimeSnapshot, HttpDurationBucketSnapshot, HttpDurationHistogramSnapshot,
-        HttpRuntimeSnapshot, JobRuntimeSnapshot, RuntimeSnapshot, SchedulerRuntimeSnapshot,
-        WebSocketRuntimeSnapshot,
+        HttpEdgeRejectionSnapshot, HttpRuntimeSnapshot, JobRuntimeSnapshot, RuntimeSnapshot,
+        SchedulerRuntimeSnapshot, WebSocketRuntimeSnapshot,
     };
     use crate::logging::types::RuntimeBackendKind;
 
@@ -461,6 +495,12 @@ mod tests {
                 redirection_total: 5,
                 client_error_total: 10,
                 server_error_total: 5,
+                edge_rejections: HttpEdgeRejectionSnapshot {
+                    rate_limited_total: 3,
+                    payload_too_large_total: 2,
+                    timeout_total: 1,
+                    cors_rejected_total: 0,
+                },
                 duration_ms: HttpDurationHistogramSnapshot {
                     count: 100,
                     sum_ms: 12_345,
@@ -520,6 +560,9 @@ mod tests {
         assert!(output.contains("forge_bootstrap_complete 1"));
         assert!(output.contains("forge_http_requests_total{class=\"2xx\"} 80"));
         assert!(output.contains("forge_http_requests_total{class=\"5xx\"} 5"));
+        assert!(output.contains("forge_http_edge_rejections_total{reason=\"rate_limited\"} 3"));
+        assert!(output.contains("forge_http_edge_rejections_total{reason=\"payload_too_large\"} 2"));
+        assert!(output.contains("forge_http_edge_rejections_total{reason=\"timeout\"} 1"));
         assert!(output.contains("# TYPE forge_http_request_duration_ms histogram"));
         assert!(output.contains("forge_http_request_duration_ms_bucket{le=\"25\"} 25"));
         assert!(output.contains("forge_http_request_duration_ms_bucket{le=\"+Inf\"} 100"));
@@ -580,6 +623,7 @@ mod tests {
                 redirection_total: 0,
                 client_error_total: 0,
                 server_error_total: 0,
+                edge_rejections: HttpEdgeRejectionSnapshot::default(),
                 duration_ms: HttpDurationHistogramSnapshot {
                     count: 0,
                     sum_ms: 0,
@@ -660,6 +704,7 @@ mod tests {
                 redirection_total: 0,
                 client_error_total: 0,
                 server_error_total: 0,
+                edge_rejections: HttpEdgeRejectionSnapshot::default(),
                 duration_ms: HttpDurationHistogramSnapshot {
                     count: 0,
                     sum_ms: 0,

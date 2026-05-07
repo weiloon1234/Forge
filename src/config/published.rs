@@ -129,6 +129,119 @@ const SERVER_FIELDS: &[PublishedField] = &[
     field("port", "3000", "3000", true, true, None),
 ];
 
+const HTTP_FIELDS: &[PublishedField] = &[
+    field(
+        "max_body_size_bytes",
+        "0",
+        "0",
+        false,
+        false,
+        Some("0 = no global body-size cap; route middleware can still cap"),
+    ),
+    field(
+        "request_timeout_ms",
+        "0",
+        "0",
+        false,
+        false,
+        Some("0 = no global request timeout"),
+    ),
+];
+
+const HTTP_SECURITY_HEADERS_FIELDS: &[PublishedField] = &[
+    field("enabled", "true", "true", false, false, None),
+    field(
+        "hsts",
+        "false",
+        "false",
+        false,
+        false,
+        Some("Enable only after HTTPS is guaranteed"),
+    ),
+    field("frame_options", "\"DENY\"", "DENY", false, false, None),
+    field(
+        "referrer_policy",
+        "\"strict-origin-when-cross-origin\"",
+        "strict-origin-when-cross-origin",
+        false,
+        false,
+        None,
+    ),
+    field(
+        "content_security_policy",
+        "\"\"",
+        "",
+        false,
+        false,
+        Some("Optional CSP header value"),
+    ),
+];
+
+const HTTP_TRUSTED_PROXY_FIELDS: &[PublishedField] = &[
+    field("enabled", "false", "false", false, false, None),
+    field(
+        "trusted_cidrs",
+        "[]",
+        "[]",
+        false,
+        false,
+        Some("Proxy CIDRs allowed to supply client IP headers"),
+    ),
+    field(
+        "headers",
+        "[\"cf-connecting-ip\", \"x-real-ip\", \"x-forwarded-for\"]",
+        "[\"cf-connecting-ip\",\"x-real-ip\",\"x-forwarded-for\"]",
+        false,
+        false,
+        Some("Checked in order when peer IP is trusted"),
+    ),
+];
+
+const HTTP_CORS_FIELDS: &[PublishedField] = &[
+    field("enabled", "false", "false", false, false, None),
+    field(
+        "allowed_origins",
+        "[]",
+        "[]",
+        false,
+        false,
+        Some("Exact origins or [\"*\"]; wildcard cannot be used with credentials"),
+    ),
+    field(
+        "allowed_methods",
+        "[\"GET\", \"POST\", \"PUT\", \"PATCH\", \"DELETE\", \"OPTIONS\"]",
+        "[\"GET\",\"POST\",\"PUT\",\"PATCH\",\"DELETE\",\"OPTIONS\"]",
+        false,
+        false,
+        None,
+    ),
+    field(
+        "allowed_headers",
+        "[\"authorization\", \"content-type\", \"x-request-id\", \"x-csrf-token\"]",
+        "[\"authorization\",\"content-type\",\"x-request-id\",\"x-csrf-token\"]",
+        false,
+        false,
+        None,
+    ),
+    field("allow_credentials", "false", "false", false, false, None),
+    field("max_age_seconds", "600", "600", false, false, None),
+];
+
+const HTTP_RATE_LIMIT_FIELDS: &[PublishedField] = &[
+    field("enabled", "false", "false", false, false, None),
+    field("max_requests", "600", "600", false, false, None),
+    field("window_seconds", "60", "60", false, false, None),
+    field(
+        "by",
+        "\"actor_or_ip\"",
+        "actor_or_ip",
+        false,
+        false,
+        Some("\"ip\", \"actor\", or \"actor_or_ip\""),
+    ),
+    field("key_prefix", "\"http:\"", "http:", false, false, None),
+];
+
 const REDIS_FIELDS: &[PublishedField] = &[
     field(
         "url",
@@ -627,6 +740,36 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
         "HTTP Server",
         &[table(&["server"], None, false, SERVER_FIELDS)],
     ),
+    section(
+        "HTTP Edge",
+        &[
+            table(&["http"], None, false, HTTP_FIELDS),
+            table(
+                &["http", "security_headers"],
+                Some("HTTP Security Headers"),
+                false,
+                HTTP_SECURITY_HEADERS_FIELDS,
+            ),
+            table(
+                &["http", "trusted_proxy"],
+                Some("HTTP Trusted Proxy"),
+                false,
+                HTTP_TRUSTED_PROXY_FIELDS,
+            ),
+            table(
+                &["http", "cors"],
+                Some("HTTP CORS"),
+                false,
+                HTTP_CORS_FIELDS,
+            ),
+            table(
+                &["http", "rate_limit"],
+                Some("HTTP Rate Limit"),
+                false,
+                HTTP_RATE_LIMIT_FIELDS,
+            ),
+        ],
+    ),
     section("Redis", &[table(&["redis"], None, false, REDIS_FIELDS)]),
     section(
         "Database (PostgreSQL)",
@@ -1122,6 +1265,28 @@ mod tests {
         assert!(output.contains(
             "# migration_lock_timeout_ms = 0  # Migration advisory-lock wait timeout (0 = wait forever)"
         ));
+    }
+
+    #[test]
+    fn published_http_edge_config_includes_safe_defaults() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[http]"));
+        assert!(output.contains(
+            "# max_body_size_bytes = 0  # 0 = no global body-size cap; route middleware can still cap"
+        ));
+        assert!(output.contains("[http.security_headers]"));
+        assert!(output.contains("# enabled = true"));
+        assert!(output.contains("[http.trusted_proxy]"));
+        assert!(output
+            .contains("# headers = [\"cf-connecting-ip\", \"x-real-ip\", \"x-forwarded-for\"]"));
+        assert!(output.contains("[http.cors]"));
+        assert!(output.contains("[http.rate_limit]"));
+        assert!(output.contains("# by = \"actor_or_ip\"  # \"ip\", \"actor\", or \"actor_or_ip\""));
+        assert!(env.contains("# HTTP__MAX_BODY_SIZE_BYTES=0"));
+        assert!(env.contains("# HTTP__TRUSTED_PROXY__TRUSTED_CIDRS=[]"));
+        assert!(env.contains("# HTTP__RATE_LIMIT__BY=actor_or_ip"));
     }
 
     fn config_repository_root_sections() -> BTreeSet<String> {

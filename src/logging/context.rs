@@ -1,6 +1,7 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::extract::ConnectInfo;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
@@ -78,7 +79,16 @@ impl CurrentRequest {
                 .extensions
                 .get::<RequestId>()
                 .map(|value| value.as_str().to_string()),
-            ip: parts.extensions.get::<RealIp>().map(|value| value.0),
+            ip: parts
+                .extensions
+                .get::<RealIp>()
+                .map(|value| value.0)
+                .or_else(|| {
+                    parts
+                        .extensions
+                        .get::<ConnectInfo<SocketAddr>>()
+                        .map(|ConnectInfo(addr)| addr.ip())
+                }),
             user_agent: parts
                 .headers
                 .get(axum::http::header::USER_AGENT)
@@ -213,4 +223,40 @@ fn trace_parent_from_execution(context: &ExecutionContext) -> Option<TraceParent
 fn generate_trace_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     format!("forge-trace-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use axum::http::Request;
+
+    use super::*;
+
+    #[test]
+    fn current_request_uses_real_ip_before_connect_info() {
+        let (mut parts, _) = Request::builder().body(()).unwrap().into_parts();
+        parts.extensions.insert(ConnectInfo(
+            "203.0.113.10:4321".parse::<SocketAddr>().unwrap(),
+        ));
+        parts
+            .extensions
+            .insert(RealIp("198.51.100.7".parse().unwrap()));
+
+        let current = CurrentRequest::from_parts(&parts);
+
+        assert_eq!(current.ip, Some("198.51.100.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn current_request_falls_back_to_connect_info() {
+        let (mut parts, _) = Request::builder().body(()).unwrap().into_parts();
+        parts.extensions.insert(ConnectInfo(
+            "203.0.113.10:4321".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let current = CurrentRequest::from_parts(&parts);
+
+        assert_eq!(current.ip, Some("203.0.113.10".parse().unwrap()));
+    }
 }

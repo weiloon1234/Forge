@@ -1219,7 +1219,7 @@ impl HttpRegistrar {
                     let RouteRegistration {
                         path,
                         method_router,
-                        options,
+                        mut options,
                         ..
                     } = *route;
                     let audit_area = options.resolved_audit_area().map(ToOwned::to_owned);
@@ -1233,12 +1233,28 @@ impl HttpRegistrar {
                         }
                     }
                     route_middlewares.extend(options.middlewares.clone());
+                    if !options.requires_auth() {
+                        if let Some(rate_limit) = options.post_auth_rate_limit.take() {
+                            if matches!(
+                                rate_limit.rate_limit_by(),
+                                middleware::RateLimitBy::ActorOrIp
+                            ) {
+                                route_middlewares.push(rate_limit.build());
+                            } else {
+                                tracing::warn!(
+                                    path = %path,
+                                    "forge: actor-based rate limit skipped on public route"
+                                );
+                            }
+                        }
+                    }
                     let method_router = if options.requires_auth() {
                         let post_auth_rl = options.post_auth_rate_limit.as_ref().map(|rl| {
                             middleware::RateLimitState {
                                 max: rl.max(),
-                                window: rl.window(),
+                                window_secs: rl.window_secs(),
                                 key_prefix: rl.key_prefix_str().to_string(),
+                                by: rl.rate_limit_by(),
                                 store: middleware::create_rate_limit_store(&app),
                             }
                         });
@@ -1536,8 +1552,10 @@ async fn http_auth_middleware(
 
     // Post-auth rate limiting (for by_actor / by_actor_or_ip)
     if let Some(ref rl_state) = state.post_auth_rl {
-        let key_id = format!("actor:{}", actor.id);
-        if let Some(rejection) = middleware::enforce_rate_limit(rl_state, &key_id).await {
+        let client_ip = middleware::extract_client_ip(&request);
+        if let Some(rejection) =
+            middleware::enforce_rate_limit_for_actor(rl_state, &actor, client_ip).await
+        {
             return rejection;
         }
     }

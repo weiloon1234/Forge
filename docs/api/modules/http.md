@@ -226,6 +226,7 @@ struct RateLimit
   fn build(self) -> MiddlewareConfig
 struct RealIp
 struct RequestTimeout
+  fn millis(n: u64) -> Self
   fn secs(n: u64) -> Self
   fn mins(n: u64) -> Self
   fn duration(d: Duration) -> Self
@@ -242,6 +243,7 @@ struct TrustedProxy
   fn new() -> Self
   fn cloudflare() -> Self
   fn with_header(self, hdr: HeaderName) -> Self
+  fn trusted_cidr(self, cidr: &str) -> Self
   fn build(self) -> MiddlewareConfig
 ```
 
@@ -275,4 +277,13 @@ struct RouteRegistry
   fn signed_url( &self, name: impl Into<RouteId>, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime, ) -> Result<String>
   fn verify_signature(url: &str, signing_key: &[u8]) -> Result<()>
 ```
+
+## Notes
+
+- `HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.
+- `HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` remains compatible and trusts all headers.
+- Config-derived CORS validates origins, methods, and headers at boot; wildcard origins with credentials are rejected.
+- Config-derived body-limit, request-timeout, and rate-limit rejections return JSON `ErrorResponse` bodies with HTTP 413, 408, and 429.
+- Actor-only rate limits require an authenticated actor; use `actor_or_ip` when a global rate limit needs an IP fallback.
+- IP rate limits use `TrustedProxy` real IP when available and otherwise fall back to TCP peer connect info on the real server path.
 

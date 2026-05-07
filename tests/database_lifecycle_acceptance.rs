@@ -472,6 +472,8 @@ async fn migrate_publish_generates_framework_migrations_without_stale_audit_foll
     let primitives_migration_path =
         migrations_dir.join("000000000000_create_database_primitives.rs");
     let audit_migration_path = migrations_dir.join("000000000010_create_audit_logs.rs");
+    let job_history_index_path =
+        migrations_dir.join("000000000012_index_job_history_created_at.rs");
     let stale_follow_up_path = migrations_dir.join("000000000012_add_area_to_audit_logs.rs");
 
     write_generator_config(dir.path(), &migrations_dir, &seeders_dir);
@@ -490,6 +492,7 @@ async fn migrate_publish_generates_framework_migrations_without_stale_audit_foll
 
     assert!(primitives_migration_path.exists());
     assert!(audit_migration_path.exists());
+    assert!(job_history_index_path.exists());
     assert!(!stale_follow_up_path.exists());
 
     let published_primitives = fs::read_to_string(&primitives_migration_path).unwrap();
@@ -500,6 +503,9 @@ async fn migrate_publish_generates_framework_migrations_without_stale_audit_foll
     let published = fs::read_to_string(&audit_migration_path).unwrap();
     assert!(published.contains("area TEXT"));
     assert!(published.contains("idx_audit_logs_area_created_at"));
+
+    let published = fs::read_to_string(&job_history_index_path).unwrap();
+    assert!(published.contains("idx_job_history_created_at"));
 }
 
 #[tokio::test]

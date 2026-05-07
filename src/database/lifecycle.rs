@@ -88,12 +88,12 @@ impl MigrationStatusReport {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-struct MigrationStatusSummary {
-    registered: usize,
-    applied: usize,
-    pending: usize,
-    missing_applied: usize,
-    latest_batch: Option<i64>,
+pub(crate) struct MigrationStatusSummary {
+    pub(crate) registered: usize,
+    pub(crate) applied: usize,
+    pub(crate) pending: usize,
+    pub(crate) missing_applied: usize,
+    pub(crate) latest_batch: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1012,6 +1012,15 @@ impl DatabaseLifecycle {
 
         Ok(())
     }
+}
+
+pub(crate) async fn migration_status_summary_from_app(
+    app: &AppContext,
+) -> Result<MigrationStatusSummary> {
+    DatabaseLifecycle::from_app(app)?
+        .status_report()
+        .await
+        .map(|report| report.summary())
 }
 
 struct MigrationRunSummary {

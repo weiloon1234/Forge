@@ -1,6 +1,7 @@
 mod app;
 mod background_tasks;
 mod container;
+mod doctor;
 mod error;
 mod provider;
 pub(crate) mod shutdown_drain;

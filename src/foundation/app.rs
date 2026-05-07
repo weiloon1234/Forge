@@ -1258,6 +1258,7 @@ impl AppBuilder {
             crate::config::publish::config_publish_cli_registrar(),
             crate::config::api_docs::docs_api_cli_registrar(),
             crate::config::env_publish::env_publish_cli_registrar(),
+            crate::foundation::doctor::doctor_cli_registrar(),
             crate::http::maintenance_cli_registrar(),
         ];
         if app.config().value("database").is_some() {

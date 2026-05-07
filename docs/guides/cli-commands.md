@@ -275,6 +275,7 @@ These are available automatically — no registration needed:
 | `config:publish` | Generate sample config file, including auth lockout and MFA sections |
 | `env:publish` | Generate `.env.example`, including lockout and MFA env overrides |
 | `key:generate` | Generate signing + encryption keys |
+| `doctor` | Run runtime health checks; accepts `--deploy` and `--json` for deploy tooling |
 | `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |
 | `db:migrate` | Run pending migrations; accepts `--lock-timeout-ms <MS>` |
@@ -296,6 +297,12 @@ These are available automatically — no registration needed:
 | `plugin:scaffold` | Run plugin scaffold |
 | `docs:api` | Generate API surface docs |
 | `about` | Show framework version and environment |
+
+`doctor --deploy --json` is designed for runtime-only servers where the deploy package contains
+only the compiled binary and built assets. It uses the server's existing `.env`, checks config,
+database, runtime backend, readiness probes, and migration drift, then exits non-zero only when a
+check fails. Warnings, such as an intentionally unconfigured database, are reported but do not
+block the command.
 
 `config:publish` writes the current framework-owned auth sections, including `[auth.lockout]` and
 `[auth.mfa]`. `env:publish` writes the matching `AUTH__LOCKOUT__*`, `AUTH__MFA__*`, and

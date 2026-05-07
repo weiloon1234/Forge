@@ -26,10 +26,19 @@ impl SessionCookie {
     /// Build a session cookie with secure defaults:
     /// HttpOnly, SameSite=Lax, Path=/, and optionally Secure.
     pub fn build<'a>(name: &'a str, value: &'a str, secure: bool) -> Cookie<'a> {
+        Self::build_with_path(name, value, secure, "/")
+    }
+
+    pub(crate) fn build_with_path<'a>(
+        name: &'a str,
+        value: &'a str,
+        secure: bool,
+        path: &'a str,
+    ) -> Cookie<'a> {
         let mut builder = Cookie::build((name, value))
             .http_only(true)
             .same_site(SameSite::Lax)
-            .path("/");
+            .path(path);
 
         if secure {
             builder = builder.secure(true);
@@ -40,10 +49,14 @@ impl SessionCookie {
 
     /// Build an expired removal cookie (clears the cookie on the client).
     pub fn clear(name: &str) -> Cookie<'_> {
+        Self::clear_with_path(name, "/")
+    }
+
+    pub(crate) fn clear_with_path<'a>(name: &'a str, path: &'a str) -> Cookie<'a> {
         let mut cookie = Cookie::build(name)
             .http_only(true)
             .same_site(SameSite::Lax)
-            .path("/")
+            .path(path)
             .build();
         cookie.make_removal();
         cookie

@@ -555,15 +555,19 @@ MiddlewareConfig::from(
 
 **How it works:**
 
-- GET/HEAD/OPTIONS → generates CSRF token, sets cookie (readable by JS)
+- GET/HEAD/OPTIONS → generates CSRF token, sets a `forge_csrf` cookie readable by JS
 - POST/PUT/PATCH/DELETE → validates `X-CSRF-Token` header matches cookie
 - Returns 403 if mismatch
+
+The CSRF cookie uses `Path=/` and `SameSite=Lax`. It is intentionally not
+`HttpOnly`, because browser JavaScript must read the token and echo it in the
+request header.
 
 **Frontend integration:**
 
 ```javascript
 const token = document.cookie.split('; ')
-    .find(row => row.startsWith('csrf_token='))?.split('=')[1];
+    .find(row => row.startsWith('forge_csrf='))?.split('=')[1];
 
 fetch('/form', {
     method: 'POST',

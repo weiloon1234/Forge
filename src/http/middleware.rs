@@ -847,7 +847,7 @@ async fn csrf_middleware(
         // Set cookie if it wasn't present
         if existing_token.is_none() {
             let cookie = build_csrf_cookie(&state.cookie_name, &token, state.secure);
-            if let Ok(hv) = cookie.parse::<HeaderValue>() {
+            if let Ok(hv) = HeaderValue::from_str(&cookie.to_string()) {
                 response.headers_mut().append(header::SET_COOKIE, hv);
             }
         }
@@ -887,11 +887,13 @@ async fn csrf_middleware(
 /// read this cookie to include the token in the X-CSRF-TOKEN request header
 /// (double-submit cookie pattern).
 fn build_csrf_cookie(name: &str, value: &str, secure: bool) -> String {
-    let mut cookie = format!("{name}={value}; Path=/; SameSite=Lax");
+    let mut builder = super::cookie::Cookie::build((name, value))
+        .same_site(super::cookie::SameSite::Lax)
+        .path("/");
     if secure {
-        cookie.push_str("; Secure");
+        builder = builder.secure(true);
     }
-    cookie
+    builder.build().to_string()
 }
 
 fn csrf_forbidden(message: &str) -> Response {
@@ -1960,6 +1962,95 @@ mod tests {
 
     async fn json_handler(axum::Json(_payload): axum::Json<serde_json::Value>) -> StatusCode {
         StatusCode::OK
+    }
+
+    async fn csrf_token_handler(CsrfToken(token): CsrfToken) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "token": token }))
+    }
+
+    // ---- Csrf tests ----
+
+    #[tokio::test]
+    async fn csrf_safe_request_sets_readable_cookie_and_extension() {
+        let router = Csrf::new()
+            .secure(false)
+            .apply(axum::Router::<AppContext>::new().route("/", get(csrf_token_handler)))
+            .with_state(test_app());
+
+        let response = router
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = payload["token"].as_str().unwrap();
+
+        assert!(cookie.starts_with(&format!("forge_csrf={token};")));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(!cookie.contains("HttpOnly"));
+        assert!(!cookie.contains("Secure"));
+    }
+
+    #[tokio::test]
+    async fn csrf_unsafe_request_without_cookie_returns_json_403() {
+        let router = Csrf::new()
+            .secure(false)
+            .apply(axum::Router::<AppContext>::new().route("/", post(ok_handler)))
+            .with_state(test_app());
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["message"], "CSRF token cookie missing");
+        assert_eq!(payload["status"], 403);
+    }
+
+    #[tokio::test]
+    async fn csrf_unsafe_request_with_matching_token_passes() {
+        let router = Csrf::new()
+            .secure(false)
+            .apply(axum::Router::<AppContext>::new().route("/", post(ok_handler)))
+            .with_state(test_app());
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(header::COOKIE, "forge_csrf=abc_123")
+                    .header("x-csrf-token", "abc_123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // ---- Cors tests ----

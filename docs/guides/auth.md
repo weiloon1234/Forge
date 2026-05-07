@@ -462,6 +462,14 @@ let session_id = sessions.create_with_remember::<Admin>(&admin_id, remember_me).
 // remember_me = false → uses ttl_minutes (default: 120 min)
 ```
 
+Session data is stored in Redis under Forge's Redis namespace. Session IDs are
+opaque URL-safe tokens; malformed cookie values are rejected before Redis lookup.
+When `sliding_expiry` is enabled, normal sessions extend by `ttl_minutes` and
+remember-me sessions extend by `remember_ttl_days`, so activity does not shorten
+long-lived remembered sessions. Forge also keeps the per-actor Redis session
+index bounded with a TTL, so naturally expired sessions do not leave permanent
+index keys behind.
+
 ### Session Config
 
 ```toml
@@ -469,7 +477,7 @@ let session_id = sessions.create_with_remember::<Admin>(&admin_id, remember_me).
 ttl_minutes = 120                   # session duration
 cookie_name = "forge_session"       # cookie name
 cookie_secure = true                # HTTPS only
-cookie_path = "/"
+cookie_path = "/"                   # Set-Cookie Path used for login/logout
 sliding_expiry = true               # extend TTL on activity
 remember_ttl_days = 30              # "remember me" duration
 ```

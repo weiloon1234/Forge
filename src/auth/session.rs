@@ -17,6 +17,8 @@ use super::Authenticatable;
 struct SessionData {
     actor_id: String,
     guard: String,
+    #[serde(default)]
+    remember: bool,
 }
 
 /// Manages Redis-backed sessions for web dashboard authentication.
@@ -55,13 +57,10 @@ impl SessionManager {
         let data = SessionData {
             actor_id: actor_id.to_string(),
             guard: guard.to_string(),
+            remember,
         };
         let json = serde_json::to_string(&data).map_err(Error::other)?;
-        let ttl_secs = if remember {
-            self.config.remember_ttl_days * 24 * 60 * 60
-        } else {
-            self.config.ttl_minutes * 60
-        };
+        let ttl_secs = self.session_ttl_secs(remember);
 
         let mut conn = self.redis.connection().await?;
         let session_key = self.redis.key(format!("session:{session_id}"));
@@ -69,6 +68,7 @@ impl SessionManager {
 
         let index_key = self.redis.key(format!("session_index:{guard}:{actor_id}"));
         conn.sadd(&index_key, &session_id).await?;
+        conn.expire(&index_key, self.index_ttl_secs()).await?;
 
         Ok(session_id)
     }
@@ -76,6 +76,10 @@ impl SessionManager {
     /// Validate a session ID and return the Actor if valid.
     /// Extends TTL if sliding expiry is enabled.
     pub async fn validate(&self, session_id: &str) -> Result<Option<Actor>> {
+        if !is_valid_session_id(session_id) {
+            return Ok(None);
+        }
+
         let mut conn = self.redis.connection().await?;
         let session_key = self.redis.key(format!("session:{session_id}"));
 
@@ -91,8 +95,12 @@ impl SessionManager {
         let data: SessionData = serde_json::from_str(&json).map_err(Error::other)?;
 
         if self.config.sliding_expiry {
-            let ttl_secs = self.config.ttl_minutes * 60;
+            let ttl_secs = self.session_ttl_secs(data.remember);
             conn.expire(&session_key, ttl_secs).await?;
+            let index_key = self
+                .redis
+                .key(format!("session_index:{}:{}", data.guard, data.actor_id));
+            conn.expire(&index_key, self.index_ttl_secs()).await?;
         }
 
         Ok(Some(Actor::new(data.actor_id, GuardId::owned(data.guard))))
@@ -150,18 +158,33 @@ impl SessionManager {
 
     /// Build a response that sets the session cookie alongside the given body.
     pub fn login_response(&self, session_id: String, body: impl IntoResponse) -> Result<Response> {
-        let cookie = SessionCookie::build(
+        let cookie = SessionCookie::build_with_path(
             &self.config.cookie_name,
             &session_id,
             self.config.cookie_secure,
+            &self.config.cookie_path,
         );
         self.with_cookie_header(cookie, body)
     }
 
     /// Build a response that clears the session cookie.
     pub fn logout_response(&self, body: impl IntoResponse) -> Result<Response> {
-        let cookie = SessionCookie::clear(&self.config.cookie_name);
+        let cookie =
+            SessionCookie::clear_with_path(&self.config.cookie_name, &self.config.cookie_path);
         self.with_cookie_header(cookie, body)
+    }
+
+    fn session_ttl_secs(&self, remember: bool) -> u64 {
+        if remember {
+            self.config.remember_ttl_days * 24 * 60 * 60
+        } else {
+            self.config.ttl_minutes * 60
+        }
+    }
+
+    fn index_ttl_secs(&self) -> u64 {
+        self.session_ttl_secs(false)
+            .max(self.session_ttl_secs(true))
     }
 
     fn with_cookie_header(
@@ -176,5 +199,107 @@ impl SessionManager {
             .headers_mut()
             .append(header::SET_COOKIE, header_value);
         Ok(response)
+    }
+}
+
+const MAX_SESSION_ID_LEN: usize = 128;
+
+fn is_valid_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id.len() <= MAX_SESSION_ID_LEN
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Json;
+    use serde_json::json;
+
+    use crate::config::ConfigRepository;
+
+    fn manager_with_config(config: SessionConfig) -> SessionManager {
+        let redis = Arc::new(RedisManager::from_config(&ConfigRepository::empty()).unwrap());
+        SessionManager::new(redis, config)
+    }
+
+    #[test]
+    fn session_cookie_responses_honor_configured_path() {
+        let manager = manager_with_config(SessionConfig {
+            cookie_path: "/admin".to_string(),
+            cookie_secure: false,
+            ..Default::default()
+        });
+
+        let login = manager
+            .login_response("abc_123-XYZ".to_string(), Json(json!({ "ok": true })))
+            .unwrap();
+        let login_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(login_cookie.starts_with("forge_session=abc_123-XYZ;"));
+        assert!(login_cookie.contains("HttpOnly"));
+        assert!(login_cookie.contains("SameSite=Lax"));
+        assert!(login_cookie.contains("Path=/admin"));
+        assert!(!login_cookie.contains("Secure"));
+
+        let logout = manager
+            .logout_response(Json(json!({ "ok": true })))
+            .unwrap();
+        let logout_cookie = logout
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(logout_cookie.starts_with("forge_session=;"));
+        assert!(logout_cookie.contains("Path=/admin"));
+        assert!(logout_cookie.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn remember_sessions_keep_remember_ttl_for_sliding_expiry() {
+        let manager = manager_with_config(SessionConfig {
+            ttl_minutes: 5,
+            remember_ttl_days: 14,
+            ..Default::default()
+        });
+
+        assert_eq!(manager.session_ttl_secs(false), 5 * 60);
+        assert_eq!(manager.session_ttl_secs(true), 14 * 24 * 60 * 60);
+        assert_eq!(manager.index_ttl_secs(), 14 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn legacy_session_payload_deserializes_as_non_remembered() {
+        let data: SessionData =
+            serde_json::from_str(r#"{"actor_id":"42","guard":"admin"}"#).unwrap();
+
+        assert_eq!(data.actor_id, "42");
+        assert_eq!(data.guard, "admin");
+        assert!(!data.remember);
+    }
+
+    #[test]
+    fn session_id_validation_accepts_only_generated_token_shape() {
+        assert!(is_valid_session_id("abcDEF012-_"));
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id("abc.def"));
+        assert!(!is_valid_session_id("abc def"));
+        assert!(!is_valid_session_id(&"a".repeat(MAX_SESSION_ID_LEN + 1)));
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_malformed_session_id_before_redis_lookup() {
+        let manager = manager_with_config(SessionConfig::default());
+
+        let result = manager.validate("not a session id").await.unwrap();
+
+        assert!(result.is_none());
     }
 }

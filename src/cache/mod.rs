@@ -1,16 +1,14 @@
 mod memory;
 mod redis_store;
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::FutureExt;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::foundation::{Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, panic_payload_message};
 
 pub use memory::MemoryCacheStore;
 pub use redis_store::RedisCacheStore;
@@ -79,12 +77,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let future = match catch_unwind(AssertUnwindSafe(callback)) {
-        Ok(future) => future,
-        Err(panic) => return Err(cache_remember_panic_error(key, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(callback).await {
         Ok(result) => result,
         Err(panic) => Err(cache_remember_panic_error(key, panic)),
     }

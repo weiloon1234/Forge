@@ -1,11 +1,8 @@
 use std::any::Any;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-
-use futures_util::FutureExt;
 
 use crate::foundation::{Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_future_panic, catch_sync_panic, panic_payload_message};
 
 use super::column::DatatableColumn;
 use super::context::DatatableContext;
@@ -18,8 +15,7 @@ pub(crate) fn catch_datatable_callback<T>(
     callback: impl FnOnce() -> T,
 ) -> Result<T> {
     let subject = subject.into();
-    catch_unwind(AssertUnwindSafe(callback))
-        .map_err(|panic| datatable_callback_panic_error(subject, panic))
+    catch_sync_panic(callback).map_err(|panic| datatable_callback_panic_error(subject, panic))
 }
 
 pub(crate) async fn catch_datatable_future<T, Fut>(
@@ -30,7 +26,7 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let subject = subject.into();
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_future_panic(future).await {
         Ok(result) => result,
         Err(panic) => Err(datatable_callback_panic_error(subject, panic)),
     }

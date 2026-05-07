@@ -1,10 +1,9 @@
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use clap::{ArgMatches, Command};
 
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_sync_panic, panic_payload_message};
 use crate::support::CommandId;
 use crate::support::{boxed, BoxFuture};
 
@@ -14,7 +13,7 @@ type CommandHandler = Arc<dyn Fn(CommandInvocation) -> BoxFuture<Result<()>> + S
 pub(crate) fn build_registry(registrars: &[CommandRegistrar]) -> Result<CommandRegistry> {
     let mut registry = CommandRegistry::new();
     for registrar in registrars {
-        match catch_unwind(AssertUnwindSafe(|| registrar(&mut registry))) {
+        match catch_sync_panic(|| registrar(&mut registry)) {
             Ok(result) => result?,
             Err(panic) => return Err(command_registrar_panic_error(panic)),
         }

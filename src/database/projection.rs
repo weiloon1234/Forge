@@ -1,11 +1,10 @@
 use std::{
     any::{type_name, Any},
     marker::PhantomData,
-    panic::{catch_unwind, AssertUnwindSafe},
 };
 
 use crate::foundation::{Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_sync_panic, panic_payload_message};
 
 use super::ast::{ColumnRef, DbType, Expr, FromItem, SelectItem};
 use super::model::FromDbValue;
@@ -142,7 +141,7 @@ impl<P> ProjectionMeta<P> {
     }
 
     pub fn hydrate_record(&self, record: &DbRecord) -> Result<P> {
-        match catch_unwind(AssertUnwindSafe(|| (self.hydrate)(record))) {
+        match catch_sync_panic(|| (self.hydrate)(record)) {
             Ok(result) => result,
             Err(panic) => Err(projection_hydration_panic_error::<P>(panic)),
         }

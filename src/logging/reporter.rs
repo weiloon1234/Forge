@@ -1,12 +1,10 @@
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use axum::response::Response;
-use futures_util::FutureExt;
 use serde_json::Value;
 
 use crate::auth::Actor;
@@ -14,7 +12,7 @@ use crate::events::EventOrigin;
 use crate::foundation::AppContext;
 use crate::jobs::{JobDeadLetterContext, JobMiddleware};
 
-use super::{current_execution, CurrentRequest, ExecutionContext};
+use super::{catch_async_panic, current_execution, CurrentRequest, ExecutionContext};
 
 #[async_trait]
 pub trait ErrorReporter: Send + Sync + 'static {
@@ -97,39 +95,37 @@ impl ErrorReporterRegistry {
         }
 
         for (index, reporter) in self.reporters.iter().enumerate() {
-            report_with_panic_boundary(
-                "handler_error",
-                index,
-                reporter.report_handler_error(report.clone()),
-            )
+            report_with_panic_boundary("handler_error", index, || {
+                reporter.report_handler_error(report.clone())
+            })
             .await;
         }
     }
 
     pub(crate) async fn report_panic(&self, report: PanicReport) {
         for (index, reporter) in self.reporters.iter().enumerate() {
-            report_with_panic_boundary("panic", index, reporter.report_panic(report.clone())).await;
+            report_with_panic_boundary("panic", index, || reporter.report_panic(report.clone()))
+                .await;
         }
     }
 
     pub(crate) async fn report_job_dead_lettered(&self, report: JobDeadLetteredReport) {
         for (index, reporter) in self.reporters.iter().enumerate() {
-            report_with_panic_boundary(
-                "job_dead_lettered",
-                index,
-                reporter.report_job_dead_lettered(report.clone()),
-            )
+            report_with_panic_boundary("job_dead_lettered", index, || {
+                reporter.report_job_dead_lettered(report.clone())
+            })
             .await;
         }
     }
 }
 
-async fn report_with_panic_boundary<F>(report: &'static str, reporter_index: usize, future: F)
+async fn report_with_panic_boundary<F, Fut>(report: &'static str, reporter_index: usize, run: F)
 where
-    F: Future<Output = ()>,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
 {
     let result = ERROR_REPORTER_DELIVERY
-        .scope((), AssertUnwindSafe(future).catch_unwind())
+        .scope((), catch_async_panic(run))
         .await;
     if let Err(panic) = result {
         tracing::warn!(
@@ -317,6 +313,8 @@ impl JobMiddleware for ErrorReporterJobMiddleware {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -382,6 +380,43 @@ mod tests {
 
         async fn report_job_dead_lettered(&self, _report: JobDeadLetteredReport) {
             panic!("dead-letter reporter explode")
+        }
+    }
+
+    struct FactoryPanickingReporter;
+
+    impl ErrorReporter for FactoryPanickingReporter {
+        fn report_handler_error<'life0, 'async_trait>(
+            &'life0 self,
+            _report: HandlerErrorReport,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("handler reporter factory explode")
+        }
+
+        fn report_panic<'life0, 'async_trait>(
+            &'life0 self,
+            _report: PanicReport,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("panic reporter factory explode")
+        }
+
+        fn report_job_dead_lettered<'life0, 'async_trait>(
+            &'life0 self,
+            _report: JobDeadLetteredReport,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("dead-letter reporter factory explode")
         }
     }
 
@@ -547,6 +582,48 @@ mod tests {
                 chain: Vec::new(),
                 origin: None,
                 request_id: Some("req-reporter-panic".to_string()),
+            })
+            .await;
+        registry
+            .report_panic(PanicReport {
+                message: "panic".to_string(),
+                location: "src/tests.rs:1".to_string(),
+                backtrace: None,
+                context: PanicContext::Other,
+            })
+            .await;
+        registry
+            .report_job_dead_lettered(JobDeadLetteredReport {
+                job_class: "email.send".to_string(),
+                job_id: "job-1".to_string(),
+                attempts: 3,
+                last_error: "boom".to_string(),
+                payload: serde_json::json!({ "email": "hello@example.com" }),
+            })
+            .await;
+
+        assert_eq!(reporter.handler_reports.lock().unwrap().len(), 1);
+        assert_eq!(reporter.panic_reports.lock().unwrap().len(), 1);
+        assert_eq!(reporter.dead_letter_reports.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reporter_factory_panics_do_not_block_later_reporters() {
+        let reporter = Arc::new(StubReporter::default());
+        let registry = ErrorReporterRegistry::new(vec![
+            Arc::new(FactoryPanickingReporter) as Arc<dyn ErrorReporter>,
+            reporter.clone() as Arc<dyn ErrorReporter>,
+        ]);
+
+        registry
+            .report_handler_error(HandlerErrorReport {
+                method: "GET".to_string(),
+                path: "/boom".to_string(),
+                status: 500,
+                error: "boom".to_string(),
+                chain: Vec::new(),
+                origin: None,
+                request_id: Some("req-reporter-factory-panic".to_string()),
             })
             .await;
         registry

@@ -2,7 +2,6 @@ use std::{
     any::{type_name, Any},
     future::Future,
     marker::PhantomData,
-    panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -14,7 +13,7 @@ use uuid::Uuid;
 use crate::config::DatabaseModelConfig;
 use crate::events::{Event, EventBus, EventOrigin};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_sync_panic, panic_payload_message};
 use crate::support::{Date, DateTime, EventId, LocalDateTime, ModelId, Time};
 
 use super::ast::{
@@ -884,7 +883,7 @@ impl<M> TableMeta<M> {
     }
 
     pub fn hydrate_record(&self, record: &DbRecord) -> Result<M> {
-        match catch_unwind(AssertUnwindSafe(|| (self.hydrate)(record))) {
+        match catch_sync_panic(|| (self.hydrate)(record)) {
             Ok(result) => result,
             Err(panic) => Err(self.hydration_panic_error(panic)),
         }

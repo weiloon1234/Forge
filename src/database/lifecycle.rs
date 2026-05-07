@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -9,12 +8,11 @@ use async_trait::async_trait;
 use chrono::Local;
 use clap::{Arg, ArgAction, Command};
 use forge_build::{discover_migration_sources, discover_seeder_sources};
-use futures_util::FutureExt;
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::DatabaseConfig;
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
 use crate::support::{CommandId, MigrationId, SeederId};
 
 use super::runtime::{DatabaseSession, QueryExecutionOptions, QueryExecutor};
@@ -1071,13 +1069,13 @@ async fn run_seeder(
 }
 
 fn migration_run_in_transaction(migration: &dyn DynMigration, id: &MigrationId) -> Result<bool> {
-    catch_unwind(AssertUnwindSafe(|| migration.run_in_transaction())).map_err(|panic| {
+    catch_sync_panic(|| migration.run_in_transaction()).map_err(|panic| {
         database_lifecycle_panic_error("migration", id, "run_in_transaction", panic)
     })
 }
 
 fn seeder_run_in_transaction(seeder: &dyn DynSeeder, id: &SeederId) -> Result<bool> {
-    catch_unwind(AssertUnwindSafe(|| seeder.run_in_transaction()))
+    catch_sync_panic(|| seeder.run_in_transaction())
         .map_err(|panic| database_lifecycle_panic_error("seeder", id, "run_in_transaction", panic))
 }
 
@@ -1092,12 +1090,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let future = match catch_unwind(AssertUnwindSafe(run)) {
-        Ok(future) => future,
-        Err(panic) => return Err(database_lifecycle_panic_error(kind, id, phase, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(run).await {
         Ok(result) => result,
         Err(panic) => Err(database_lifecycle_panic_error(kind, id, phase, panic)),
     }

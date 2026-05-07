@@ -1,13 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Arg, ArgAction, Command};
-use futures_util::FutureExt;
 use semver::{Version, VersionReq};
 use toml::Value;
 
@@ -16,7 +14,7 @@ pub use crate::support::{PluginAssetId, PluginId, PluginScaffoldId};
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::foundation::{AppContext, Error, Result, ServiceProvider, ServiceRegistrar};
 use crate::http::RouteRegistrar;
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
 use crate::scheduler::ScheduleRegistrar;
 use crate::support::ValidationRuleId;
 use crate::validation::ValidationRule;
@@ -417,19 +415,14 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let future = match catch_unwind(AssertUnwindSafe(callback)) {
-        Ok(future) => future,
-        Err(panic) => return Err(plugin_panic_error(Some(id), phase, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(callback).await {
         Ok(result) => result,
         Err(panic) => Err(plugin_panic_error(Some(id), phase, panic)),
     }
 }
 
 fn plugin_manifest(plugin: &Arc<dyn Plugin>) -> Result<PluginManifest> {
-    match catch_unwind(AssertUnwindSafe(|| plugin.manifest())) {
+    match catch_sync_panic(|| plugin.manifest()) {
         Ok(manifest) => Ok(manifest),
         Err(panic) => Err(plugin_panic_error(None, "manifest", panic)),
     }
@@ -437,7 +430,7 @@ fn plugin_manifest(plugin: &Arc<dyn Plugin>) -> Result<PluginManifest> {
 
 fn register_plugin(plugin: &Arc<dyn Plugin>, manifest: &PluginManifest) -> Result<PluginRegistrar> {
     let mut registrar = PluginRegistrar::new();
-    match catch_unwind(AssertUnwindSafe(|| plugin.register(&mut registrar))) {
+    match catch_sync_panic(|| plugin.register(&mut registrar)) {
         Ok(Ok(())) => Ok(registrar),
         Ok(Err(error)) => Err(error),
         Err(panic) => Err(plugin_panic_error(Some(manifest.id()), "register", panic)),

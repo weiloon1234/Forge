@@ -1,10 +1,9 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, RwLock};
 
 use crate::foundation::{Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_sync_panic, panic_payload_message};
 
 type SharedService = Arc<dyn Any + Send + Sync>;
 type ServiceFactory = Arc<dyn Fn(&Container) -> Result<SharedService> + Send + Sync>;
@@ -137,7 +136,7 @@ fn resolve_factory<T>(factory: &ServiceFactory, container: &Container) -> Result
 where
     T: Send + Sync + 'static,
 {
-    match catch_unwind(AssertUnwindSafe(|| factory(container))) {
+    match catch_sync_panic(|| factory(container)) {
         Ok(result) => result,
         Err(panic) => Err(service_factory_panic_error(
             std::any::type_name::<T>(),

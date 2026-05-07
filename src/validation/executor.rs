@@ -1,8 +1,5 @@
 use std::net::IpAddr;
 
-use std::panic::AssertUnwindSafe;
-
-use futures_util::FutureExt;
 use regex::Regex;
 use url::Url;
 use uuid::Uuid;
@@ -10,7 +7,7 @@ use validator::ValidateEmail;
 
 use crate::database::Query;
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, panic_payload_message};
 use crate::support::ValidationRuleId;
 use crate::support::{Date, DateTime, LocalDateTime, Time, Timezone};
 use crate::validation::context::{RuleContext, ValidationRule};
@@ -701,10 +698,7 @@ async fn run_named_rule(
     context: &RuleContext,
     value: &str,
 ) -> Result<std::result::Result<(), ValidationError>> {
-    match AssertUnwindSafe(rule.validate(context, value))
-        .catch_unwind()
-        .await
-    {
+    match catch_async_panic(|| rule.validate(context, value)).await {
         Ok(result) => Ok(result),
         Err(panic) => {
             let message = panic_payload_message(panic);

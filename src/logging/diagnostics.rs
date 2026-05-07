@@ -1,17 +1,15 @@
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
-use super::panic_payload_message;
 use super::probes::{LivenessReport, ProbeResult, ReadinessRegistry, ReadinessReport};
 use super::types::{
     AuthOutcome, HttpOutcomeClass, JobOutcome, ProbeState, RuntimeBackendKind,
     SchedulerLeadershipState, WebSocketConnectionState,
 };
+use super::{catch_async_panic, panic_payload_message};
 use crate::foundation::{AppContext, Result};
 use crate::support::ChannelId;
 
@@ -374,10 +372,7 @@ impl RuntimeDiagnostics {
         let mut state = ProbeState::Healthy;
 
         for registered in &self.readiness.checks {
-            let probe = match AssertUnwindSafe(registered.check.run(app))
-                .catch_unwind()
-                .await
-            {
+            let probe = match catch_async_panic(|| registered.check.run(app)).await {
                 Ok(Ok(mut probe)) => {
                     probe.id = registered.id.clone();
                     probe

@@ -1,13 +1,12 @@
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::foundation::{Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_sync_panic, panic_payload_message};
 
 use super::ast::{
     AggregateNode, ColumnRef, ComparisonOp, Condition, DbValue, Expr, JoinKind, JoinNode, QueryAst,
@@ -191,7 +190,7 @@ where
             pivot_record.insert(field.alias.to_string(), value.clone());
         }
         let pivot = self.meta.hydrate_record(&pivot_record)?;
-        catch_unwind(AssertUnwindSafe(|| (self.attach)(child, pivot)))
+        catch_sync_panic(|| (self.attach)(child, pivot))
             .map_err(|panic| relation_callback_panic_error("pivot attach callback", panic))?;
         Ok(())
     }
@@ -1314,7 +1313,7 @@ fn relation_parent_key<From, To>(
 where
     To: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| (relation.parent_key)(parent))).map_err(|panic| {
+    catch_sync_panic(|| (relation.parent_key)(parent)).map_err(|panic| {
         relation_load_error(
             relation,
             "read parent key",
@@ -1331,7 +1330,7 @@ where
     To: 'static,
     Pivot: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| (relation.parent_key)(parent))).map_err(|panic| {
+    catch_sync_panic(|| (relation.parent_key)(parent)).map_err(|panic| {
         many_to_many_load_error(
             relation,
             "read parent key",
@@ -1348,7 +1347,7 @@ fn relation_is_loaded<From, To>(
 where
     To: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| is_loaded(parent))).map_err(|panic| {
+    catch_sync_panic(|| is_loaded(parent)).map_err(|panic| {
         relation_load_error(
             relation,
             "check loaded state",
@@ -1366,7 +1365,7 @@ where
     To: 'static,
     Pivot: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| is_loaded(parent))).map_err(|panic| {
+    catch_sync_panic(|| is_loaded(parent)).map_err(|panic| {
         many_to_many_load_error(
             relation,
             "check loaded state",
@@ -1384,10 +1383,10 @@ where
     To: 'static,
 {
     let result = match &relation.attach {
-        RelationAttach::Many(attach) => catch_unwind(AssertUnwindSafe(|| attach(parent, values))),
-        RelationAttach::One(attach) => catch_unwind(AssertUnwindSafe(|| {
-            attach(parent, values.into_iter().next())
-        })),
+        RelationAttach::Many(attach) => catch_sync_panic(|| attach(parent, values)),
+        RelationAttach::One(attach) => {
+            catch_sync_panic(|| attach(parent, values.into_iter().next()))
+        }
     };
 
     result.map_err(|panic| {
@@ -1408,7 +1407,7 @@ where
     To: 'static,
     Pivot: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| (relation.attach)(parent, children))).map_err(|panic| {
+    catch_sync_panic(|| (relation.attach)(parent, children)).map_err(|panic| {
         many_to_many_load_error(
             relation,
             "attach related models",
@@ -1426,7 +1425,7 @@ fn attach_relation_aggregate_value<From, To, Value>(
 where
     To: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| attach(parent, value))).map_err(|panic| {
+    catch_sync_panic(|| attach(parent, value)).map_err(|panic| {
         relation_load_error(
             relation,
             "attach aggregate value",
@@ -1445,7 +1444,7 @@ where
     To: 'static,
     Pivot: 'static,
 {
-    catch_unwind(AssertUnwindSafe(|| attach(parent, value))).map_err(|panic| {
+    catch_sync_panic(|| attach(parent, value)).map_err(|panic| {
         many_to_many_load_error(
             relation,
             "attach aggregate value",

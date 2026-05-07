@@ -1,6 +1,5 @@
 mod leadership;
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +7,7 @@ use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_sync_panic, panic_payload_message};
 use crate::support::{boxed, BoxFuture};
 use crate::support::{DateTime, ScheduleId};
 
@@ -19,7 +18,7 @@ pub(crate) type ScheduleHook = Arc<dyn Fn(AppContext) -> BoxFuture<Result<()>> +
 pub(crate) fn build_registry(registrars: &[ScheduleRegistrar]) -> Result<ScheduleRegistry> {
     let mut registry = ScheduleRegistry::new();
     for registrar in registrars {
-        match catch_unwind(AssertUnwindSafe(|| registrar(&mut registry))) {
+        match catch_sync_panic(|| registrar(&mut registry)) {
             Ok(result) => result?,
             Err(panic) => return Err(schedule_registrar_panic_error(panic)),
         }

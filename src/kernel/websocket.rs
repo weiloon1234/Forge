@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +11,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 
@@ -20,7 +19,8 @@ use crate::auth::{Actor, AuthError, AuthErrorCode};
 use crate::config::WebSocketConfig;
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{
-    panic_payload_message, AuthOutcome, RuntimeDiagnostics, WebSocketConnectionState,
+    catch_async_panic, panic_payload_message, AuthOutcome, RuntimeDiagnostics,
+    WebSocketConnectionState,
 };
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{ChannelEventId, ChannelId, GuardId};
@@ -973,10 +973,7 @@ async fn run_channel_handler(
     context: WebSocketContext,
     payload: serde_json::Value,
 ) -> Result<()> {
-    match AssertUnwindSafe(channel.handler.handle(context, payload))
-        .catch_unwind()
-        .await
-    {
+    match catch_async_panic(|| channel.handler.handle(context, payload)).await {
         Ok(result) => result,
         Err(panic) => {
             let message = panic_payload_message(panic);
@@ -1508,6 +1505,9 @@ fn auth_outcome_from_error(error: &AuthError) -> AuthOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
     use crate::support::runtime::RuntimeBackend;
@@ -1768,6 +1768,84 @@ mod tests {
         let ack = next_json(&mut outbound).await;
         assert_eq!(ack.event, ACK_EVENT);
         assert_eq!(ack.payload["ack_id"], "ack-after-panic");
+        assert_eq!(ack.payload["status"], "ok");
+    }
+
+    struct FactoryPanicHandler;
+
+    impl crate::websocket::ChannelHandler for FactoryPanicHandler {
+        fn handle<'life0, 'async_trait>(
+            &'life0 self,
+            _context: WebSocketContext,
+            _payload: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("handler factory explode")
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_handler_factory_panic_sends_error_ack_and_connection_can_continue() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(ChannelId::new("panic-build"), FactoryPanicHandler)
+            .unwrap();
+        registrar
+            .channel(
+                ChannelId::new("chat"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+            )
+            .unwrap();
+        let state = websocket_state(registrar.into_channels(), "ws-handler-factory-panic");
+        let (connection_id, mut outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+        subscribe(&state, connection_id, &mut outbound, "panic-build").await;
+        subscribe(&state, connection_id, &mut outbound, "chat").await;
+
+        let error = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "panic-build",
+                "ack_id": "ack-factory-panic",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "websocket handler panicked: handler factory explode"
+        );
+        let ack = next_json(&mut outbound).await;
+        assert_eq!(ack.event, ACK_EVENT);
+        assert_eq!(ack.payload["ack_id"], "ack-factory-panic");
+        assert_eq!(ack.payload["status"], "error");
+        assert_eq!(
+            ack.payload["error"],
+            "websocket handler panicked: handler factory explode"
+        );
+
+        process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "chat",
+                "ack_id": "ack-after-factory-panic",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let ack = next_json(&mut outbound).await;
+        assert_eq!(ack.event, ACK_EVENT);
+        assert_eq!(ack.payload["ack_id"], "ack-after-factory-panic");
         assert_eq!(ack.payload["status"], "ok");
     }
 

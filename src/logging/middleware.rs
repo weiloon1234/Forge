@@ -1,16 +1,13 @@
-use std::panic::AssertUnwindSafe;
-
 use axum::extract::{Request, State};
 use axum::http::header::HeaderName;
 use axum::http::HeaderValue;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use futures_util::FutureExt;
 use tracing::Instrument;
 
 use super::context::CurrentRequest;
 use super::request_id::{generate_request_id, RequestId, REQUEST_ID_HEADER};
-use super::{panic_payload_message, scope_current_request};
+use super::{catch_future_panic, panic_payload_message, scope_current_request};
 use crate::foundation::AppContext;
 
 pub(crate) async fn request_context_middleware(
@@ -57,7 +54,7 @@ pub(crate) async fn request_context_middleware(
             crate::translations::CURRENT_LOCALE.scope(locale, next.run(request).instrument(span)),
         ),
     );
-    let mut response = match AssertUnwindSafe(response).catch_unwind().await {
+    let mut response = match catch_future_panic(response).await {
         Ok(response) => response,
         Err(panic) => {
             let message = panic_payload_message(panic);

@@ -12,7 +12,6 @@ use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::ops::Deref;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -21,14 +20,13 @@ use axum::extract::FromRequestParts;
 use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::AuthConfig;
 use crate::database::{ColumnRef, ComparisonOp, DbType, DbValue, Expr, Model, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, panic_payload_message};
 use crate::support::{GuardId, ModelId, PermissionId, PolicyId, RoleId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -839,12 +837,7 @@ async fn run_bearer_authenticator(
     bearer: Arc<dyn BearerAuthenticator>,
     token: &str,
 ) -> std::result::Result<Option<Actor>, AuthError> {
-    let future = match catch_unwind(AssertUnwindSafe(|| bearer.authenticate(token))) {
-        Ok(future) => future,
-        Err(panic) => return Err(auth_guard_panic_error(guard, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| bearer.authenticate(token)).await {
         Ok(result) => result.map_err(|error| AuthError::internal(error.to_string())),
         Err(panic) => Err(auth_guard_panic_error(guard, panic)),
     }
@@ -856,12 +849,7 @@ async fn run_policy_evaluator(
     actor: &Actor,
     app: &AppContext,
 ) -> Result<bool> {
-    let future = match catch_unwind(AssertUnwindSafe(|| policy_handler.evaluate(actor, app))) {
-        Ok(future) => future,
-        Err(panic) => return Err(auth_policy_panic_error(policy, panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| policy_handler.evaluate(actor, app)).await {
         Ok(result) => result,
         Err(panic) => Err(auth_policy_panic_error(policy, panic)),
     }

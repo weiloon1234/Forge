@@ -2,17 +2,15 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::IpAddr;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures_util::FutureExt;
 use serde::Serialize;
 
 use crate::auth::Actor;
 use crate::foundation::{AppContext, Error, Result};
 use crate::jobs::Job;
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
 use crate::support::EventId;
 use crate::websocket::ServerMessage;
 
@@ -130,12 +128,7 @@ where
         let event = event
             .downcast_ref::<E>()
             .ok_or_else(|| Error::message(format!("failed to downcast event `{}`", E::ID)))?;
-        let future = match catch_unwind(AssertUnwindSafe(|| self.listener.handle(context, event))) {
-            Ok(future) => future,
-            Err(panic) => return Err(event_listener_panic_error::<E>(panic)),
-        };
-
-        match AssertUnwindSafe(future).catch_unwind().await {
+        match catch_async_panic(|| self.listener.handle(context, event)).await {
             Ok(result) => result,
             Err(panic) => Err(event_listener_panic_error::<E>(panic)),
         }
@@ -285,7 +278,7 @@ fn run_event_mapper<E, T>(
 where
     E: Event,
 {
-    match catch_unwind(AssertUnwindSafe(|| mapper(event))) {
+    match catch_sync_panic(|| mapper(event)) {
         Ok(value) => Ok(value),
         Err(panic) => Err(event_mapper_panic_error::<E>(subject, panic)),
     }

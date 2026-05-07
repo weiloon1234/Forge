@@ -4,14 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::FutureExt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
@@ -21,7 +19,10 @@ use crate::foundation::shutdown_drain::{
     drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
 };
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{panic_payload_message, JobOutcome as RecordedJobOutcome, RuntimeDiagnostics};
+use crate::logging::{
+    catch_async_panic, catch_future_panic, catch_sync_panic, panic_payload_message,
+    JobOutcome as RecordedJobOutcome, RuntimeDiagnostics,
+};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{JobId, QueueId};
 
@@ -83,10 +84,7 @@ pub struct JobMiddlewareRegistry {
 impl JobMiddlewareRegistry {
     async fn run_before(&self, job_id: &JobId, context: &JobContext) {
         for mw in &self.middlewares {
-            match AssertUnwindSafe(mw.before(job_id, context))
-                .catch_unwind()
-                .await
-            {
+            match catch_async_panic(|| mw.before(job_id, context)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -110,10 +108,7 @@ impl JobMiddlewareRegistry {
 
     async fn run_after(&self, job_id: &JobId, context: &JobContext) {
         for mw in &self.middlewares {
-            match AssertUnwindSafe(mw.after(job_id, context))
-                .catch_unwind()
-                .await
-            {
+            match catch_async_panic(|| mw.after(job_id, context)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -137,10 +132,7 @@ impl JobMiddlewareRegistry {
 
     async fn run_failed(&self, job_id: &JobId, context: &JobContext, err: &str) {
         for mw in &self.middlewares {
-            match AssertUnwindSafe(mw.failed(job_id, context, err))
-                .catch_unwind()
-                .await
-            {
+            match catch_async_panic(|| mw.failed(job_id, context, err)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -164,10 +156,7 @@ impl JobMiddlewareRegistry {
 
     async fn run_dead_lettered(&self, context: &JobDeadLetterContext) {
         for mw in &self.middlewares {
-            match AssertUnwindSafe(mw.on_dead_lettered(context))
-                .catch_unwind()
-                .await
-            {
+            match catch_async_panic(|| mw.on_dead_lettered(context)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -2013,17 +2002,19 @@ where
 
         let timeout_duration = job.timeout().unwrap_or(default_timeout);
         let context = JobContext::new(app.clone(), envelope.queue.clone(), envelope.attempts + 1);
-        let result = tokio::time::timeout(
-            timeout_duration,
-            AssertUnwindSafe(job.handle(context)).catch_unwind(),
-        )
-        .await;
+        let error_msg = match catch_sync_panic(|| job.handle(context)) {
+            Ok(job_future) => {
+                let result =
+                    tokio::time::timeout(timeout_duration, catch_future_panic(job_future)).await;
 
-        let error_msg = match result {
-            Ok(Ok(Ok(()))) => return Ok(JobExecutionOutcome::Success),
-            Ok(Ok(Err(error))) => error.to_string(),
-            Ok(Err(panic)) => format!("job panicked: {}", panic_payload_message(panic)),
-            Err(_elapsed) => format!("job timed out after {}s", timeout_duration.as_secs()),
+                match result {
+                    Ok(Ok(Ok(()))) => return Ok(JobExecutionOutcome::Success),
+                    Ok(Ok(Err(error))) => error.to_string(),
+                    Ok(Err(panic)) => format!("job panicked: {}", panic_payload_message(panic)),
+                    Err(_elapsed) => format!("job timed out after {}s", timeout_duration.as_secs()),
+                }
+            }
+            Err(panic) => format!("job panicked: {}", panic_payload_message(panic)),
         };
 
         // Failure — decide retry vs dead-letter
@@ -2062,6 +2053,8 @@ fn next_delivery_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -2133,6 +2126,28 @@ mod tests {
 
         async fn handle(&self, _context: JobContext) -> crate::Result<()> {
             panic!("job explode")
+        }
+
+        fn max_retries(&self) -> Option<u32> {
+            Some(1)
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct FactoryPanickingJob;
+
+    impl Job for FactoryPanickingJob {
+        const ID: JobId = JobId::new("factory.panicking.job");
+
+        fn handle<'life0, 'async_trait>(
+            &'life0 self,
+            _context: JobContext,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("job factory explode")
         }
 
         fn max_retries(&self) -> Option<u32> {
@@ -2377,6 +2392,7 @@ mod tests {
         let backend = RuntimeBackend::memory(namespace);
         let mut registry = JobRegistryBuilder::default();
         registry.register::<PanickingJob>().unwrap();
+        registry.register::<FactoryPanickingJob>().unwrap();
         registry.register::<PanicThenSucceedJob>().unwrap();
 
         let runtime = Arc::new(JobRuntime::new(
@@ -2466,6 +2482,44 @@ mod tests {
             &["panicking.job:job panicked: job explode"]
         );
         assert_eq!(dead_lettered.lock().unwrap().as_slice(), &["panicking.job"]);
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.jobs.dead_lettered_total, 1);
+        assert_eq!(snapshot.jobs.retried_total, 0);
+        assert_eq!(snapshot.jobs.succeeded_total, 0);
+    }
+
+    #[tokio::test]
+    async fn panicking_job_factory_run_once_dead_letters_without_panicking() {
+        let backend_namespace = "job-factory-panic-dead-letter";
+        let (backend, runtime, diagnostics, dispatcher) =
+            build_panic_runtime(backend_namespace, JobsConfig::default());
+        let app = build_app(runtime, diagnostics.clone());
+        let failed = Arc::new(Mutex::new(Vec::new()));
+        let dead_lettered = Arc::new(Mutex::new(Vec::new()));
+        register_panic_middleware(&app, failed.clone(), dead_lettered.clone());
+
+        dispatcher.dispatch(FactoryPanickingJob).await.unwrap();
+        let worker = Worker::from_app(app).unwrap();
+
+        assert!(worker.run_once().await.unwrap());
+
+        let dead_letters = backend
+            .dead_letters(&QueueId::new("default"))
+            .await
+            .unwrap();
+        assert_eq!(dead_letters.len(), 1);
+        let payload: serde_json::Value = serde_json::from_str(&dead_letters[0]).unwrap();
+        assert_eq!(payload["error"], "job panicked: job factory explode");
+
+        assert_eq!(
+            failed.lock().unwrap().as_slice(),
+            &["factory.panicking.job:job panicked: job factory explode"]
+        );
+        assert_eq!(
+            dead_lettered.lock().unwrap().as_slice(),
+            &["factory.panicking.job"]
+        );
 
         let snapshot = diagnostics.snapshot();
         assert_eq!(snapshot.jobs.dead_lettered_total, 1);
@@ -2736,6 +2790,84 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct FactoryPanickingMiddleware {
+        before: bool,
+        after: bool,
+        failed: bool,
+        dead_lettered: bool,
+    }
+
+    impl JobMiddleware for FactoryPanickingMiddleware {
+        fn before<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            _job_id: &'life1 JobId,
+            _context: &'life2 JobContext,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            if self.before {
+                panic!("middleware before factory explode");
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn after<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            _job_id: &'life1 JobId,
+            _context: &'life2 JobContext,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            if self.after {
+                panic!("middleware after factory explode");
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn failed<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+            &'life0 self,
+            _job_id: &'life1 JobId,
+            _context: &'life2 JobContext,
+            _error: &'life3 str,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            'life3: 'async_trait,
+            Self: 'async_trait,
+        {
+            if self.failed {
+                panic!("middleware failed factory explode");
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn on_dead_lettered<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _context: &'life1 JobDeadLetterContext,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            if self.dead_lettered {
+                panic!("middleware dead-letter factory explode");
+            }
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Default)]
     struct SlowMiddleware {
         before_started: Option<Arc<Notify>>,
         before_delay: Option<Duration>,
@@ -2849,6 +2981,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn middleware_before_after_factory_panics_do_not_block_success_finalization() {
+        let tag = "middleware-success-factory-panic";
+        let (_backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("middleware-success-factory-panic");
+        let app = build_app(runtime, diagnostics.clone());
+        register_job_middleware(
+            &app,
+            Arc::new(FactoryPanickingMiddleware {
+                before: true,
+                after: true,
+                ..FactoryPanickingMiddleware::default()
+            }),
+        );
+
+        dispatcher
+            .dispatch(StepJob {
+                tag: tag.into(),
+                name: "ok".into(),
+            })
+            .await
+            .unwrap();
+        let worker = Worker::from_app(app).unwrap();
+
+        assert!(worker.run_once().await.unwrap());
+        assert!(!worker.run_once().await.unwrap());
+        assert_eq!(read_log_filtered(&format!("{tag}:")), vec!["ok"]);
+        assert_eq!(diagnostics.snapshot().jobs.succeeded_total, 1);
+    }
+
+    #[tokio::test]
     async fn middleware_failure_panics_do_not_block_dead_letter_transition() {
         let (backend, runtime, diagnostics, dispatcher) =
             build_runtime_and_dispatcher("middleware-failure-panic");
@@ -2859,6 +3021,32 @@ mod tests {
                 failed: true,
                 dead_lettered: true,
                 ..PanickingMiddleware::default()
+            }),
+        );
+
+        dispatcher.dispatch(FailingJob).await.unwrap();
+        let worker = Worker::from_app(app).unwrap();
+
+        assert!(worker.run_once().await.unwrap());
+        let dead_letters = backend
+            .dead_letters(&QueueId::new("default"))
+            .await
+            .unwrap();
+        assert_eq!(dead_letters.len(), 1);
+        assert_eq!(diagnostics.snapshot().jobs.dead_lettered_total, 1);
+    }
+
+    #[tokio::test]
+    async fn middleware_failure_factory_panics_do_not_block_dead_letter_transition() {
+        let (backend, runtime, diagnostics, dispatcher) =
+            build_runtime_and_dispatcher("middleware-failure-factory-panic");
+        let app = build_app(runtime, diagnostics.clone());
+        register_job_middleware(
+            &app,
+            Arc::new(FactoryPanickingMiddleware {
+                failed: true,
+                dead_lettered: true,
+                ..FactoryPanickingMiddleware::default()
             }),
         );
 

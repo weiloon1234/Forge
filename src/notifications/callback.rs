@@ -1,11 +1,8 @@
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-
-use futures_util::FutureExt;
 
 use crate::email::EmailMessage;
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
 use crate::support::NotificationChannelId;
 
 use super::{Notifiable, Notification, NotificationChannel};
@@ -71,10 +68,7 @@ where
     Fut: Future<Output = Result<()>>,
 {
     let subject = format!("channel `{channel_id}` delivery");
-    let future = catch_unwind(AssertUnwindSafe(send))
-        .map_err(|panic| notification_panic_error(&subject, panic))?;
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(send).await {
         Ok(result) => result,
         Err(panic) => Err(notification_panic_error(&subject, panic)),
     }
@@ -94,8 +88,7 @@ fn catch_notification_callback<T, F>(subject: &str, callback: F) -> Result<T>
 where
     F: FnOnce() -> T,
 {
-    catch_unwind(AssertUnwindSafe(callback))
-        .map_err(|panic| notification_panic_error(subject, panic))
+    catch_sync_panic(callback).map_err(|panic| notification_panic_error(subject, panic))
 }
 
 fn notification_panic_error(subject: &str, panic: Box<dyn std::any::Any + Send>) -> Error {

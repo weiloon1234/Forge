@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::FutureExt;
 use tokio::task::JoinHandle;
 
 use crate::foundation::shutdown_drain::{
     drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
 };
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{panic_payload_message, RuntimeDiagnostics, SchedulerLeadershipState};
+use crate::logging::{
+    catch_async_panic, catch_future_panic, panic_payload_message, RuntimeDiagnostics,
+    SchedulerLeadershipState,
+};
 use crate::scheduler::{
     cron_due, ScheduleHandler, ScheduleHook, ScheduleKind, ScheduleOptions, ScheduleRegistry,
     ScheduledTask,
@@ -132,7 +133,7 @@ impl SchedulerKernel {
             let schedule_id = task_id.clone();
             let panic_schedule_id = schedule_id.clone();
             let handle = tokio::spawn(async move {
-                let result = AssertUnwindSafe(crate::logging::scope_current_execution(
+                let result = catch_future_panic(crate::logging::scope_current_execution(
                     crate::logging::ExecutionContext::Scheduler {
                         id: schedule_id.to_string(),
                     },
@@ -146,7 +147,6 @@ impl SchedulerKernel {
                         diagnostics,
                     ),
                 ))
-                .catch_unwind()
                 .await;
 
                 if let Err(panic) = result {
@@ -389,17 +389,7 @@ async fn run_spawned_schedule_task(
 }
 
 async fn run_schedule_handler(app: &AppContext, handler: &ScheduleHandler) -> Result<()> {
-    let future = match catch_unwind(AssertUnwindSafe(|| handler(app.clone()))) {
-        Ok(future) => future,
-        Err(panic) => {
-            return Err(Error::message(format!(
-                "schedule panicked: {}",
-                panic_payload_message(panic)
-            )));
-        }
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| handler(app.clone())).await {
         Ok(result) => result,
         Err(panic) => Err(Error::message(format!(
             "schedule panicked: {}",
@@ -414,21 +404,7 @@ async fn run_schedule_hook(
     hook: &'static str,
     callback: &ScheduleHook,
 ) {
-    let future = match catch_unwind(AssertUnwindSafe(|| callback(app.clone()))) {
-        Ok(future) => future,
-        Err(panic) => {
-            tracing::warn!(
-                target: "forge.scheduler",
-                schedule = %task_id,
-                hook = hook,
-                panic = %panic_payload_message(panic),
-                "Schedule hook panicked"
-            );
-            return;
-        }
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| callback(app.clone())).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(

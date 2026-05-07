@@ -24,6 +24,7 @@ mod file_writer;
 mod metrics;
 mod middleware;
 mod observability;
+mod panic_boundary;
 mod probes;
 mod reporter;
 mod request_id;
@@ -53,6 +54,7 @@ pub(crate) use context::{
 pub(crate) use middleware::{request_context_middleware, request_origin_middleware};
 pub(crate) use observability::register_observability_routes;
 pub(crate) use observability::{register_openapi_route, set_openapi_spec};
+pub(crate) use panic_boundary::{catch_async_panic, catch_future_panic, catch_sync_panic};
 pub(crate) use reporter::{
     mark_handler_error_response, panic_payload_message, report_handler_error_response,
     set_global_panic_reporters, ErrorReporterJobMiddleware, ErrorReporterRegistry,
@@ -235,6 +237,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -272,6 +276,22 @@ mod tests {
     impl ReadinessCheck for PanickingProbe {
         async fn run(&self, _app: &AppContext) -> crate::Result<ProbeResult> {
             panic!("probe boom")
+        }
+    }
+
+    struct FactoryPanickingProbe;
+
+    impl ReadinessCheck for FactoryPanickingProbe {
+        fn run<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _app: &'life1 AppContext,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<ProbeResult>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("probe factory boom")
         }
     }
 
@@ -343,6 +363,38 @@ mod tests {
         assert_eq!(
             report.probes[0].message.as_deref(),
             Some("readiness check panicked: probe boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_aggregation_reports_factory_panics_as_unhealthy() {
+        let mut builder = ReadinessRegistryBuilder::default();
+        builder
+            .register_arc(
+                ProbeId::new("provider.factory_panic"),
+                Arc::new(FactoryPanickingProbe),
+            )
+            .unwrap();
+
+        let diagnostics = RuntimeDiagnostics::new(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistryBuilder::freeze_shared(Arc::new(Mutex::new(builder))),
+        );
+        let app = AppContext::new(
+            Container::new(),
+            ConfigRepository::empty(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+        let report = diagnostics.run_readiness_checks(&app).await.unwrap();
+
+        assert_eq!(report.state, ProbeState::Unhealthy);
+        assert_eq!(report.probes.len(), 1);
+        assert_eq!(report.probes[0].id, ProbeId::new("provider.factory_panic"));
+        assert_eq!(report.probes[0].state, ProbeState::Unhealthy);
+        assert_eq!(
+            report.probes[0].message.as_deref(),
+            Some("readiness check panicked: probe factory boom")
         );
     }
 }

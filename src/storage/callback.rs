@@ -1,12 +1,9 @@
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
-
-use futures_util::FutureExt;
 
 use crate::config::ConfigRepository;
 use crate::foundation::{Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_async_panic, panic_payload_message};
 
 use super::{adapter::StorageAdapter, StorageDriverFactory};
 
@@ -17,10 +14,7 @@ pub(crate) async fn build_storage_driver(
     table: &toml::Table,
 ) -> Result<Arc<dyn StorageAdapter>> {
     let subject = format!("driver `{driver}` factory");
-    let future = catch_unwind(AssertUnwindSafe(|| factory(config, table)))
-        .map_err(|panic| storage_panic_error(&subject, panic))?;
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| factory(config, table)).await {
         Ok(result) => result,
         Err(panic) => Err(storage_panic_error(&subject, panic)),
     }
@@ -36,10 +30,7 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let subject = format!("disk `{disk}` {operation}");
-    let future = catch_unwind(AssertUnwindSafe(run))
-        .map_err(|panic| storage_panic_error(&subject, panic))?;
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(run).await {
         Ok(result) => result,
         Err(panic) => Err(storage_panic_error(&subject, panic)),
     }

@@ -7,7 +7,6 @@ pub(crate) mod spa;
 
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -17,12 +16,11 @@ use axum::middleware::{self as axum_middleware, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
 use axum::Router;
-use futures_util::FutureExt;
 
 use crate::auth::{token::actor_has_mfa_pending, AccessScope, Actor, AuthError, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::middleware::MiddlewareConfig;
-use crate::logging::{panic_payload_message, AuthOutcome};
+use crate::logging::{catch_future_panic, catch_sync_panic, panic_payload_message, AuthOutcome};
 use crate::support::{GuardId, PermissionId, RouteId};
 pub use crate::validation::{JsonValidated, Validated};
 
@@ -47,7 +45,7 @@ pub(crate) fn collect_named_routes(registrars: &[RouteRegistrar]) -> Result<rout
 }
 
 fn run_route_registrar(registrar: &RouteRegistrar, routes: &mut HttpRegistrar) -> Result<()> {
-    match catch_unwind(AssertUnwindSafe(|| registrar(routes))) {
+    match catch_sync_panic(|| registrar(routes)) {
         Ok(result) => result,
         Err(panic) => Err(http_registration_panic_error("route registrar", panic)),
     }
@@ -58,7 +56,7 @@ fn run_http_registration_callback<T>(
     target: &mut T,
     callback: impl FnOnce(&mut T) -> Result<()>,
 ) -> Result<()> {
-    match catch_unwind(AssertUnwindSafe(|| callback(target))) {
+    match catch_sync_panic(|| callback(target)) {
         Ok(result) => result,
         Err(panic) => Err(http_registration_panic_error(subject, panic)),
     }
@@ -849,9 +847,9 @@ where
     F: Fn(HttpAuthorizeContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
-    Arc::new(move |ctx| match catch_unwind(AssertUnwindSafe(|| f(ctx))) {
+    Arc::new(move |ctx| match catch_sync_panic(|| f(ctx)) {
         Ok(future) => Box::pin(async move {
-            match AssertUnwindSafe(future).catch_unwind().await {
+            match catch_future_panic(future).await {
                 Ok(result) => result,
                 Err(panic) => Err(http_authorizer_panic_error(panic)),
             }

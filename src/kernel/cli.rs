@@ -1,12 +1,10 @@
 use std::ffi::OsString;
-use std::panic::AssertUnwindSafe;
 
 use clap::Command;
-use futures_util::FutureExt;
 
 use crate::cli::{CommandInvocation, CommandRegistry};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::panic_payload_message;
+use crate::logging::{catch_future_panic, panic_payload_message};
 
 pub struct CliKernel {
     app: AppContext,
@@ -56,10 +54,7 @@ impl CliKernel {
             {
                 let handler = registered.handler.clone();
                 let invocation = CommandInvocation::new(self.app.clone(), sub_matches.clone());
-                match AssertUnwindSafe(async move { handler(invocation).await })
-                    .catch_unwind()
-                    .await
-                {
+                match catch_future_panic(async move { handler(invocation).await }).await {
                     Ok(result) => result?,
                     Err(panic) => {
                         let message = panic_payload_message(panic);

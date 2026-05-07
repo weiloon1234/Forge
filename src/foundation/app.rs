@@ -1,12 +1,10 @@
 use std::any::Any;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::FutureExt;
 
 use crate::audit::AuditManager;
 use crate::auth::{
@@ -33,9 +31,10 @@ use crate::kernel::{
     worker::WorkerKernel,
 };
 use crate::logging::{
-    panic_payload_message, ErrorReporter, ErrorReporterRegistry, ObservabilityOptions, ProbeResult,
-    ReadinessRegistryBuilder, ReadinessRegistryHandle, RuntimeBackendKind, RuntimeDiagnostics,
-    FRAMEWORK_BOOTSTRAP_PROBE, REDIS_PING_PROBE, RUNTIME_BACKEND_PROBE,
+    catch_async_panic, catch_future_panic, catch_sync_panic, panic_payload_message, ErrorReporter,
+    ErrorReporterRegistry, ObservabilityOptions, ProbeResult, ReadinessRegistryBuilder,
+    ReadinessRegistryHandle, RuntimeBackendKind, RuntimeDiagnostics, FRAMEWORK_BOOTSTRAP_PROBE,
+    REDIS_PING_PROBE, RUNTIME_BACKEND_PROBE,
 };
 use crate::plugin::{Plugin, PluginRegistry};
 use crate::redis::RedisManager;
@@ -347,13 +346,13 @@ impl AppContext {
         let name = name.into();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
-        let task = match catch_unwind(AssertUnwindSafe(|| build_task(shutdown_rx))) {
+        let task = match catch_sync_panic(|| build_task(shutdown_rx)) {
             Ok(task) => task?,
             Err(panic) => return Err(managed_background_task_panic_error(&name, "factory", panic)),
         };
         let task_name = name.clone();
         let handle = tokio::spawn(async move {
-            if let Err(panic) = AssertUnwindSafe(task).catch_unwind().await {
+            if let Err(panic) = catch_future_panic(task).await {
                 let _ = managed_background_task_panic_error(&task_name, "future", panic);
             }
             let _ = completed_tx.send(());
@@ -475,12 +474,12 @@ async fn run_after_commit_callbacks(app: &AppContext, callbacks: Vec<AfterCommit
 }
 
 async fn run_after_commit_callback(app: &AppContext, callback: AfterCommitCallback) -> Result<()> {
-    let future = match catch_unwind(AssertUnwindSafe(|| callback(app.clone()))) {
+    let future = match catch_sync_panic(|| callback(app.clone())) {
         Ok(future) => future,
         Err(panic) => return Err(after_commit_panic_error(panic, "factory")),
     };
 
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_future_panic(future).await {
         Ok(result) => result,
         Err(panic) => Err(after_commit_panic_error(panic, "future")),
     }
@@ -518,22 +517,14 @@ async fn register_service_provider(
     provider: &dyn ServiceProvider,
     registrar: &mut ServiceRegistrar,
 ) -> Result<()> {
-    match AssertUnwindSafe(provider.register(registrar))
-        .catch_unwind()
-        .await
-    {
+    match catch_async_panic(|| provider.register(registrar)).await {
         Ok(result) => result,
         Err(panic) => Err(service_provider_panic_error("register", panic)),
     }
 }
 
 async fn boot_service_provider(provider: &dyn ServiceProvider, app: &AppContext) -> Result<()> {
-    let future = match catch_unwind(AssertUnwindSafe(|| provider.boot(app))) {
-        Ok(future) => future,
-        Err(panic) => return Err(service_provider_panic_error("boot", panic)),
-    };
-
-    match AssertUnwindSafe(future).catch_unwind().await {
+    match catch_async_panic(|| provider.boot(app)).await {
         Ok(result) => result,
         Err(panic) => Err(service_provider_panic_error("boot", panic)),
     }
@@ -985,7 +976,7 @@ impl AppBuilder {
         }
         // Apply plugin direct registrations (guards, jobs, events, etc.)
         for action in prepared_plugins.registrar_actions {
-            match catch_unwind(AssertUnwindSafe(|| action(&registrar))) {
+            match catch_sync_panic(|| action(&registrar)) {
                 Ok(result) => result?,
                 Err(panic) => return Err(registrar_action_panic_error(panic)),
             }
@@ -1310,14 +1301,12 @@ impl AppBuilder {
             .enable_all()
             .build()
             .map_err(Error::other)?;
-        let future = match catch_unwind(AssertUnwindSafe(|| runner(self))) {
+        let future = match catch_sync_panic(|| runner(self)) {
             Ok(future) => future,
             Err(panic) => return Err(app_runner_panic_error("factory", panic)),
         };
 
-        match catch_unwind(AssertUnwindSafe(|| {
-            runtime.block_on(AssertUnwindSafe(future).catch_unwind())
-        })) {
+        match catch_sync_panic(|| runtime.block_on(catch_future_panic(future))) {
             Ok(Ok(result)) => result,
             Ok(Err(panic)) => Err(app_runner_panic_error("future", panic)),
             Err(panic) => {

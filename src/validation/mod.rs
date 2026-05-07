@@ -19,6 +19,8 @@ pub use validator::Validator;
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::future::Future;
+    use std::pin::Pin;
 
     use async_trait::async_trait;
     use tempfile::tempdir;
@@ -62,6 +64,8 @@ mod tests {
 
     struct PanickingRule;
 
+    struct FactoryPanickingRule;
+
     #[async_trait]
     impl ValidationRule for MobileRule {
         async fn validate(
@@ -85,6 +89,26 @@ mod tests {
             _value: &str,
         ) -> std::result::Result<(), ValidationError> {
             panic!("validation boom")
+        }
+    }
+
+    impl ValidationRule for FactoryPanickingRule {
+        fn validate<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            _context: &'life1 RuleContext,
+            _value: &'life2 str,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = std::result::Result<(), ValidationError>> + Send + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            panic!("validation factory boom")
         }
     }
 
@@ -130,6 +154,29 @@ mod tests {
             .to_string()
             .contains("validation rule `panic` panicked"));
         assert!(error.to_string().contains("validation boom"));
+        assert!(validator.finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn custom_rule_factory_panic_becomes_framework_error() {
+        let rules = RuleRegistry::new();
+        rules
+            .register(ValidationRuleId::new("panic_factory"), FactoryPanickingRule)
+            .unwrap();
+        let app = AppContext::new(Container::new(), ConfigRepository::empty(), rules).unwrap();
+        let mut validator = Validator::new(app);
+
+        let error = validator
+            .field("phone", "123")
+            .rule(ValidationRuleId::new("panic_factory"))
+            .apply()
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("validation rule `panic_factory` panicked"));
+        assert!(error.to_string().contains("validation factory boom"));
         assert!(validator.finish().is_ok());
     }
 

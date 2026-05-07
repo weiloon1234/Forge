@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AccessScope, Actor, Authenticatable};
 use crate::foundation::{AppContext, Error, Result};
-use crate::logging::{panic_payload_message, RuntimeDiagnostics};
+use crate::logging::{
+    catch_future_panic, catch_sync_panic, panic_payload_message, RuntimeDiagnostics,
+};
 use crate::support::runtime::RuntimeBackend;
 use crate::support::{ChannelEventId, ChannelId, GuardId, PermissionId};
 
@@ -34,7 +34,7 @@ pub(crate) fn build_registrar(
 ) -> Result<WebSocketRegistrar> {
     let mut registrar = WebSocketRegistrar::new();
     for route in registrars {
-        match catch_unwind(AssertUnwindSafe(|| route(&mut registrar))) {
+        match catch_sync_panic(|| route(&mut registrar)) {
             Ok(result) => result?,
             Err(panic) => return Err(websocket_registrar_panic_error(panic)),
         }
@@ -453,9 +453,9 @@ where
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
     Arc::new(move |ctx, channel, room| {
-        match catch_unwind(AssertUnwindSafe(|| f(ctx, channel.clone(), room.clone()))) {
+        match catch_sync_panic(|| f(ctx, channel.clone(), room.clone())) {
             Ok(future) => Box::pin(async move {
-                match AssertUnwindSafe(future).catch_unwind().await {
+                match catch_future_panic(future).await {
                     Ok(result) => result,
                     Err(panic) => Err(websocket_authorizer_panic_error(panic)),
                 }
@@ -470,9 +470,9 @@ where
     F: Fn(WebSocketContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
-    Arc::new(move |ctx| match catch_unwind(AssertUnwindSafe(|| f(ctx))) {
+    Arc::new(move |ctx| match catch_sync_panic(|| f(ctx)) {
         Ok(future) => Box::pin(async move {
-            match AssertUnwindSafe(future).catch_unwind().await {
+            match catch_future_panic(future).await {
                 Ok(result) => result,
                 Err(panic) => Err(websocket_lifecycle_panic_error(hook, panic)),
             }

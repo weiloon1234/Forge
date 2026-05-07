@@ -2150,6 +2150,10 @@ fn set_scheduler_leader_active(&self, active: bool)
 fn record_job_outcome(&self, outcome: JobOutcome)
 ```
 
+`/_forge/runtime` returns the structured `RuntimeSnapshot`. `/_forge/metrics` exposes the same
+runtime counter families in Prometheus text format, and new series are additive so existing metric
+names remain stable.
+
 ### ObservabilityOptions — builder
 
 ```rust

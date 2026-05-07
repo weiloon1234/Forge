@@ -63,16 +63,18 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "histogram",
     );
     for bucket in &snapshot.http.duration_ms.buckets {
-        let _ = writeln!(
-            out,
-            "forge_http_request_duration_ms_bucket{{le=\"{}\"}} {}",
-            bucket.le_ms, bucket.cumulative_count
+        write_labeled_sample(
+            &mut out,
+            "forge_http_request_duration_ms_bucket",
+            &[("le", &bucket.le_ms.to_string())],
+            bucket.cumulative_count,
         );
     }
-    let _ = writeln!(
-        out,
-        "forge_http_request_duration_ms_bucket{{le=\"+Inf\"}} {}",
-        snapshot.http.duration_ms.count
+    write_labeled_sample(
+        &mut out,
+        "forge_http_request_duration_ms_bucket",
+        &[("le", "+Inf")],
+        snapshot.http.duration_ms.count,
     );
     let _ = writeln!(
         out,
@@ -133,11 +135,57 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "forge_websocket_connections_total {}",
         snapshot.websocket.opened_total
     );
+    write_help_type(
+        &mut out,
+        "forge_websocket_connection_events_total",
+        "Total WebSocket connection lifecycle events",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_websocket_connection_events_total",
+        "state",
+        "opened",
+        snapshot.websocket.opened_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_websocket_connection_events_total",
+        "state",
+        "closed",
+        snapshot.websocket.closed_total,
+    );
     write_gauge(
         &mut out,
         "forge_websocket_active_connections",
         "Currently active WebSocket connections",
         snapshot.websocket.active_connections,
+    );
+    write_help_type(
+        &mut out,
+        "forge_websocket_subscription_events_total",
+        "Total WebSocket subscription lifecycle events",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_websocket_subscription_events_total",
+        "action",
+        "subscribe",
+        snapshot.websocket.subscriptions_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_websocket_subscription_events_total",
+        "action",
+        "unsubscribe",
+        snapshot.websocket.unsubscribes_total,
+    );
+    write_gauge(
+        &mut out,
+        "forge_websocket_active_subscriptions_global",
+        "Currently active WebSocket subscriptions across all channels",
+        snapshot.websocket.active_subscriptions,
     );
 
     write_help_type(
@@ -180,27 +228,42 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "Total WebSocket messages per channel",
         "counter",
     );
+    write_help_type(
+        &mut out,
+        "forge_websocket_channel_unsubscribes_total",
+        "Total WebSocket unsubscribes per channel",
+        "counter",
+    );
     for channel in &snapshot.websocket.channels {
-        let id = channel.id.as_str();
-        let _ = writeln!(
-            out,
-            "forge_websocket_subscriptions_total{{channel=\"{id}\"}} {}",
-            channel.subscriptions_total
+        write_labeled_sample(
+            &mut out,
+            "forge_websocket_subscriptions_total",
+            &[("channel", channel.id.as_str())],
+            channel.subscriptions_total,
         );
-        let _ = writeln!(
-            out,
-            "forge_websocket_active_subscriptions{{channel=\"{id}\"}} {}",
-            channel.active_subscriptions
+        write_labeled_sample(
+            &mut out,
+            "forge_websocket_channel_unsubscribes_total",
+            &[("channel", channel.id.as_str())],
+            channel.unsubscribes_total,
         );
-        let _ = writeln!(
-            out,
-            "forge_websocket_channel_messages_total{{channel=\"{id}\",direction=\"inbound\"}} {}",
-            channel.inbound_messages_total
+        write_labeled_sample(
+            &mut out,
+            "forge_websocket_active_subscriptions",
+            &[("channel", channel.id.as_str())],
+            channel.active_subscriptions,
         );
-        let _ = writeln!(
-            out,
-            "forge_websocket_channel_messages_total{{channel=\"{id}\",direction=\"outbound\"}} {}",
-            channel.outbound_messages_total
+        write_labeled_sample(
+            &mut out,
+            "forge_websocket_channel_messages_total",
+            &[("channel", channel.id.as_str()), ("direction", "inbound")],
+            channel.inbound_messages_total,
+        );
+        write_labeled_sample(
+            &mut out,
+            "forge_websocket_channel_messages_total",
+            &[("channel", channel.id.as_str()), ("direction", "outbound")],
+            channel.outbound_messages_total,
         );
     }
 
@@ -237,6 +300,26 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
             0
         },
     );
+    write_help_type(
+        &mut out,
+        "forge_scheduler_leadership_total",
+        "Total scheduler leadership changes",
+        "counter",
+    );
+    write_counter_label(
+        &mut out,
+        "forge_scheduler_leadership_total",
+        "state",
+        "acquired",
+        snapshot.scheduler.leadership_acquired_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_scheduler_leadership_total",
+        "state",
+        "lost",
+        snapshot.scheduler.leadership_lost_total,
+    );
 
     // Job counters
     write_help_type(
@@ -251,6 +334,13 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "outcome",
         "enqueued",
         snapshot.jobs.enqueued_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
+        "leased",
+        snapshot.jobs.leased_total,
     );
     write_counter_label(
         &mut out,
@@ -277,6 +367,13 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         &mut out,
         "forge_jobs_total",
         "outcome",
+        "expired_lease_requeued",
+        snapshot.jobs.expired_requeues_total,
+    );
+    write_counter_label(
+        &mut out,
+        "forge_jobs_total",
+        "outcome",
         "dead_lettered",
         snapshot.jobs.dead_lettered_total,
     );
@@ -295,7 +392,32 @@ fn write_gauge(out: &mut String, name: &str, help: &str, value: u64) {
 }
 
 fn write_counter_label(out: &mut String, name: &str, label: &str, label_value: &str, value: u64) {
-    let _ = writeln!(out, "{name}{{{label}=\"{label_value}\"}} {value}");
+    write_labeled_sample(out, name, &[(label, label_value)], value);
+}
+
+fn write_labeled_sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: u64) {
+    let _ = write!(out, "{name}{{");
+    for (index, (label, label_value)) in labels.iter().enumerate() {
+        if index > 0 {
+            let _ = write!(out, ",");
+        }
+        let escaped = escape_prometheus_label_value(label_value);
+        let _ = write!(out, "{label}=\"{escaped}\"");
+    }
+    let _ = writeln!(out, "}} {value}");
+}
+
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str(r"\\"),
+            '"' => escaped.push_str(r#"\""#),
+            '\n' => escaped.push_str(r"\n"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -385,9 +507,23 @@ mod tests {
         assert!(output.contains("forge_http_request_duration_ms_sum 12345"));
         assert!(output.contains("forge_http_request_duration_ms_count 100"));
         assert!(output.contains("forge_auth_total{outcome=\"success\"} 50"));
+        assert!(output.contains("forge_websocket_connections_total 10"));
+        assert!(output.contains("forge_websocket_connection_events_total{state=\"opened\"} 10"));
+        assert!(output.contains("forge_websocket_connection_events_total{state=\"closed\"} 5"));
         assert!(output.contains("forge_websocket_active_connections 5"));
+        assert!(
+            output.contains("forge_websocket_subscription_events_total{action=\"subscribe\"} 20")
+        );
+        assert!(
+            output.contains("forge_websocket_subscription_events_total{action=\"unsubscribe\"} 10")
+        );
+        assert!(output.contains("forge_websocket_active_subscriptions_global 10"));
         assert!(output.contains("forge_jobs_total{outcome=\"succeeded\"} 25"));
+        assert!(output.contains("forge_jobs_total{outcome=\"leased\"} 28"));
+        assert!(output.contains("forge_jobs_total{outcome=\"expired_lease_requeued\"} 1"));
         assert!(output.contains("forge_scheduler_leader_active 1"));
+        assert!(output.contains("forge_scheduler_leadership_total{state=\"acquired\"} 2"));
+        assert!(output.contains("forge_scheduler_leadership_total{state=\"lost\"} 1"));
         assert!(output.contains("# TYPE forge_http_requests_total counter"));
         assert!(output.contains("# TYPE forge_bootstrap_complete gauge"));
     }
@@ -462,6 +598,7 @@ mod tests {
             output.contains("forge_websocket_subscriptions_total{channel=\"chat\"} 10"),
             "missing per-channel subscriptions series:\n{output}"
         );
+        assert!(output.contains("forge_websocket_channel_unsubscribes_total{channel=\"chat\"} 2"));
         assert!(output.contains("forge_websocket_active_subscriptions{channel=\"chat\"} 8"));
         assert!(output.contains(
             "forge_websocket_channel_messages_total{channel=\"chat\",direction=\"inbound\"} 100"
@@ -469,5 +606,76 @@ mod tests {
         assert!(output.contains(
             "forge_websocket_channel_messages_total{channel=\"chat\",direction=\"outbound\"} 300"
         ));
+    }
+
+    #[test]
+    fn format_prometheus_escapes_label_values() {
+        use crate::logging::diagnostics::WebSocketChannelSnapshot;
+        use crate::support::ChannelId;
+
+        let snapshot = RuntimeSnapshot {
+            backend: RuntimeBackendKind::Memory,
+            bootstrap_complete: false,
+            http: HttpRuntimeSnapshot {
+                requests_total: 0,
+                informational_total: 0,
+                success_total: 0,
+                redirection_total: 0,
+                client_error_total: 0,
+                server_error_total: 0,
+                duration_ms: HttpDurationHistogramSnapshot {
+                    count: 0,
+                    sum_ms: 0,
+                    buckets: Vec::new(),
+                },
+            },
+            auth: AuthRuntimeSnapshot {
+                success_total: 0,
+                unauthorized_total: 0,
+                forbidden_total: 0,
+                error_total: 0,
+            },
+            websocket: WebSocketRuntimeSnapshot {
+                opened_total: 0,
+                closed_total: 0,
+                active_connections: 0,
+                subscriptions_total: 0,
+                unsubscribes_total: 0,
+                active_subscriptions: 0,
+                inbound_messages_total: 0,
+                outbound_messages_total: 0,
+                channels: vec![WebSocketChannelSnapshot {
+                    id: ChannelId::owned("team\"ops\\prod\nblue"),
+                    subscriptions_total: 7,
+                    unsubscribes_total: 0,
+                    active_subscriptions: 0,
+                    inbound_messages_total: 0,
+                    outbound_messages_total: 0,
+                }],
+            },
+            scheduler: SchedulerRuntimeSnapshot {
+                ticks_total: 0,
+                executed_schedules_total: 0,
+                leadership_acquired_total: 0,
+                leadership_lost_total: 0,
+                leader_active: false,
+            },
+            jobs: JobRuntimeSnapshot {
+                enqueued_total: 0,
+                leased_total: 0,
+                started_total: 0,
+                succeeded_total: 0,
+                retried_total: 0,
+                expired_requeues_total: 0,
+                dead_lettered_total: 0,
+            },
+        };
+
+        let output = format_prometheus(&snapshot);
+
+        assert!(output.contains(
+            "forge_websocket_subscriptions_total{channel=\"team\\\"ops\\\\prod\\nblue\"} 7"
+        ));
+        assert!(!output.contains("team\"ops\\prod\nblue"));
     }
 }

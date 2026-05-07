@@ -421,6 +421,13 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
     assert!(metrics_body.contains("forge_http_request_duration_ms_bucket{le=\"+Inf\"}"));
     assert!(metrics_body.contains("forge_http_request_duration_ms_sum "));
     assert!(metrics_body.contains("forge_http_request_duration_ms_count "));
+    assert!(metrics_body.contains("forge_websocket_connection_events_total{state=\"closed\"}"));
+    assert!(
+        metrics_body.contains("forge_websocket_subscription_events_total{action=\"unsubscribe\"}")
+    );
+    assert!(metrics_body.contains("forge_scheduler_leadership_total{state=\"lost\"}"));
+    assert!(metrics_body.contains("forge_jobs_total{outcome=\"leased\"}"));
+    assert!(metrics_body.contains("forge_jobs_total{outcome=\"expired_lease_requeued\"}"));
 
     server.abort();
 }

@@ -512,6 +512,7 @@ The same series are also emitted in Prometheus format on `/_forge/metrics`, labe
 
 ```
 forge_websocket_subscriptions_total{channel="chat"} 200
+forge_websocket_channel_unsubscribes_total{channel="chat"} 180
 forge_websocket_active_subscriptions{channel="chat"} 20
 forge_websocket_channel_messages_total{channel="chat",direction="inbound"} 5000
 forge_websocket_channel_messages_total{channel="chat",direction="outbound"} 20000

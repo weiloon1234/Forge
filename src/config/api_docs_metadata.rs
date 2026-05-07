@@ -66,6 +66,10 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "Job handler panics are handled as normal job failures and use the existing retry/dead-letter flow.",
             "`spawn_worker(app)` is managed by the app lifecycle and remains capped by `app.background_shutdown_timeout_ms`.",
         ],
+        "logging" => &[
+            "`/_forge/runtime` returns the structured `RuntimeSnapshot`; `/_forge/metrics` exposes the same runtime counter families in Prometheus text format.",
+            "Prometheus metric additions are additive so existing series names remain stable.",
+        ],
         "scheduler" => &[
             "Schedule handler panics are handled as schedule failures and route through `ScheduleOptions::on_failure`.",
             "Scheduler hooks are isolated: hook panics are logged and do not crash the scheduler task.",
@@ -108,5 +112,11 @@ mod tests {
         append_module_notes("scheduler", &mut scheduler);
         assert!(scheduler.contains("Schedule handler panics"));
         assert!(scheduler.contains("SchedulerConfig.shutdown_timeout_ms"));
+
+        let mut logging = String::new();
+        append_module_notes("logging", &mut logging);
+        assert!(logging.contains("/_forge/runtime"));
+        assert!(logging.contains("/_forge/metrics"));
+        assert!(logging.contains("additive"));
     }
 }

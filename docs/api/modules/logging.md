@@ -78,3 +78,8 @@ trait ReadinessCheck
 fn init(config: &ConfigRepository) -> Result<()>
 ```
 
+## Notes
+
+- `/_forge/runtime` returns the structured `RuntimeSnapshot`; `/_forge/metrics` exposes the same runtime counter families in Prometheus text format.
+- Prometheus metric additions are additive so existing series names remain stable.
+

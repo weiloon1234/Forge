@@ -187,6 +187,7 @@ pub struct DatabaseConfig {
     pub read_url: Option<String>,
     pub schema: String,
     pub migration_table: String,
+    pub migration_lock_timeout_ms: u64,
     pub migrations_path: String,
     pub seeders_path: String,
     pub min_connections: u32,
@@ -211,6 +212,7 @@ impl Default for DatabaseConfig {
             read_url: None,
             schema: "public".to_string(),
             migration_table: "forge_migrations".to_string(),
+            migration_lock_timeout_ms: 0,
             migrations_path: "database/migrations".to_string(),
             seeders_path: "database/seeders".to_string(),
             min_connections: 1,
@@ -1049,6 +1051,7 @@ mod tests {
                 url = "postgres://forge:secret@127.0.0.1:5432/forge"
                 schema = "forge_test"
                 migration_table = "schema_migrations"
+                migration_lock_timeout_ms = 2500
                 migrations_path = "database/migrations"
                 seeders_path = "database/seeders"
                 max_connections = 2
@@ -1093,6 +1096,7 @@ mod tests {
         assert_eq!(database.url, "postgres://forge:secret@127.0.0.1:5432/forge");
         assert_eq!(database.schema, "forge_test");
         assert_eq!(database.migration_table, "schema_migrations");
+        assert_eq!(database.migration_lock_timeout_ms, 2_500);
         assert_eq!(database.migrations_path, "database/migrations");
         assert_eq!(database.seeders_path, "database/seeders");
         assert_eq!(database.max_connections, 2);

@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use chrono::Local;
 use clap::{Arg, ArgAction, Command};
 use forge_build::{discover_migration_sources, discover_seeder_sources};
+use serde::Serialize;
+use tokio::time::{sleep, Duration, Instant};
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::DatabaseConfig;
@@ -28,6 +30,8 @@ const MAKE_SEEDER_COMMAND: CommandId = CommandId::new("make:seeder");
 const MAKE_MODEL_COMMAND: CommandId = CommandId::new("make:model");
 const MAKE_JOB_COMMAND: CommandId = CommandId::new("make:job");
 const MAKE_COMMAND_COMMAND: CommandId = CommandId::new("make:command");
+const MIGRATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const MIGRATION_LOCK_NOTICE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppliedMigration {
@@ -40,6 +44,99 @@ pub(crate) struct AppliedMigration {
 pub(crate) struct MigrationStatus {
     pub id: MigrationId,
     pub applied: Option<AppliedMigration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MigrationStatusReport {
+    pub statuses: Vec<MigrationStatus>,
+    pub missing_applied: Vec<AppliedMigration>,
+    pub latest_batch: Option<i64>,
+}
+
+impl MigrationStatusReport {
+    fn summary(&self) -> MigrationStatusSummary {
+        let registered = self.statuses.len();
+        let applied = self
+            .statuses
+            .iter()
+            .filter(|status| status.applied.is_some())
+            .count();
+        MigrationStatusSummary {
+            registered,
+            applied,
+            pending: registered.saturating_sub(applied),
+            missing_applied: self.missing_applied.len(),
+            latest_batch: self.latest_batch,
+        }
+    }
+
+    fn to_json(&self) -> MigrationStatusJson {
+        MigrationStatusJson {
+            summary: self.summary(),
+            migrations: self
+                .statuses
+                .iter()
+                .map(MigrationStatusJsonRow::from_status)
+                .collect(),
+            missing_applied: self
+                .missing_applied
+                .iter()
+                .map(MigrationStatusJsonRow::from_missing)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct MigrationStatusSummary {
+    registered: usize,
+    applied: usize,
+    pending: usize,
+    missing_applied: usize,
+    latest_batch: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct MigrationStatusJson {
+    summary: MigrationStatusSummary,
+    migrations: Vec<MigrationStatusJsonRow>,
+    missing_applied: Vec<MigrationStatusJsonRow>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct MigrationStatusJsonRow {
+    id: String,
+    state: &'static str,
+    batch: Option<i64>,
+    applied_at: Option<String>,
+}
+
+impl MigrationStatusJsonRow {
+    fn from_status(status: &MigrationStatus) -> Self {
+        match &status.applied {
+            Some(applied) => Self {
+                id: status.id.to_string(),
+                state: "applied",
+                batch: Some(applied.batch),
+                applied_at: Some(applied.applied_at.clone()),
+            },
+            None => Self {
+                id: status.id.to_string(),
+                state: "pending",
+                batch: None,
+                applied_at: None,
+            },
+        }
+    }
+
+    fn from_missing(applied: &AppliedMigration) -> Self {
+        Self {
+            id: applied.id.to_string(),
+            state: "missing_applied",
+            batch: Some(applied.batch),
+            applied_at: Some(applied.applied_at.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -445,19 +542,27 @@ pub(crate) fn builtin_cli_registrar() -> CommandRegistrar {
         registry.command(
             DB_MIGRATE_COMMAND,
             Command::new(DB_MIGRATE_COMMAND.as_str().to_string())
-                .about("Apply pending Forge database migrations"),
+                .about("Apply pending Forge database migrations")
+                .arg(lock_timeout_arg()),
             |invocation| async move { db_migrate_command(invocation).await },
         )?;
         registry.command(
             DB_MIGRATE_STATUS_COMMAND,
             Command::new(DB_MIGRATE_STATUS_COMMAND.as_str().to_string())
-                .about("Show the current Forge database migration status"),
+                .about("Show the current Forge database migration status")
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Print migration status as JSON"),
+                ),
             |invocation| async move { db_migrate_status_command(invocation).await },
         )?;
         registry.command(
             DB_ROLLBACK_COMMAND,
             Command::new(DB_ROLLBACK_COMMAND.as_str().to_string())
-                .about("Rollback the latest Forge migration batch"),
+                .about("Rollback the latest Forge migration batch")
+                .arg(lock_timeout_arg()),
             |invocation| async move { db_rollback_command(invocation).await },
         )?;
         registry.command(
@@ -572,9 +677,18 @@ pub(crate) fn builtin_cli_registrar() -> CommandRegistrar {
     })
 }
 
+fn lock_timeout_arg() -> Arg {
+    Arg::new("lock_timeout_ms")
+        .long("lock-timeout-ms")
+        .value_name("MS")
+        .value_parser(clap::value_parser!(u64))
+        .help("Override database.migration_lock_timeout_ms for this command")
+}
+
 async fn db_migrate_command(invocation: CommandInvocation) -> Result<()> {
     let lifecycle = DatabaseLifecycle::from_app(invocation.app())?;
-    let summary = lifecycle.migrate().await?;
+    let lock_timeout_ms = lock_timeout_ms(&invocation, &lifecycle.config);
+    let summary = lifecycle.migrate(lock_timeout_ms).await?;
     match summary.batch {
         Some(batch) => println!("applied {} migration(s) in batch {}", summary.count, batch),
         None => println!("applied 0 migration(s)"),
@@ -584,7 +698,16 @@ async fn db_migrate_command(invocation: CommandInvocation) -> Result<()> {
 
 async fn db_migrate_status_command(invocation: CommandInvocation) -> Result<()> {
     let lifecycle = DatabaseLifecycle::from_app(invocation.app())?;
-    for status in lifecycle.statuses().await? {
+    let report = lifecycle.status_report().await?;
+    if invocation.matches().get_flag("json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.to_json()).map_err(Error::other)?
+        );
+        return Ok(());
+    }
+
+    for status in report.statuses {
         match status.applied {
             Some(applied) => println!(
                 "{} | Applied | batch {} | {}",
@@ -593,12 +716,19 @@ async fn db_migrate_status_command(invocation: CommandInvocation) -> Result<()> 
             None => println!("{} | Pending", status.id),
         }
     }
+    for applied in report.missing_applied {
+        println!(
+            "{} | MissingApplied | batch {} | {}",
+            applied.id, applied.batch, applied.applied_at
+        );
+    }
     Ok(())
 }
 
 async fn db_rollback_command(invocation: CommandInvocation) -> Result<()> {
     let lifecycle = DatabaseLifecycle::from_app(invocation.app())?;
-    let summary = lifecycle.rollback_latest_batch().await?;
+    let lock_timeout_ms = lock_timeout_ms(&invocation, &lifecycle.config);
+    let summary = lifecycle.rollback_latest_batch(lock_timeout_ms).await?;
     match summary.batch {
         Some(batch) => println!(
             "reverted {} migration(s) from batch {}",
@@ -607,6 +737,14 @@ async fn db_rollback_command(invocation: CommandInvocation) -> Result<()> {
         None => println!("reverted 0 migration(s)"),
     }
     Ok(())
+}
+
+fn lock_timeout_ms(invocation: &CommandInvocation, config: &DatabaseConfig) -> u64 {
+    invocation
+        .matches()
+        .get_one::<u64>("lock_timeout_ms")
+        .copied()
+        .unwrap_or(config.migration_lock_timeout_ms)
 }
 
 async fn db_seed_command(invocation: CommandInvocation) -> Result<()> {
@@ -749,14 +887,12 @@ impl DatabaseLifecycle {
         })
     }
 
-    async fn statuses(&self) -> Result<Vec<MigrationStatus>> {
+    async fn status_report(&self) -> Result<MigrationStatusReport> {
         self.ensure_generated_database_is_registered()?;
         let session = self.database.acquire_session().await?;
         ensure_ledger_table(&self.config, &session).await?;
         let applied = applied_migrations(&self.config, &session).await?;
-        ensure_applied_migrations_exist(&applied, &self.migrations)?;
-
-        Ok(self
+        let statuses = self
             .migrations
             .ids()
             .into_iter()
@@ -764,14 +900,22 @@ impl DatabaseLifecycle {
                 applied: applied.get(&id).cloned(),
                 id,
             })
-            .collect())
+            .collect::<Vec<_>>();
+        let missing_applied = missing_applied_migrations(&applied, &self.migrations);
+        let latest_batch = applied.values().map(|migration| migration.batch).max();
+
+        Ok(MigrationStatusReport {
+            statuses,
+            missing_applied,
+            latest_batch,
+        })
     }
 
-    async fn migrate(&self) -> Result<MigrationRunSummary> {
+    async fn migrate(&self, lock_timeout_ms: u64) -> Result<MigrationRunSummary> {
         self.ensure_generated_database_is_registered()?;
         let session = self.database.acquire_session().await?;
         let lock_key = advisory_lock_key(&self.config);
-        session.acquire_advisory_lock(lock_key).await?;
+        acquire_migration_lock(&session, &self.config, lock_key, lock_timeout_ms).await?;
         let result = migrate_locked(
             self.app.clone(),
             self.database.clone(),
@@ -783,11 +927,11 @@ impl DatabaseLifecycle {
         finish_locked_operation(&session, lock_key, result).await
     }
 
-    async fn rollback_latest_batch(&self) -> Result<MigrationRunSummary> {
+    async fn rollback_latest_batch(&self, lock_timeout_ms: u64) -> Result<MigrationRunSummary> {
         self.ensure_generated_database_is_registered()?;
         let session = self.database.acquire_session().await?;
         let lock_key = advisory_lock_key(&self.config);
-        session.acquire_advisory_lock(lock_key).await?;
+        acquire_migration_lock(&session, &self.config, lock_key, lock_timeout_ms).await?;
         let result = rollback_locked(
             self.app.clone(),
             self.database.clone(),
@@ -845,7 +989,7 @@ impl DatabaseLifecycle {
         for source in discover_migration_sources(paths.migration_dirs()).map_err(Error::other)? {
             if !migration_ids.contains(&source.id) {
                 return Err(Error::message(format!(
-                    "migration file `{}` exists but is not registered in the current binary; rebuild the app",
+                    "migration file `{}` exists but is not registered in the current binary; rebuild the app before running database lifecycle commands so the file is discovered",
                     source.path.display()
                 )));
             }
@@ -860,7 +1004,7 @@ impl DatabaseLifecycle {
         for source in discover_seeder_sources(paths.seeder_dirs()).map_err(Error::other)? {
             if !seeder_ids.contains(&source.id) {
                 return Err(Error::message(format!(
-                    "seeder file `{}` exists but is not registered in the current binary; rebuild the app",
+                    "seeder file `{}` exists but is not registered in the current binary; rebuild the app before running database lifecycle commands so the file is discovered",
                     source.path.display()
                 )));
             }
@@ -873,6 +1017,68 @@ impl DatabaseLifecycle {
 struct MigrationRunSummary {
     count: usize,
     batch: Option<i64>,
+}
+
+#[async_trait]
+trait MigrationLockClient: Sync {
+    async fn try_acquire_migration_lock(&self, lock_key: i64) -> Result<bool>;
+}
+
+#[async_trait]
+impl MigrationLockClient for DatabaseSession {
+    async fn try_acquire_migration_lock(&self, lock_key: i64) -> Result<bool> {
+        self.try_acquire_advisory_lock(lock_key).await
+    }
+}
+
+async fn acquire_migration_lock(
+    client: &dyn MigrationLockClient,
+    config: &DatabaseConfig,
+    lock_key: i64,
+    timeout_ms: u64,
+) -> Result<()> {
+    let started = Instant::now();
+    let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
+    let mut next_notice = started + MIGRATION_LOCK_NOTICE_INTERVAL;
+
+    loop {
+        if client.try_acquire_migration_lock(lock_key).await? {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        if let Some(timeout) = timeout {
+            if now.duration_since(started) >= timeout {
+                return Err(migration_lock_timeout_error(config, timeout_ms));
+            }
+        }
+
+        if now >= next_notice {
+            let message = format!(
+                "waiting for migration advisory lock for schema `{}` and migration table `{}`; another db:migrate or db:rollback process is likely running",
+                config.schema, config.migration_table
+            );
+            tracing::warn!(target: "forge.database.lifecycle", "{message}");
+            println!("{message}");
+            next_notice = now + MIGRATION_LOCK_NOTICE_INTERVAL;
+        }
+
+        let sleep_for = timeout
+            .map(|timeout| timeout.saturating_sub(now.duration_since(started)))
+            .map(|remaining| remaining.min(MIGRATION_LOCK_POLL_INTERVAL))
+            .unwrap_or(MIGRATION_LOCK_POLL_INTERVAL);
+        if sleep_for.is_zero() {
+            return Err(migration_lock_timeout_error(config, timeout_ms));
+        }
+        sleep(sleep_for).await;
+    }
+}
+
+fn migration_lock_timeout_error(config: &DatabaseConfig, timeout_ms: u64) -> Error {
+    Error::message(format!(
+        "timed out after {timeout_ms}ms waiting for migration advisory lock for schema `{}` and migration table `{}`; another db:migrate or db:rollback process is likely still running",
+        config.schema, config.migration_table
+    ))
 }
 
 async fn finish_locked_operation(
@@ -1164,14 +1370,25 @@ fn ensure_applied_migrations_exist(
     applied: &BTreeMap<MigrationId, AppliedMigration>,
     migrations: &MigrationRegistry,
 ) -> Result<()> {
-    for migration_id in applied.keys() {
-        if !migrations.contains(migration_id) {
-            return Err(Error::message(format!(
-                "applied migration `{migration_id}` is missing from the registered migration set"
-            )));
-        }
+    let missing = missing_applied_migrations(applied, migrations);
+    if let Some(migration) = missing.first() {
+        return Err(Error::message(format!(
+            "applied migration `{}` is missing from the registered migration set; run `db:migrate:status --json` to inspect migration drift. This usually means the current binary was built without a migration file that has already run, or the migration ledger points at a removed file.",
+            migration.id
+        )));
     }
     Ok(())
+}
+
+fn missing_applied_migrations(
+    applied: &BTreeMap<MigrationId, AppliedMigration>,
+    migrations: &MigrationRegistry,
+) -> Vec<AppliedMigration> {
+    applied
+        .iter()
+        .filter(|(id, _)| !migrations.contains(id))
+        .map(|(_, migration)| migration.clone())
+        .collect()
 }
 
 async fn record_applied_migration(
@@ -1428,16 +1645,18 @@ fn advisory_lock_key(config: &DatabaseConfig) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
 
     use super::{
-        advisory_lock_key, migration_run_in_transaction, run_database_lifecycle_callback,
+        acquire_migration_lock, advisory_lock_key, migration_lock_timeout_error,
+        migration_run_in_transaction, missing_applied_migrations, run_database_lifecycle_callback,
         seeder_run_in_transaction, AppliedMigration, GeneratedDatabasePaths, MigrationContext,
-        MigrationFile, MigrationFileAdapter, MigrationId, MigrationRegistryBuilder,
-        MigrationStatus, SeederContext, SeederFile, SeederFileAdapter, SeederId,
-        SeederRegistryBuilder,
+        MigrationFile, MigrationFileAdapter, MigrationId, MigrationLockClient,
+        MigrationRegistryBuilder, MigrationStatus, MigrationStatusReport, SeederContext,
+        SeederFile, SeederFileAdapter, SeederId, SeederRegistryBuilder,
     };
     use crate::config::DatabaseConfig;
     use crate::foundation::{Error, Result};
@@ -1491,6 +1710,19 @@ mod tests {
     }
 
     struct PanickingTransactionSeeder;
+
+    struct FakeMigrationLockClient {
+        attempts_before_success: usize,
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MigrationLockClient for FakeMigrationLockClient {
+        async fn try_acquire_migration_lock(&self, _lock_key: i64) -> Result<bool> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(attempt >= self.attempts_before_success)
+        }
+    }
 
     #[async_trait]
     impl SeederFile for PanickingTransactionSeeder {
@@ -1648,6 +1880,120 @@ mod tests {
 
         assert_eq!(statuses[0].applied.as_ref(), Some(&applied));
         assert!(statuses[1].applied.is_none());
+    }
+
+    #[test]
+    fn migration_status_json_includes_summary_and_missing_applied_rows() {
+        let applied = AppliedMigration {
+            id: MigrationId::new("202604090900_init"),
+            batch: 1,
+            applied_at: "2026-04-09 09:00:00+00".to_string(),
+        };
+        let missing = AppliedMigration {
+            id: MigrationId::new("202604090800_removed"),
+            batch: 1,
+            applied_at: "2026-04-09 08:00:00+00".to_string(),
+        };
+        let report = MigrationStatusReport {
+            statuses: vec![
+                MigrationStatus {
+                    id: applied.id.clone(),
+                    applied: Some(applied),
+                },
+                MigrationStatus {
+                    id: MigrationId::new("202604091000_users"),
+                    applied: None,
+                },
+            ],
+            missing_applied: vec![missing],
+            latest_batch: Some(1),
+        };
+
+        let json = serde_json::to_value(report.to_json()).unwrap();
+        assert_eq!(json["summary"]["registered"], 2);
+        assert_eq!(json["summary"]["applied"], 1);
+        assert_eq!(json["summary"]["pending"], 1);
+        assert_eq!(json["summary"]["missing_applied"], 1);
+        assert_eq!(json["migrations"][0]["state"], "applied");
+        assert_eq!(json["migrations"][1]["state"], "pending");
+        assert_eq!(json["missing_applied"][0]["state"], "missing_applied");
+    }
+
+    #[test]
+    fn detects_missing_applied_migrations() {
+        let mut builder = MigrationRegistryBuilder::default();
+        builder
+            .register_file::<CreateUsers>(MigrationId::new("202604091200_create_users"))
+            .unwrap();
+        let registry =
+            MigrationRegistryBuilder::freeze_shared(Arc::new(Mutex::new(builder))).unwrap();
+        let mut applied = std::collections::BTreeMap::new();
+        applied.insert(
+            MigrationId::new("202604091200_create_users"),
+            AppliedMigration {
+                id: MigrationId::new("202604091200_create_users"),
+                batch: 1,
+                applied_at: "2026-04-09 12:00:00+00".to_string(),
+            },
+        );
+        applied.insert(
+            MigrationId::new("202604091300_removed"),
+            AppliedMigration {
+                id: MigrationId::new("202604091300_removed"),
+                batch: 1,
+                applied_at: "2026-04-09 13:00:00+00".to_string(),
+            },
+        );
+
+        let missing = missing_applied_migrations(&applied, &registry);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].id, MigrationId::new("202604091300_removed"));
+    }
+
+    #[tokio::test]
+    async fn migration_lock_wait_loop_succeeds_after_retry() {
+        let client = FakeMigrationLockClient {
+            attempts_before_success: 2,
+            attempts: AtomicUsize::new(0),
+        };
+        acquire_migration_lock(&client, &DatabaseConfig::default(), 42, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(client.attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn migration_lock_wait_loop_times_out() {
+        let client = FakeMigrationLockClient {
+            attempts_before_success: usize::MAX,
+            attempts: AtomicUsize::new(0),
+        };
+        let config = DatabaseConfig {
+            schema: "forge_ops".to_string(),
+            migration_table: "schema_migrations".to_string(),
+            ..DatabaseConfig::default()
+        };
+        let error = acquire_migration_lock(&client, &config, 42, 1)
+            .await
+            .expect_err("lock wait should time out");
+
+        assert_eq!(
+            error.to_string(),
+            "timed out after 1ms waiting for migration advisory lock for schema `forge_ops` and migration table `schema_migrations`; another db:migrate or db:rollback process is likely still running"
+        );
+    }
+
+    #[test]
+    fn migration_lock_timeout_error_names_schema_and_table() {
+        let config = DatabaseConfig {
+            schema: "forge_ops".to_string(),
+            migration_table: "schema_migrations".to_string(),
+            ..DatabaseConfig::default()
+        };
+        let error = migration_lock_timeout_error(&config, 250);
+        assert!(error.to_string().contains("forge_ops"));
+        assert!(error.to_string().contains("schema_migrations"));
+        assert!(error.to_string().contains("250ms"));
     }
 
     #[test]

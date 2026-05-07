@@ -213,6 +213,20 @@ impl TestRuntime {
             .await
             .unwrap();
     }
+
+    async fn insert_missing_applied_migration(&self, id: &str) {
+        self.database
+            .raw_execute(
+                &format!(
+                    "INSERT INTO {}.{} (id, batch, applied_at) VALUES ($1, 1, NOW())",
+                    quote_identifier(&self.schema),
+                    quote_identifier(&self.migration_table)
+                ),
+                &[id.into()],
+            )
+            .await
+            .unwrap();
+    }
 }
 
 fn write_runtime_config(dir: &Path, url: &str, schema: &str, migration_table: &str) {
@@ -323,6 +337,57 @@ async fn db_rollback_reverts_only_the_latest_generated_batch() {
         runtime.applied_migrations().await,
         vec![(CREATE_USERS_MIGRATION_ID.to_string(), 1)]
     );
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn db_migrate_status_reports_missing_applied_migrations_without_failing() {
+    let _guard = lifecycle_lock().await;
+    let Some(runtime) = TestRuntime::new().await else {
+        return;
+    };
+
+    runtime.seed_first_batch_manually().await;
+    runtime
+        .insert_missing_applied_migration("202604101529_removed_migration")
+        .await;
+
+    run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:migrate:status".into(), "--json".into()],
+    )
+    .await
+    .unwrap();
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn db_migrate_fails_clearly_when_applied_migration_is_missing() {
+    let _guard = lifecycle_lock().await;
+    let Some(runtime) = TestRuntime::new().await else {
+        return;
+    };
+
+    runtime.seed_first_batch_manually().await;
+    runtime
+        .insert_missing_applied_migration("202604101529_removed_migration")
+        .await;
+
+    let error = run_cli(
+        App::builder()
+            .load_config_dir(runtime.config_dir())
+            .register_provider(migration_provider()),
+        vec!["forge".into(), "db:migrate".into()],
+    )
+    .await
+    .expect_err("migration drift should block db:migrate");
+    let message = error.to_string();
+    assert!(message.contains("applied migration `202604101529_removed_migration` is missing"));
+    assert!(message.contains("db:migrate:status --json"));
 
     runtime.cleanup().await;
 }

@@ -277,9 +277,9 @@ These are available automatically — no registration needed:
 | `key:generate` | Generate signing + encryption keys |
 | `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |
-| `db:migrate` | Run pending migrations |
-| `db:migrate:status` | Show migration status |
-| `db:rollback` | Rollback last migration batch |
+| `db:migrate` | Run pending migrations; accepts `--lock-timeout-ms <MS>` |
+| `db:migrate:status` | Show migration status; accepts `--json` for deploy tooling |
+| `db:rollback` | Rollback last migration batch; accepts `--lock-timeout-ms <MS>` |
 | `db:seed` | Run seeders |
 | `seed:countries` | Seed 250 countries |
 | `make:migration` | Create a migration file |

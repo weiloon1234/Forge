@@ -175,6 +175,14 @@ const DATABASE_FIELDS: &[PublishedField] = &[
         None,
     ),
     field(
+        "migration_lock_timeout_ms",
+        "0",
+        "0",
+        false,
+        false,
+        Some("Migration advisory-lock wait timeout (0 = wait forever)"),
+    ),
+    field(
         "migrations_path",
         "\"database/migrations\"",
         "database/migrations",
@@ -1106,6 +1114,14 @@ mod tests {
                 "duplicate TOML table published: {table}"
             );
         }
+    }
+
+    #[test]
+    fn published_database_config_includes_migration_lock_timeout_default() {
+        let output = render_sample_config();
+        assert!(output.contains(
+            "# migration_lock_timeout_ms = 0  # Migration advisory-lock wait timeout (0 = wait forever)"
+        ));
     }
 
     fn config_repository_root_sections() -> BTreeSet<String> {

@@ -324,3 +324,28 @@ const FRAMEWORK_SEEDERS: &[(&str, &str)] = &[(
     "000000000001_countries_seeder.rs",
     include_str!("../../database/seeders/000000000001_countries_seeder.rs"),
 )];
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::Path;
+
+    use super::FRAMEWORK_MIGRATIONS;
+
+    #[test]
+    fn framework_migration_manifest_covers_all_framework_migration_files() {
+        let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("database/migrations");
+        let files = fs::read_dir(migrations_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".rs"))
+            .collect::<BTreeSet<_>>();
+        let published = FRAMEWORK_MIGRATIONS
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(published, files);
+    }
+}

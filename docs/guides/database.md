@@ -898,10 +898,20 @@ impl MigrationFile for Migration {
 ### Running Migrations
 
 ```bash
-cargo run -- db:migrate           # run pending
-cargo run -- db:migrate:status    # show status
-cargo run -- db:rollback          # rollback last batch
+cargo run -- db:migrate                       # run pending
+cargo run -- db:migrate --lock-timeout-ms 0   # wait forever for migration lock (default)
+cargo run -- db:migrate:status                # show status
+cargo run -- db:migrate:status --json         # machine-readable status/drift report
+cargo run -- db:rollback                      # rollback last batch
 ```
+
+`db:migrate` and `db:rollback` use a Postgres advisory lock keyed by the configured schema and
+migration table. The default lock timeout is `0`, meaning wait forever for compatibility with
+rolling deploys. Set `database.migration_lock_timeout_ms` or pass `--lock-timeout-ms` when deploy
+tooling should fail instead of waiting behind another migration process. If the migration ledger
+contains an applied migration that is not registered in the current binary, `db:migrate:status`
+reports it and `db:migrate:status --json` includes it under `missing_applied`; migrate/rollback
+remain strict and stop until the binary or migration files are corrected.
 
 ### Seeders
 
@@ -967,6 +977,10 @@ let plan = User::model_query()
 url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # read_url = ""                    # read replica
 # schema = "public"
+# migration_table = "forge_migrations"
+# migration_lock_timeout_ms = 0    # migration advisory-lock wait timeout; 0 waits forever
+# migrations_path = "database/migrations"
+# seeders_path = "database/seeders"
 # min_connections = 1
 # max_connections = 10
 # acquire_timeout_ms = 5000

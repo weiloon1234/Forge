@@ -328,7 +328,7 @@ TOML-based configuration with environment overlay.
 | `ConfigRepository` | Loads and queries TOML config |
 | `AppConfig` | `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms` |
 | `ServerConfig` | `host`, `port` |
-| `DatabaseConfig` | `url`, `read_url`, `schema`, connection pool settings, SQL observability retention |
+| `DatabaseConfig` | `url`, `read_url`, `schema`, migration lock timeout, connection pool settings, SQL observability retention |
 | `DatabaseModelConfig` | `timestamps_default`, `soft_deletes_default` |
 | `RedisConfig` | `url`, `namespace` |
 | `WebSocketConfig` | `host`, `port`, `path`, heartbeat, rate limits, origin allow-list, outbound buffer, history buffer/TTL |

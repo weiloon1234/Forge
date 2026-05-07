@@ -1180,10 +1180,16 @@ impl DatabaseSession {
         Ok(())
     }
 
-    pub(crate) async fn acquire_advisory_lock(&self, key: i64) -> Result<()> {
-        self.raw_query("SELECT pg_advisory_lock($1)::text", &[DbValue::Int64(key)])
+    pub(crate) async fn try_acquire_advisory_lock(&self, key: i64) -> Result<bool> {
+        let rows = self
+            .raw_query(
+                "SELECT pg_try_advisory_lock($1) AS acquired",
+                &[DbValue::Int64(key)],
+            )
             .await?;
-        Ok(())
+        rows.first()
+            .ok_or_else(|| Error::message("advisory lock query returned no rows"))?
+            .decode("acquired")
     }
 
     pub(crate) async fn release_advisory_lock(&self, key: i64) -> Result<()> {

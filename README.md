@@ -528,9 +528,9 @@ impl ServiceProvider for AppServiceProvider {
 | `seed:publish` | Publish framework seeder files |
 | `about` | Display framework version and environment info |
 | **Database** | |
-| `db:migrate` | Run pending migrations |
-| `db:migrate:status` | Show migration status |
-| `db:rollback` | Rollback the last migration batch |
+| `db:migrate` | Run pending migrations; accepts `--lock-timeout-ms <MS>` |
+| `db:migrate:status` | Show migration status; accepts `--json` |
+| `db:rollback` | Rollback the last migration batch; accepts `--lock-timeout-ms <MS>` |
 | `db:seed` | Run database seeders |
 | `seed:countries` | Seed 250 built-in country records |
 | **Scaffolding** | |

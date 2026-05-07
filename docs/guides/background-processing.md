@@ -196,6 +196,11 @@ registrar.register_job_middleware(LogJobExecution)?;
 dead-letter queue. Middleware hooks are called in registration order, and hook failures are logged
 without aborting the dead-letter transition.
 
+Job failures include returned errors, timeouts, and panics from `Job::handle`. A job panic is
+recorded as `job panicked: ...` and counts as one failed attempt, so the normal backoff,
+retry, and dead-letter rules still apply. Middleware hook errors or panics are logged and do not
+block success, retry, or dead-letter finalization.
+
 ### Error Reporters
 
 Use `ErrorReporter` when you want one integration point for handler 500s, panics, and dead-lettered
@@ -244,9 +249,16 @@ let kernel = app_builder.build_worker_kernel().await?;
 kernel.run_once().await?;  // process one job
 ```
 
-Workers started with `spawn_worker(app)` inside another kernel are owned by the app lifecycle:
-Forge signals them to drain during app shutdown, then aborts them after the app background
-shutdown timeout.
+On shutdown, workers stop claiming new jobs and drain active jobs for
+`jobs.shutdown_timeout_ms`. If the timeout elapses, or the value is `0`, remaining active jobs are
+aborted. Forge does not ack, retry, or dead-letter those shutdown-aborted jobs directly; their lease
+expires and the existing requeue flow makes them runnable again for another worker or a restarted
+service.
+
+Workers started with `spawn_worker(app)` inside another kernel are owned by the app lifecycle. Forge
+still applies `app.background_shutdown_timeout_ms` as the outer cap for the managed worker task.
+Process-manager hard kills such as SIGKILL cannot be caught, so unacked jobs recover through the
+same lease-expiry path.
 
 ### Config
 
@@ -386,7 +398,13 @@ When running multiple scheduler instances (e.g., Kubernetes replicas), only ONE 
 [scheduler]
 tick_interval_ms = 1000        # check for due tasks every second
 leader_lease_ttl_ms = 5000     # leadership lease duration
+shutdown_timeout_ms = 30000    # active schedule drain timeout on shutdown (0 = abort immediately)
 ```
+
+Schedule handler errors and panics are treated as schedule failures and run the configured
+`on_failure` hook. `before`, `after`, and `on_failure` hook errors or panics are logged without
+crashing the scheduler task, and `without_overlapping` locks are released even when a handler fails
+or panics.
 
 ### Running the Scheduler
 

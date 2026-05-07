@@ -155,10 +155,10 @@ App::builder()
 queue = "default"
 poll_interval_ms = 100
 max_concurrent_jobs = 0    # 0 = unlimited
-shutdown_timeout_ms = 30000
+shutdown_timeout_ms = 30000 # 0 = abort active jobs immediately on shutdown
 ```
 
-Polls the job queue, executes jobs with retry on failure, runs until shutdown signal. Scale by running multiple worker processes.
+Polls the job queue, executes jobs with retry on failure or panic, and runs until shutdown signal. On shutdown, active jobs drain until `shutdown_timeout_ms`; aborted jobs recover through lease expiry. Scale by running multiple worker processes.
 
 ### Scheduler
 
@@ -188,6 +188,7 @@ fn schedules(s: &mut ScheduleRegistry) -> Result<()> {
 [scheduler]
 tick_interval_ms = 1000
 leader_lease_ttl_ms = 5000
+shutdown_timeout_ms = 30000
 ```
 
 ### WebSocket Server
@@ -488,11 +489,11 @@ PROCESS=cli cargo run -- db:migrate # CLI command
 On Ctrl+C or SIGTERM:
 
 1. Stop accepting new connections/jobs
-2. Finish in-flight requests (HTTP) or current job (worker)
+2. Finish in-flight requests and drain active jobs/schedules up to their configured shutdown timeouts
 3. Call `plugin.shutdown()` for each plugin in reverse dependency order
 4. Exit cleanly
 
-No special code needed — the framework handles this automatically.
+No special code needed — the framework handles this automatically. Process-manager hard kills such as SIGKILL cannot be caught; unacked jobs recover through lease expiry.
 
 ---
 

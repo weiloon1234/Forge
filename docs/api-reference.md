@@ -333,7 +333,7 @@ TOML-based configuration with environment overlay.
 | `RedisConfig` | `url`, `namespace` |
 | `WebSocketConfig` | `host`, `port`, `path`, heartbeat, rate limits, origin allow-list, outbound buffer, history buffer/TTL |
 | `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency`, `shutdown_timeout_ms` |
-| `SchedulerConfig` | `tick_interval_ms`, `leader_lease_ttl_ms` |
+| `SchedulerConfig` | `tick_interval_ms`, `leader_lease_ttl_ms`, `shutdown_timeout_ms` |
 | `AuthConfig` | `guards`, `tokens`, `sessions`, `bearer_prefix` |
 | `TokenConfig` | TTLs, rotation, length |
 | `SessionConfig` | TTL, cookie settings, sliding expiry |
@@ -1808,7 +1808,14 @@ fn dispatch(self) -> Result<()>
 fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 ```
 
-Workers spawned with `spawn_worker(app)` are managed by the app lifecycle. During shutdown, Forge signals them to drain active jobs before plugin shutdown and aborts the managed worker after `app.background_shutdown_timeout_ms`.
+Workers stop claiming new jobs on shutdown and drain active jobs for `jobs.shutdown_timeout_ms`.
+If the timeout elapses, or the value is `0`, active jobs are aborted without ack, retry, or
+dead-letter finalization. Their lease expires and the existing requeue flow makes them runnable
+again on another worker or restart.
+
+Workers spawned with `spawn_worker(app)` are managed by the app lifecycle and remain capped by
+`app.background_shutdown_timeout_ms`. Job handler panics are handled as normal job failures and use
+the existing retry/dead-letter flow.
 
 ---
 
@@ -1881,6 +1888,10 @@ fn daily<I, F, Fut>(&mut self, id: I, job: F) -> Result<&mut Self>
 fn daily_at<I, F, Fut>(&mut self, id: I, time: &str, job: F) -> Result<&mut Self>
 fn weekly<I, F, Fut>(&mut self, id: I, job: F) -> Result<&mut Self>
 ```
+
+Schedule handler panics are handled as schedule failures and route through `ScheduleOptions::on_failure`.
+Hook panics are logged and isolated, `without_overlapping` locks are released on failure or panic,
+and active schedules drain for `scheduler.shutdown_timeout_ms` during shutdown.
 
 ---
 

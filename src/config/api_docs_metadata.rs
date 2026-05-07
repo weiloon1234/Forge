@@ -57,11 +57,19 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
     match group_key {
         "config" => &[
             "`AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.",
-            "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining.",
+            "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
+            "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.",
         ],
         "jobs" => &[
-            "`JobsConfig` includes `shutdown_timeout_ms` for active job draining.",
-            "`spawn_worker(app)` is managed by the app lifecycle. On app shutdown, Forge asks the worker to drain jobs and aborts the managed worker after `app.background_shutdown_timeout_ms`.",
+            "`JobsConfig.shutdown_timeout_ms` defaults to `30000`; `0` aborts active jobs immediately on shutdown.",
+            "Shutdown-aborted jobs are left unacked so lease expiry and the existing requeue flow make them runnable again.",
+            "Job handler panics are handled as normal job failures and use the existing retry/dead-letter flow.",
+            "`spawn_worker(app)` is managed by the app lifecycle and remains capped by `app.background_shutdown_timeout_ms`.",
+        ],
+        "scheduler" => &[
+            "Schedule handler panics are handled as schedule failures and route through `ScheduleOptions::on_failure`.",
+            "Scheduler hooks are isolated: hook panics are logged and do not crash the scheduler task.",
+            "`SchedulerConfig.shutdown_timeout_ms` defaults to `30000`; `0` aborts active schedules immediately on shutdown.",
         ],
         _ => &[],
     }
@@ -84,12 +92,21 @@ mod tests {
         let mut config = String::new();
         append_module_notes("config", &mut config);
         assert!(config.contains("background_shutdown_timeout_ms"));
-        assert!(config.contains("shutdown_timeout_ms"));
+        assert!(config.contains("JobsConfig"));
+        assert!(config.contains("SchedulerConfig"));
+        assert!(config.contains("0` aborts"));
 
         let mut jobs = String::new();
         append_module_notes("jobs", &mut jobs);
-        assert!(jobs.contains("shutdown_timeout_ms"));
+        assert!(jobs.contains("JobsConfig.shutdown_timeout_ms"));
+        assert!(jobs.contains("lease expiry"));
+        assert!(jobs.contains("retry/dead-letter"));
         assert!(jobs.contains("spawn_worker(app)"));
         assert!(jobs.contains("app.background_shutdown_timeout_ms"));
+
+        let mut scheduler = String::new();
+        append_module_notes("scheduler", &mut scheduler);
+        assert!(scheduler.contains("Schedule handler panics"));
+        assert!(scheduler.contains("SchedulerConfig.shutdown_timeout_ms"));
     }
 }

@@ -212,10 +212,7 @@ async fn observability_metrics(State(app): State<AppContext>) -> Response {
             let body = metrics::format_prometheus(&diagnostics.snapshot());
             (
                 StatusCode::OK,
-                [(
-                    header::CONTENT_TYPE,
-                    "text/plain; version=0.0.4; charset=utf-8",
-                )],
+                [(header::CONTENT_TYPE, metrics::PROMETHEUS_CONTENT_TYPE)],
                 body,
             )
                 .into_response()

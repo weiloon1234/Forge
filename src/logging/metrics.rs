@@ -2,6 +2,8 @@ use std::fmt::Write;
 
 use super::diagnostics::RuntimeSnapshot;
 
+pub(crate) const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
 /// Format a [`RuntimeSnapshot`] as Prometheus text exposition format.
 pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
     let mut out = String::with_capacity(2048);
@@ -76,15 +78,15 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         &[("le", "+Inf")],
         snapshot.http.duration_ms.count,
     );
-    let _ = writeln!(
-        out,
-        "forge_http_request_duration_ms_sum {}",
-        snapshot.http.duration_ms.sum_ms
+    write_sample(
+        &mut out,
+        "forge_http_request_duration_ms_sum",
+        snapshot.http.duration_ms.sum_ms,
     );
-    let _ = writeln!(
-        out,
-        "forge_http_request_duration_ms_count {}",
-        snapshot.http.duration_ms.count
+    write_sample(
+        &mut out,
+        "forge_http_request_duration_ms_count",
+        snapshot.http.duration_ms.count,
     );
 
     // Auth counters
@@ -130,10 +132,10 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "Total WebSocket connections opened",
         "counter",
     );
-    let _ = writeln!(
-        out,
-        "forge_websocket_connections_total {}",
-        snapshot.websocket.opened_total
+    write_sample(
+        &mut out,
+        "forge_websocket_connections_total",
+        snapshot.websocket.opened_total,
     );
     write_help_type(
         &mut out,
@@ -274,10 +276,10 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "Total scheduler ticks",
         "counter",
     );
-    let _ = writeln!(
-        out,
-        "forge_scheduler_ticks_total {}",
-        snapshot.scheduler.ticks_total
+    write_sample(
+        &mut out,
+        "forge_scheduler_ticks_total",
+        snapshot.scheduler.ticks_total,
     );
     write_help_type(
         &mut out,
@@ -285,10 +287,10 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
         "Total scheduled tasks executed",
         "counter",
     );
-    let _ = writeln!(
-        out,
-        "forge_scheduler_executions_total {}",
-        snapshot.scheduler.executed_schedules_total
+    write_sample(
+        &mut out,
+        "forge_scheduler_executions_total",
+        snapshot.scheduler.executed_schedules_total,
     );
     write_gauge(
         &mut out,
@@ -382,17 +384,22 @@ pub(crate) fn format_prometheus(snapshot: &RuntimeSnapshot) -> String {
 }
 
 fn write_help_type(out: &mut String, name: &str, help: &str, metric_type: &str) {
-    let _ = writeln!(out, "# HELP {name} {help}");
+    let escaped_help = escape_prometheus_help_text(help);
+    let _ = writeln!(out, "# HELP {name} {escaped_help}");
     let _ = writeln!(out, "# TYPE {name} {metric_type}");
 }
 
 fn write_gauge(out: &mut String, name: &str, help: &str, value: u64) {
     write_help_type(out, name, help, "gauge");
-    let _ = writeln!(out, "{name} {value}");
+    write_sample(out, name, value);
 }
 
 fn write_counter_label(out: &mut String, name: &str, label: &str, label_value: &str, value: u64) {
     write_labeled_sample(out, name, &[(label, label_value)], value);
+}
+
+fn write_sample(out: &mut String, name: &str, value: u64) {
+    let _ = writeln!(out, "{name} {value}");
 }
 
 fn write_labeled_sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: u64) {
@@ -405,6 +412,18 @@ fn write_labeled_sample(out: &mut String, name: &str, labels: &[(&str, &str)], v
         let _ = write!(out, "{label}=\"{escaped}\"");
     }
     let _ = writeln!(out, "}} {value}");
+}
+
+fn escape_prometheus_help_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str(r"\\"),
+            '\n' => escaped.push_str(r"\n"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn escape_prometheus_label_value(value: &str) -> String {
@@ -526,6 +545,24 @@ mod tests {
         assert!(output.contains("forge_scheduler_leadership_total{state=\"lost\"} 1"));
         assert!(output.contains("# TYPE forge_http_requests_total counter"));
         assert!(output.contains("# TYPE forge_bootstrap_complete gauge"));
+        assert!(output.ends_with('\n'));
+    }
+
+    #[test]
+    fn prometheus_helpers_escape_help_text() {
+        let mut output = String::new();
+
+        write_help_type(
+            &mut output,
+            "forge_test_total",
+            "Line one\\line two\nline three",
+            "counter",
+        );
+
+        assert_eq!(
+            output,
+            "# HELP forge_test_total Line one\\\\line two\\nline three\n# TYPE forge_test_total counter\n"
+        );
     }
 
     #[test]

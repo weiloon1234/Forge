@@ -415,6 +415,13 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
         .await
         .unwrap();
     assert_eq!(metrics.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        metrics
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; version=0.0.4; charset=utf-8")
+    );
     let metrics_body = metrics.text().await.unwrap();
     assert!(metrics_body.contains("# TYPE forge_http_request_duration_ms histogram"));
     assert!(metrics_body.contains("forge_http_request_duration_ms_bucket{le=\"5\"}"));

@@ -406,8 +406,10 @@ async fn slow_queries(State(app): State<AppContext>) -> Response {
         Ok(config) => config,
         Err(error) => return internal_error_response(error),
     };
-    let snapshot =
-        crate::database::sql_observability_snapshot(database_config.slow_query_threshold_ms);
+    let snapshot = crate::database::sql_observability_snapshot(
+        database_config.slow_query_threshold_ms,
+        database_config.slow_query_retention,
+    );
     (StatusCode::OK, Json(snapshot)).into_response()
 }
 

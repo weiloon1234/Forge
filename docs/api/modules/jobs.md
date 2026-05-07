@@ -55,5 +55,6 @@ fn spawn_worker(app: AppContext) -> Result<JoinHandle<()>>
 - `JobsConfig.shutdown_timeout_ms` defaults to `30000`; `0` aborts active jobs immediately on shutdown.
 - Shutdown-aborted jobs are left unacked so lease expiry and the existing requeue flow make them runnable again.
 - Job handler panics are handled as normal job failures and use the existing retry/dead-letter flow.
+- `job_history` is pruned by workers with a distributed lock; consumer apps do not need to register a cleanup scheduler.
 - `spawn_worker(app)` is managed by the app lifecycle and remains capped by `app.background_shutdown_timeout_ms`.
 

@@ -58,17 +58,22 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
         "config" => &[
             "`AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.",
             "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
+            "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
+            "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
             "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.",
         ],
         "jobs" => &[
             "`JobsConfig.shutdown_timeout_ms` defaults to `30000`; `0` aborts active jobs immediately on shutdown.",
             "Shutdown-aborted jobs are left unacked so lease expiry and the existing requeue flow make them runnable again.",
             "Job handler panics are handled as normal job failures and use the existing retry/dead-letter flow.",
+            "`job_history` is pruned by workers with a distributed lock; consumer apps do not need to register a cleanup scheduler.",
             "`spawn_worker(app)` is managed by the app lifecycle and remains capped by `app.background_shutdown_timeout_ms`.",
         ],
         "logging" => &[
             "`/_forge/runtime` returns the structured `RuntimeSnapshot`; `/_forge/metrics` exposes the same runtime counter families in Prometheus text format.",
-            "Prometheus metric additions are additive so existing series names remain stable.",
+            "Forge does not store Prometheus samples; scrape retention belongs to Prometheus or your metrics backend.",
+            "`ObservabilityConfig.enabled` controls `/_forge/*` route registration; `capture_enabled` controls passive runtime capture while preserving route availability.",
+            "Runtime counters, HTTP samples, SQL slow queries, N+1 suspects, and WebSocket channel counters are bounded process memory and reset on restart.",
             "`/_forge/sql` returns slow-query stats, top-slowest ranking, and potential HTTP N+1 suspects while preserving the existing `slow_queries` key.",
         ],
         "scheduler" => &[
@@ -98,6 +103,8 @@ mod tests {
         append_module_notes("config", &mut config);
         assert!(config.contains("background_shutdown_timeout_ms"));
         assert!(config.contains("JobsConfig"));
+        assert!(config.contains("history_retention_days"));
+        assert!(config.contains("ObservabilityConfig.enabled"));
         assert!(config.contains("SchedulerConfig"));
         assert!(config.contains("0` aborts"));
 
@@ -106,6 +113,7 @@ mod tests {
         assert!(jobs.contains("JobsConfig.shutdown_timeout_ms"));
         assert!(jobs.contains("lease expiry"));
         assert!(jobs.contains("retry/dead-letter"));
+        assert!(jobs.contains("job_history"));
         assert!(jobs.contains("spawn_worker(app)"));
         assert!(jobs.contains("app.background_shutdown_timeout_ms"));
 
@@ -118,6 +126,7 @@ mod tests {
         append_module_notes("logging", &mut logging);
         assert!(logging.contains("/_forge/runtime"));
         assert!(logging.contains("/_forge/metrics"));
-        assert!(logging.contains("additive"));
+        assert!(logging.contains("Prometheus"));
+        assert!(logging.contains("capture_enabled"));
     }
 }

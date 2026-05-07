@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::config::DatabaseConfig;
+use crate::config::{DatabaseConfig, ObservabilityConfig};
 use crate::foundation::{Error, Result};
 use crate::logging::{catch_future_panic, panic_payload_message};
 use crate::support::sync::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
@@ -40,27 +40,39 @@ const SLOW_QUERY_LOG_CAPACITY: usize = 100;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqlLogConfig {
+    pub capture_enabled: bool,
     pub log_queries: bool,
     pub slow_threshold: Option<Duration>,
+    pub slow_query_retention: usize,
 }
 
 impl SqlLogConfig {
-    pub fn from_database_config(config: &DatabaseConfig) -> Self {
+    pub fn from_configs(
+        config: &DatabaseConfig,
+        observability: Option<&ObservabilityConfig>,
+    ) -> Self {
+        let capture_enabled = observability
+            .map(|config| config.capture_enabled)
+            .unwrap_or(true);
         Self {
+            capture_enabled,
             log_queries: config.log_queries,
-            slow_threshold: if config.slow_query_threshold_ms > 0 {
+            slow_threshold: if capture_enabled && config.slow_query_threshold_ms > 0 {
                 Some(Duration::from_millis(config.slow_query_threshold_ms))
             } else {
                 None
             },
+            slow_query_retention: config.slow_query_retention,
         }
     }
 
     #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
+            capture_enabled: false,
             log_queries: false,
             slow_threshold: None,
+            slow_query_retention: 0,
         }
     }
 }
@@ -129,9 +141,13 @@ fn n_plus_one_log() -> &'static std::sync::Mutex<VecDeque<NPlusOneSuspect>> {
     N_PLUS_ONE_LOG.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(100)))
 }
 
-fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>) {
+fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>, retention: usize) {
+    if retention == 0 {
+        return;
+    }
+
     let mut log = lock_unpoisoned(slow_query_log(), "slow query log");
-    if log.len() >= SLOW_QUERY_LOG_CAPACITY {
+    while log.len() >= retention {
         log.pop_front();
     }
     let trace = crate::logging::current_trace_context();
@@ -147,10 +163,27 @@ fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>) {
     });
 }
 
+#[cfg(test)]
 pub fn recent_slow_queries() -> Vec<SlowQueryEntry> {
     lock_unpoisoned(slow_query_log(), "slow query log")
         .iter()
         .cloned()
+        .collect()
+}
+
+fn recent_slow_queries_with_retention(retention: usize) -> Vec<SlowQueryEntry> {
+    if retention == 0 {
+        return Vec::new();
+    }
+
+    lock_unpoisoned(slow_query_log(), "slow query log")
+        .iter()
+        .rev()
+        .take(retention)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .collect()
 }
 
@@ -161,8 +194,11 @@ fn recent_n_plus_one_suspects() -> Vec<NPlusOneSuspect> {
         .collect()
 }
 
-pub(crate) fn sql_observability_snapshot(slow_query_threshold_ms: u64) -> SqlObservabilitySnapshot {
-    let slow_queries = recent_slow_queries();
+pub(crate) fn sql_observability_snapshot(
+    slow_query_threshold_ms: u64,
+    slow_query_retention: usize,
+) -> SqlObservabilitySnapshot {
+    let slow_queries = recent_slow_queries_with_retention(slow_query_retention);
     let n_plus_one_suspects = recent_n_plus_one_suspects();
     let retained_count = slow_queries.len();
     let max_duration_ms = slow_queries.iter().map(|query| query.duration_ms).max();
@@ -192,7 +228,7 @@ pub(crate) fn sql_observability_snapshot(slow_query_threshold_ms: u64) -> SqlObs
     SqlObservabilitySnapshot {
         stats: SqlObservabilityStats {
             retained_count,
-            capacity: SLOW_QUERY_LOG_CAPACITY,
+            capacity: slow_query_retention,
             slow_query_threshold_ms,
             max_duration_ms,
             avg_duration_ms,
@@ -217,13 +253,18 @@ struct SqlQueryTraceConfig {
 }
 
 impl SqlQueryTraceConfig {
-    fn from_database_config(
-        config: Option<DatabaseConfig>,
+    fn from_configs(
+        database: Option<DatabaseConfig>,
+        observability: Option<ObservabilityConfig>,
         method: String,
         path: String,
         request_id: Option<String>,
     ) -> Self {
-        let Some(config) = config else {
+        let capture_enabled = observability
+            .as_ref()
+            .map(|config| config.capture_enabled)
+            .unwrap_or(true);
+        let Some(config) = database else {
             return Self {
                 enabled: false,
                 min_repeats: 10,
@@ -237,7 +278,7 @@ impl SqlQueryTraceConfig {
 
         let trace = crate::logging::current_trace_context();
         Self {
-            enabled: config.n_plus_one_detection,
+            enabled: capture_enabled && config.n_plus_one_detection,
             min_repeats: config.n_plus_one_min_repeats.max(1),
             retention: config.n_plus_one_retention,
             method,
@@ -408,7 +449,8 @@ impl SqlQueryGroup {
 }
 
 pub(crate) async fn scope_http_sql_query_trace<F, T>(
-    config: Option<DatabaseConfig>,
+    database: Option<DatabaseConfig>,
+    observability: Option<ObservabilityConfig>,
     method: String,
     path: String,
     request_id: Option<String>,
@@ -417,7 +459,8 @@ pub(crate) async fn scope_http_sql_query_trace<F, T>(
 where
     F: Future<Output = T>,
 {
-    let trace_config = SqlQueryTraceConfig::from_database_config(config, method, path, request_id);
+    let trace_config =
+        SqlQueryTraceConfig::from_configs(database, observability, method, path, request_id);
     if !trace_config.enabled || trace_config.retention == 0 {
         return future.await;
     }
@@ -720,6 +763,13 @@ impl DatabaseManager {
     }
 
     pub async fn from_config(config: &DatabaseConfig) -> Result<Self> {
+        Self::from_config_with_observability(config, None).await
+    }
+
+    pub(crate) async fn from_config_with_observability(
+        config: &DatabaseConfig,
+        observability: Option<&ObservabilityConfig>,
+    ) -> Result<Self> {
         if config.url.trim().is_empty() {
             return Ok(Self::disabled());
         }
@@ -759,7 +809,7 @@ impl DatabaseManager {
             None
         };
 
-        let sql_log = SqlLogConfig::from_database_config(config);
+        let sql_log = SqlLogConfig::from_configs(config, observability);
 
         Ok(Self {
             state: Arc::new(DatabaseState::Ready(DatabaseRuntime {
@@ -1393,7 +1443,9 @@ fn log_sql_complete(
     rows: u64,
 ) {
     let elapsed_ms = elapsed.as_millis() as u64;
-    record_sql_observation(sql, elapsed_ms, label.as_deref(), kind, rows);
+    if sql_log.capture_enabled {
+        record_sql_observation(sql, elapsed_ms, label.as_deref(), kind, rows);
+    }
 
     if sql_log.log_queries {
         tracing::debug!(
@@ -1415,7 +1467,12 @@ fn log_sql_complete(
                 label = ?label,
                 "slow query detected"
             );
-            record_slow_query(sql, elapsed_ms, label.as_deref());
+            record_slow_query(
+                sql,
+                elapsed_ms,
+                label.as_deref(),
+                sql_log.slow_query_retention,
+            );
         }
     }
 }
@@ -2195,7 +2252,7 @@ mod tests {
         });
         assert!(result.is_err());
 
-        record_slow_query("SELECT after panic", 42, Some("poison-recovery"));
+        record_slow_query("SELECT after panic", 42, Some("poison-recovery"), 100);
 
         let queries = recent_slow_queries();
         assert!(queries.iter().any(|query| query.sql == "SELECT after panic"
@@ -2225,10 +2282,10 @@ mod tests {
         lock_unpoisoned(slow_query_log(), "slow query snapshot setup").clear();
         lock_unpoisoned(n_plus_one_log(), "n+1 snapshot setup").clear();
 
-        record_slow_query("SELECT slow", 750, Some("slow"));
-        record_slow_query("SELECT slower", 1_200, None);
+        record_slow_query("SELECT slow", 750, Some("slow"), 100);
+        record_slow_query("SELECT slower", 1_200, None, 100);
 
-        let snapshot = sql_observability_snapshot(500);
+        let snapshot = sql_observability_snapshot(500, 100);
         assert_eq!(snapshot.stats.retained_count, 2);
         assert_eq!(snapshot.stats.capacity, 100);
         assert_eq!(snapshot.stats.slow_query_threshold_ms, 500);
@@ -2239,6 +2296,27 @@ mod tests {
         assert_eq!(snapshot.top_slowest[1].sql, "SELECT slow");
 
         lock_unpoisoned(slow_query_log(), "slow query snapshot cleanup").clear();
+    }
+
+    #[test]
+    fn sql_observability_snapshot_respects_slow_query_retention() {
+        let _guard = sql_observability_test_lock().blocking_lock();
+        lock_unpoisoned(slow_query_log(), "slow query retention setup").clear();
+        lock_unpoisoned(n_plus_one_log(), "n+1 retention setup").clear();
+
+        record_slow_query("SELECT first", 100, None, 10);
+        record_slow_query("SELECT second", 200, None, 10);
+
+        let snapshot = sql_observability_snapshot(500, 1);
+        assert_eq!(snapshot.stats.retained_count, 1);
+        assert_eq!(snapshot.stats.capacity, 1);
+        assert_eq!(snapshot.slow_queries[0].sql, "SELECT second");
+
+        let disabled = sql_observability_snapshot(500, 0);
+        assert_eq!(disabled.stats.retained_count, 0);
+        assert!(disabled.slow_queries.is_empty());
+
+        lock_unpoisoned(slow_query_log(), "slow query retention cleanup").clear();
     }
 
     #[tokio::test]
@@ -2258,9 +2336,10 @@ mod tests {
         crate::logging::scope_current_trace(
             TraceContext::http("req-sql-trace".to_string()),
             async {
-                record_slow_query("SELECT trace slow", 900, Some("trace.slow"));
+                record_slow_query("SELECT trace slow", 900, Some("trace.slow"), 100);
                 scope_http_sql_query_trace(
                     Some(config),
+                    None,
                     "GET".to_string(),
                     "/trace".to_string(),
                     None,
@@ -2312,6 +2391,7 @@ mod tests {
         };
         scope_http_sql_query_trace(
             Some(config),
+            None,
             "GET".to_string(),
             "/users".to_string(),
             Some("req-n-plus-one".to_string()),
@@ -2348,6 +2428,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_query_trace_respects_observability_capture_switch() {
+        use crate::config::{DatabaseConfig, ObservabilityConfig};
+
+        let _guard = sql_observability_test_lock().lock().await;
+        lock_unpoisoned(n_plus_one_log(), "n+1 capture setup").clear();
+
+        let database = DatabaseConfig {
+            n_plus_one_min_repeats: 2,
+            n_plus_one_retention: 5,
+            ..DatabaseConfig::default()
+        };
+        let observability = ObservabilityConfig {
+            capture_enabled: false,
+            ..ObservabilityConfig::default()
+        };
+        scope_http_sql_query_trace(
+            Some(database),
+            Some(observability),
+            "GET".to_string(),
+            "/users".to_string(),
+            Some("req-capture-disabled".to_string()),
+            async {
+                for _ in 0..2 {
+                    record_sql_observation(
+                        "SELECT * FROM users WHERE id = $1",
+                        12,
+                        Some("user.lookup"),
+                        "query",
+                        1,
+                    );
+                }
+            },
+        )
+        .await;
+
+        assert!(recent_n_plus_one_suspects().is_empty());
+    }
+
+    #[tokio::test]
     async fn query_trace_flushes_when_http_scope_panics() {
         use crate::config::DatabaseConfig;
 
@@ -2361,6 +2480,7 @@ mod tests {
         };
         let result: std::result::Result<(), _> = catch_future_panic(scope_http_sql_query_trace(
             Some(config),
+            None,
             "GET".to_string(),
             "/panic".to_string(),
             Some("req-panic".to_string()),
@@ -2402,6 +2522,7 @@ mod tests {
         };
         scope_http_sql_query_trace(
             Some(config),
+            None,
             "GET".to_string(),
             "/users".to_string(),
             Some("req-below".to_string()),

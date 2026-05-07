@@ -59,10 +59,12 @@ pub(crate) async fn request_context_middleware(
         request_id: Some(request_id.clone()),
     };
     let database_config = app.config().database().ok();
+    let observability_config = app.config().observability().ok();
     let response = scope_current_trace(
         trace_context,
         crate::database::scope_http_sql_query_trace(
             database_config,
+            observability_config,
             method.to_string(),
             path.clone(),
             Some(request_id.clone()),

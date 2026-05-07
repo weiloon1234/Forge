@@ -972,6 +972,7 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # acquire_timeout_ms = 5000
 # log_queries = false              # log all SQL
 # slow_query_threshold_ms = 500    # log slow queries
+# slow_query_retention = 100       # retained slow-query entries for /_forge/sql; 0 disables retention
 # n_plus_one_detection = true      # detect repeated query shapes per HTTP request
 # n_plus_one_min_repeats = 10      # minimum repeats before retaining a suspect
 # n_plus_one_retention = 100       # retained N+1 suspect entries
@@ -984,3 +985,8 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 `GET /_forge/sql` exposes retained slow queries, a top-slowest ranking, and potential HTTP
 N+1 query suspects. N+1 detection groups repeated SQL fingerprints inside a single HTTP
 request; jobs and scheduler runs are intentionally excluded to avoid batch-work noise.
+
+SQL observability data is process-local and bounded in memory. It is cleared on restart and does
+not require a database migration or cleanup scheduler. Set `slow_query_threshold_ms = 0` to disable
+slow-query capture, `slow_query_retention = 0` to keep slow-query logs out of the dashboard, or
+`n_plus_one_detection = false` to avoid per-query HTTP fingerprinting overhead.

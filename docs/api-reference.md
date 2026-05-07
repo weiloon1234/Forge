@@ -328,11 +328,11 @@ TOML-based configuration with environment overlay.
 | `ConfigRepository` | Loads and queries TOML config |
 | `AppConfig` | `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms` |
 | `ServerConfig` | `host`, `port` |
-| `DatabaseConfig` | `url`, `read_url`, `schema`, connection pool settings |
+| `DatabaseConfig` | `url`, `read_url`, `schema`, connection pool settings, SQL observability retention |
 | `DatabaseModelConfig` | `timestamps_default`, `soft_deletes_default` |
 | `RedisConfig` | `url`, `namespace` |
 | `WebSocketConfig` | `host`, `port`, `path`, heartbeat, rate limits, origin allow-list, outbound buffer, history buffer/TTL |
-| `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency`, `shutdown_timeout_ms` |
+| `JobsConfig` | `queue`, `max_retries`, `polling`, `concurrency`, `shutdown_timeout_ms`, `job_history` retention |
 | `SchedulerConfig` | `tick_interval_ms`, `leader_lease_ttl_ms`, `shutdown_timeout_ms` |
 | `AuthConfig` | `guards`, `tokens`, `sessions`, `bearer_prefix` |
 | `TokenConfig` | TTLs, rotation, length |
@@ -340,7 +340,7 @@ TOML-based configuration with environment overlay.
 | `GuardDriverConfig` | Individual guard driver config |
 | `LoggingConfig` | `level`, `format`, `directory`, `retention` |
 | `I18nConfig` | `locales`, `resource_path` |
-| `ObservabilityConfig` | tracing, OTLP |
+| `ObservabilityConfig` | route/capture switches, sample retention, tracing, OTLP |
 | `HashingConfig` | `driver`, memory/time costs, parallelism |
 | `CryptConfig` | `key` |
 | `CacheConfig` | `driver`, `prefix`, `ttl`, `max_entries` |
@@ -2152,14 +2152,21 @@ fn record_job_outcome(&self, outcome: JobOutcome)
 
 `/_forge/runtime` returns the structured `RuntimeSnapshot`. `/_forge/http/stats` additively returns
 bounded HTTP route rankings, recent slow requests, and recent error samples for admin dashboards.
-`/_forge/metrics` exposes runtime counter families in Prometheus text format, and new series are
-additive so existing metric names remain stable.
+`/_forge/metrics` exposes runtime counter families in Prometheus text format. Forge does not store
+Prometheus samples; scrape retention belongs to Prometheus or your metrics backend.
 
 HTTP runtime counters include observability endpoint traffic, while `/_forge/http/stats` rankings
 retain application routes only so dashboard polling does not crowd out useful samples.
 
 `/_forge/sql` preserves the existing `slow_queries` array and additively returns slow-query stats,
 top-slowest ranking, and potential HTTP N+1 suspects grouped by repeated SQL fingerprint.
+
+`ObservabilityConfig.enabled = false` skips `/_forge/*` route registration. `capture_enabled = false`
+keeps routes available but stops passive runtime capture; existing endpoint responses remain
+available with empty or current live data. Runtime counters, HTTP samples, SQL slow queries, N+1
+suspects, and WebSocket channel counters are process-local and reset on restart. `job_history` is
+the persistent DB-backed observability store for job stats and failed jobs, pruned by workers using
+`JobsConfig.history_retention_days`.
 
 ### ObservabilityOptions — builder
 

@@ -82,6 +82,8 @@ fn init(config: &ConfigRepository) -> Result<()>
 ## Notes
 
 - `/_forge/runtime` returns the structured `RuntimeSnapshot`; `/_forge/metrics` exposes the same runtime counter families in Prometheus text format.
-- Prometheus metric additions are additive so existing series names remain stable.
+- Forge does not store Prometheus samples; scrape retention belongs to Prometheus or your metrics backend.
+- `ObservabilityConfig.enabled` controls `/_forge/*` route registration; `capture_enabled` controls passive runtime capture while preserving route availability.
+- Runtime counters, HTTP samples, SQL slow queries, N+1 suspects, and WebSocket channel counters are bounded process memory and reset on restart.
 - `/_forge/sql` returns slow-query stats, top-slowest ranking, and potential HTTP N+1 suspects while preserving the existing `slow_queries` key.
 

@@ -218,6 +218,14 @@ const DATABASE_FIELDS: &[PublishedField] = &[
         Some("Log queries exceeding this threshold"),
     ),
     field(
+        "slow_query_retention",
+        "100",
+        "100",
+        false,
+        false,
+        Some("Retained slow queries for /_forge/sql (0 = disable retention)"),
+    ),
+    field(
         "n_plus_one_detection",
         "true",
         "true",
@@ -337,6 +345,30 @@ const JOBS_FIELDS: &[PublishedField] = &[
     field("timeout_seconds", "300", "300", false, false, None),
     field("shutdown_timeout_ms", "30000", "30000", false, false, None),
     field("track_history", "true", "true", false, false, None),
+    field(
+        "history_retention_days",
+        "30",
+        "30",
+        false,
+        false,
+        Some("Auto-prune job_history older than N days (0 = keep forever)"),
+    ),
+    field(
+        "history_prune_interval_ms",
+        "3600000",
+        "3600000",
+        false,
+        false,
+        Some("How often workers attempt job_history pruning"),
+    ),
+    field(
+        "history_prune_batch_size",
+        "1000",
+        "1000",
+        false,
+        false,
+        Some("Maximum job_history rows deleted per prune pass"),
+    ),
 ];
 
 const SCHEDULER_FIELDS: &[PublishedField] = &[
@@ -424,12 +456,44 @@ const LOGGING_FIELDS: &[PublishedField] = &[
 
 const OBSERVABILITY_FIELDS: &[PublishedField] = &[
     field(
+        "enabled",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Register /_forge observability routes"),
+    ),
+    field(
+        "capture_enabled",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Record passive runtime observability data"),
+    ),
+    field(
         "base_path",
         "\"/_forge\"",
         "/_forge",
         false,
         false,
         Some("Dashboard route prefix"),
+    ),
+    field(
+        "http_sample_retention",
+        "500",
+        "500",
+        false,
+        false,
+        Some("Retained HTTP request samples for rankings (0 = disable samples)"),
+    ),
+    field(
+        "websocket_channel_retention",
+        "500",
+        "500",
+        false,
+        false,
+        Some("Retained idle WebSocket channel counters (0 = disable per-channel retention)"),
     ),
     field(
         "tracing_enabled",

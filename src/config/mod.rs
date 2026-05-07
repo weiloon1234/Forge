@@ -195,6 +195,7 @@ pub struct DatabaseConfig {
     pub default_per_page: u64,
     pub log_queries: bool,
     pub slow_query_threshold_ms: u64,
+    pub slow_query_retention: usize,
     pub n_plus_one_detection: bool,
     pub n_plus_one_min_repeats: u64,
     pub n_plus_one_retention: usize,
@@ -218,6 +219,7 @@ impl Default for DatabaseConfig {
             default_per_page: 15,
             log_queries: false,
             slow_query_threshold_ms: 500,
+            slow_query_retention: 100,
             n_plus_one_detection: true,
             n_plus_one_min_repeats: 10,
             n_plus_one_retention: 100,
@@ -284,6 +286,9 @@ pub struct JobsConfig {
     pub timeout_seconds: u64,
     pub shutdown_timeout_ms: u64,
     pub track_history: bool,
+    pub history_retention_days: u32,
+    pub history_prune_interval_ms: u64,
+    pub history_prune_batch_size: usize,
     pub queue_priorities: std::collections::HashMap<String, u32>,
 }
 
@@ -299,6 +304,9 @@ impl Default for JobsConfig {
             timeout_seconds: 300,
             shutdown_timeout_ms: 30_000,
             track_history: true,
+            history_retention_days: 30,
+            history_prune_interval_ms: 3_600_000,
+            history_prune_batch_size: 1_000,
             queue_priorities: std::collections::HashMap::new(),
         }
     }
@@ -489,7 +497,11 @@ impl Default for I18nConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct ObservabilityConfig {
+    pub enabled: bool,
+    pub capture_enabled: bool,
     pub base_path: String,
+    pub http_sample_retention: usize,
+    pub websocket_channel_retention: usize,
     pub tracing_enabled: bool,
     pub otlp_endpoint: String,
     pub service_name: String,
@@ -499,7 +511,11 @@ pub struct ObservabilityConfig {
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
+            capture_enabled: true,
             base_path: "/_forge".to_string(),
+            http_sample_retention: 500,
+            websocket_channel_retention: 500,
             tracing_enabled: false,
             otlp_endpoint: "http://localhost:4317".to_string(),
             service_name: "forge".to_string(),
@@ -1036,6 +1052,7 @@ mod tests {
                 migrations_path = "database/migrations"
                 seeders_path = "database/seeders"
                 max_connections = 2
+                slow_query_retention = 40
                 n_plus_one_detection = false
                 n_plus_one_min_repeats = 7
                 n_plus_one_retention = 25
@@ -1054,6 +1071,9 @@ mod tests {
                 lease_ttl_ms = 45000
                 requeue_batch_size = 12
                 shutdown_timeout_ms = 12000
+                history_retention_days = 45
+                history_prune_interval_ms = 60000
+                history_prune_batch_size = 250
 
                 [scheduler]
                 tick_interval_ms = 250
@@ -1076,6 +1096,7 @@ mod tests {
         assert_eq!(database.migrations_path, "database/migrations");
         assert_eq!(database.seeders_path, "database/seeders");
         assert_eq!(database.max_connections, 2);
+        assert_eq!(database.slow_query_retention, 40);
         assert!(!database.n_plus_one_detection);
         assert_eq!(database.n_plus_one_min_repeats, 7);
         assert_eq!(database.n_plus_one_retention, 25);
@@ -1090,6 +1111,9 @@ mod tests {
         assert_eq!(jobs.lease_ttl_ms, 45_000);
         assert_eq!(jobs.requeue_batch_size, 12);
         assert_eq!(jobs.shutdown_timeout_ms, 12_000);
+        assert_eq!(jobs.history_retention_days, 45);
+        assert_eq!(jobs.history_prune_interval_ms, 60_000);
+        assert_eq!(jobs.history_prune_batch_size, 250);
         assert_eq!(scheduler.tick_interval_ms, 250);
         assert_eq!(scheduler.leader_lease_ttl_ms, 7_000);
         assert_eq!(scheduler.shutdown_timeout_ms, 15_000);
@@ -1099,6 +1123,9 @@ mod tests {
     fn jobs_config_defaults_shutdown_timeout() {
         let jobs: JobsConfig = ConfigRepository::empty().jobs().unwrap();
         assert_eq!(jobs.shutdown_timeout_ms, 30_000);
+        assert_eq!(jobs.history_retention_days, 30);
+        assert_eq!(jobs.history_prune_interval_ms, 3_600_000);
+        assert_eq!(jobs.history_prune_batch_size, 1_000);
     }
 
     #[test]
@@ -1188,6 +1215,7 @@ mod tests {
     fn database_config_defaults_sql_n_plus_one_observability() {
         let database = DatabaseConfig::default();
 
+        assert_eq!(database.slow_query_retention, 100);
         assert!(database.n_plus_one_detection);
         assert_eq!(database.n_plus_one_min_repeats, 10);
         assert_eq!(database.n_plus_one_retention, 100);
@@ -1220,7 +1248,11 @@ mod tests {
             directory.path().join("00-observability.toml"),
             r#"
                 [observability]
+                enabled = false
+                capture_enabled = false
                 base_path = "/_ops"
+                http_sample_retention = 25
+                websocket_channel_retention = 75
             "#,
         )
         .unwrap();
@@ -1228,7 +1260,11 @@ mod tests {
         let config = ConfigRepository::from_dir(directory.path()).unwrap();
         let observability: ObservabilityConfig = config.observability().unwrap();
 
+        assert!(!observability.enabled);
+        assert!(!observability.capture_enabled);
         assert_eq!(observability.base_path, "/_ops");
+        assert_eq!(observability.http_sample_retention, 25);
+        assert_eq!(observability.websocket_channel_retention, 75);
     }
 
     #[test]

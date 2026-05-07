@@ -277,7 +277,15 @@ max_concurrent_jobs = 0        # 0 = unlimited
 timeout_seconds = 300          # global job timeout
 shutdown_timeout_ms = 30000    # active job drain timeout on shutdown (0 = abort immediately)
 track_history = true           # write to job_history table
+history_retention_days = 30    # auto-prune job_history older than N days (0 = keep forever)
+history_prune_interval_ms = 3600000
+history_prune_batch_size = 1000
 ```
+
+`job_history` is the persistent observability store behind `/_forge/jobs/stats` and
+`/_forge/jobs/failed`. Workers own pruning internally, coordinated by a distributed lock, so
+consumer apps do not need to register a scheduler task. Runtime job counters remain process-local
+and reset on restart.
 
 ---
 

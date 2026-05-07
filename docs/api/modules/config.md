@@ -71,5 +71,7 @@ struct WebSocketObservabilityConfig
 
 - `AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.
 - `JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.
+- `JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.
+- `ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.
 - `SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.
 

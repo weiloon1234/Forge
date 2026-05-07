@@ -42,14 +42,19 @@ impl HttpKernel {
         let mut registrar = crate::http::build_registrar(&self.routes)?;
         if let Some(options) = &self.observability {
             let obs_config = self.app.config().observability()?;
-
-            // Collect documented routes and publish OpenAPI spec
-            let documented = registrar.collect_documented_routes();
-            if !documented.is_empty() {
-                crate::logging::set_openapi_spec("API", "1.0.0", &documented);
+            if obs_config.enabled {
+                // Collect documented routes and publish OpenAPI spec
+                let documented = registrar.collect_documented_routes();
+                if !documented.is_empty() {
+                    crate::logging::set_openapi_spec("API", "1.0.0", &documented);
+                }
+                crate::logging::register_openapi_route(&mut registrar, &obs_config, options)?;
+                crate::logging::register_observability_routes(
+                    &mut registrar,
+                    &obs_config,
+                    options,
+                )?;
             }
-            crate::logging::register_openapi_route(&mut registrar, &obs_config, options)?;
-            crate::logging::register_observability_routes(&mut registrar, &obs_config, options)?;
         }
 
         // Store the named route registry in the container for URL generation

@@ -6,7 +6,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -640,6 +640,12 @@ pub struct Worker {
     app: AppContext,
     runtime: Arc<JobRuntime>,
     diagnostics: Arc<RuntimeDiagnostics>,
+    history_prune: Arc<Mutex<JobHistoryPruneState>>,
+}
+
+#[derive(Default)]
+struct JobHistoryPruneState {
+    last_attempt: Option<Instant>,
 }
 
 impl Worker {
@@ -650,6 +656,7 @@ impl Worker {
             app,
             runtime,
             diagnostics,
+            history_prune: Arc::new(Mutex::new(JobHistoryPruneState::default())),
         })
     }
 
@@ -712,6 +719,7 @@ impl Worker {
                         for _ in 0..requeued {
                             maintenance_worker.diagnostics.record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);
                         }
+                        maintenance_worker.prune_job_history_if_due().await;
                     }
                 }
             }
@@ -792,10 +800,79 @@ impl Worker {
         }
     }
 
+    async fn prune_job_history_if_due(&self) {
+        if self.runtime.config.history_retention_days == 0
+            || self.runtime.config.history_prune_batch_size == 0
+            || !self.job_history_prune_due()
+        {
+            return;
+        }
+
+        match self.prune_job_history().await {
+            Ok(deleted) if deleted > 0 => {
+                tracing::info!(
+                    target: "forge.worker",
+                    deleted,
+                    retention_days = self.runtime.config.history_retention_days,
+                    "pruned job history"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to prune job history"
+                );
+            }
+        }
+    }
+
+    fn job_history_prune_due(&self) -> bool {
+        let interval = Duration::from_millis(self.runtime.config.history_prune_interval_ms.max(1));
+        let now = Instant::now();
+        let mut state = lock_unpoisoned(&self.history_prune, "job history prune state");
+        if state
+            .last_attempt
+            .is_some_and(|last_attempt| now.duration_since(last_attempt) < interval)
+        {
+            return false;
+        }
+        state.last_attempt = Some(now);
+        true
+    }
+
+    async fn prune_job_history(&self) -> Result<u64> {
+        let Ok(lock) = self.app.lock() else {
+            return Ok(0);
+        };
+        let Some(_guard) = lock
+            .acquire("jobs:history_prune", Duration::from_secs(60))
+            .await?
+        else {
+            return Ok(0);
+        };
+
+        let db = self.app.database()?;
+        if !db.is_configured() {
+            return Ok(0);
+        }
+
+        db.raw_execute(
+            "DELETE FROM job_history WHERE id IN (SELECT id FROM job_history WHERE created_at < NOW() - ($1::double precision * INTERVAL '1 day') ORDER BY created_at ASC LIMIT $2)",
+            &[
+                DbValue::Int64(self.runtime.config.history_retention_days as i64),
+                DbValue::Int64(self.runtime.config.history_prune_batch_size as i64),
+            ],
+        )
+        .await
+    }
+
     pub async fn run_once(&self) -> Result<bool> {
         let now_millis = Utc::now().timestamp_millis();
         let promoted = self.runtime.promote_due_jobs(now_millis).await?;
         let requeued = self.runtime.requeue_expired_jobs(now_millis).await?;
+        self.prune_job_history_if_due().await;
         for _ in 0..requeued {
             self.diagnostics
                 .record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);
@@ -1651,7 +1728,7 @@ impl Worker {
             duration_ms,
             payload,
         } = entry;
-        if !self.runtime.config.track_history {
+        if !self.runtime.config.track_history || !self.diagnostics.capture_enabled() {
             return;
         }
         let Ok(db) = self.app.database() else {

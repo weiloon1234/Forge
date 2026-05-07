@@ -506,7 +506,7 @@ When enabled, `/ws/history/:channel` returns the full `ServerMessage.payload` fo
 }
 ```
 
-Registered channels with no traffic appear with zero counters. Counters are per-process, matching the semantics of the existing global counters — aggregate across instances in your metrics backend if needed.
+Registered channels with no traffic appear with zero counters. Counters are per-process, matching the semantics of the existing global counters — aggregate across instances in your metrics backend if needed. Idle per-channel diagnostics are bounded by `observability.websocket_channel_retention`; active channels are not evicted.
 
 The same series are also emitted in Prometheus format on `/_forge/metrics`, labelled by `channel`:
 

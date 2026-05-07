@@ -487,6 +487,53 @@ async fn sql_observability_endpoint_exposes_typed_stats_contract() {
     assert_eq!(body.top_slowest.len(), body.slow_queries.len());
 }
 
+#[tokio::test]
+async fn observability_enabled_false_skips_forge_routes() {
+    let config_dir = tempdir().unwrap();
+    fs::write(
+        config_dir.path().join("00-observability.toml"),
+        r#"
+            [observability]
+            enabled = false
+        "#,
+    )
+    .unwrap();
+
+    let app = TestApp::builder()
+        .load_config_dir(config_dir.path())
+        .enable_observability()
+        .build()
+        .await;
+
+    let response = app.client().get("/_forge/health").send().await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn observability_capture_disabled_keeps_routes_with_empty_counters() {
+    let config_dir = tempdir().unwrap();
+    fs::write(
+        config_dir.path().join("00-observability.toml"),
+        r#"
+            [observability]
+            capture_enabled = false
+        "#,
+    )
+    .unwrap();
+
+    let app = TestApp::builder()
+        .load_config_dir(config_dir.path())
+        .enable_observability()
+        .build()
+        .await;
+
+    let response = app.client().get("/_forge/runtime").send().await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: RuntimeSnapshot = response.json();
+    assert_eq!(body.http.requests_total, 0);
+    assert_eq!(body.jobs.enqueued_total, 0);
+}
+
 async fn wait_for_http_ready(base_url: &str) {
     let client = reqwest::Client::new();
     for _ in 0..40 {
@@ -780,6 +827,138 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
         assert_eq!(slow_queries.stats.avg_duration_ms, None);
         assert_eq!(slow_queries.stats.latest_recorded_at, None);
     }
+}
+
+#[tokio::test]
+async fn worker_prunes_job_history_with_retention_and_distributed_lock() {
+    let Some(url) = postgres_url() else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    let config_dir = tempdir().unwrap();
+    fs::write(
+        config_dir.path().join("00-runtime.toml"),
+        format!(
+            r#"
+            [database]
+            url = "{url}"
+
+            [jobs]
+            history_retention_days = 30
+            history_prune_interval_ms = 1
+            history_prune_batch_size = 10
+        "#
+        ),
+    )
+    .unwrap();
+
+    let app = TestApp::builder()
+        .load_config_dir(config_dir.path())
+        .build()
+        .await;
+    let db = app.app().database().unwrap();
+    recreate_job_history_table(db.as_ref()).await;
+    db.raw_execute(
+        r#"
+        INSERT INTO job_history (id, job_id, queue, status, attempt, created_at)
+        VALUES
+            ('00000000-0000-0000-0000-000000000011', 'old-job', 'default', 'succeeded', 1, NOW() - INTERVAL '45 days'),
+            ('00000000-0000-0000-0000-000000000012', 'new-job', 'default', 'succeeded', 1, NOW())
+        "#,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let lock = app
+        .app()
+        .lock()
+        .unwrap()
+        .acquire("jobs:history_prune", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("expected prune lock");
+    Worker::from_app(app.app().clone())
+        .unwrap()
+        .run_once()
+        .await
+        .unwrap();
+    let rows = db
+        .raw_query("SELECT job_id FROM job_history ORDER BY job_id", &[])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    lock.release().await.unwrap();
+
+    Worker::from_app(app.app().clone())
+        .unwrap()
+        .run_once()
+        .await
+        .unwrap();
+    let rows = db
+        .raw_query("SELECT job_id FROM job_history ORDER BY job_id", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.text("job_id"))
+            .collect::<Vec<_>>(),
+        vec!["new-job".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn worker_keeps_job_history_forever_when_retention_is_zero() {
+    let Some(url) = postgres_url() else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    let config_dir = tempdir().unwrap();
+    fs::write(
+        config_dir.path().join("00-runtime.toml"),
+        format!(
+            r#"
+            [database]
+            url = "{url}"
+
+            [jobs]
+            history_retention_days = 0
+            history_prune_interval_ms = 1
+            history_prune_batch_size = 10
+        "#
+        ),
+    )
+    .unwrap();
+
+    let app = TestApp::builder()
+        .load_config_dir(config_dir.path())
+        .build()
+        .await;
+    let db = app.app().database().unwrap();
+    recreate_job_history_table(db.as_ref()).await;
+    db.raw_execute(
+        r#"
+        INSERT INTO job_history (id, job_id, queue, status, attempt, created_at)
+        VALUES
+            ('00000000-0000-0000-0000-000000000021', 'old-job', 'default', 'succeeded', 1, NOW() - INTERVAL '45 days'),
+            ('00000000-0000-0000-0000-000000000022', 'new-job', 'default', 'succeeded', 1, NOW())
+        "#,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    Worker::from_app(app.app().clone())
+        .unwrap()
+        .run_once()
+        .await
+        .unwrap();
+
+    let rows = db
+        .raw_query("SELECT job_id FROM job_history ORDER BY job_id", &[])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
 }
 
 #[tokio::test]

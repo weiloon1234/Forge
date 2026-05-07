@@ -22,6 +22,24 @@ const HTTP_REQUEST_OBSERVATION_CAPACITY: usize = 500;
 const HTTP_ROUTE_RANKING_LIMIT: usize = 20;
 const HTTP_RECENT_REQUEST_LIMIT: usize = 50;
 const HTTP_SLOW_REQUEST_THRESHOLD_MS: u64 = 1_000;
+const WEBSOCKET_CHANNEL_OBSERVATION_CAPACITY: usize = 500;
+
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeDiagnosticsConfig {
+    pub capture_enabled: bool,
+    pub http_sample_retention: usize,
+    pub websocket_channel_retention: usize,
+}
+
+impl Default for RuntimeDiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            capture_enabled: true,
+            http_sample_retention: HTTP_REQUEST_OBSERVATION_CAPACITY,
+            websocket_channel_retention: WEBSOCKET_CHANNEL_OBSERVATION_CAPACITY,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
@@ -218,7 +236,6 @@ impl HttpDurationHistogram {
     }
 }
 
-#[derive(Default)]
 struct HttpCounters {
     requests_total: AtomicU64,
     informational_total: AtomicU64,
@@ -228,6 +245,23 @@ struct HttpCounters {
     server_error_total: AtomicU64,
     duration_ms: HttpDurationHistogram,
     requests: Mutex<VecDeque<HttpRequestObservation>>,
+    sample_retention: usize,
+}
+
+impl HttpCounters {
+    fn new(sample_retention: usize) -> Self {
+        Self {
+            requests_total: AtomicU64::new(0),
+            informational_total: AtomicU64::new(0),
+            success_total: AtomicU64::new(0),
+            redirection_total: AtomicU64::new(0),
+            client_error_total: AtomicU64::new(0),
+            server_error_total: AtomicU64::new(0),
+            duration_ms: HttpDurationHistogram::default(),
+            requests: Mutex::new(VecDeque::with_capacity(sample_retention)),
+            sample_retention,
+        }
+    }
 }
 
 impl HttpCounters {
@@ -244,9 +278,13 @@ impl HttpCounters {
     }
 
     fn record_request(&self, request: HttpRequestRecord) {
+        if self.sample_retention == 0 {
+            return;
+        }
+
         let recorded_at = ChronoUtc::now().to_rfc3339();
         let mut requests = lock_unpoisoned(&self.requests, "http request observations");
-        if requests.len() >= HTTP_REQUEST_OBSERVATION_CAPACITY {
+        if requests.len() >= self.sample_retention {
             requests.pop_front();
         }
         requests.push_back(HttpRequestObservation {
@@ -307,7 +345,7 @@ impl HttpCounters {
             stats: HttpObservabilityStats {
                 requests_total: self.requests_total.load(Ordering::Relaxed),
                 retained_request_count: requests.len(),
-                retention_capacity: HTTP_REQUEST_OBSERVATION_CAPACITY,
+                retention_capacity: self.sample_retention,
                 slow_request_threshold_ms: HTTP_SLOW_REQUEST_THRESHOLD_MS,
                 route_count,
                 slow_request_count,
@@ -486,7 +524,6 @@ struct PerChannelWebSocketCounters {
     outbound_messages_total: AtomicU64,
 }
 
-#[derive(Default)]
 struct WebSocketCounters {
     opened_total: AtomicU64,
     closed_total: AtomicU64,
@@ -497,6 +534,24 @@ struct WebSocketCounters {
     inbound_messages_total: AtomicU64,
     outbound_messages_total: AtomicU64,
     per_channel: RwLock<HashMap<ChannelId, Arc<PerChannelWebSocketCounters>>>,
+    channel_retention: usize,
+}
+
+impl WebSocketCounters {
+    fn new(channel_retention: usize) -> Self {
+        Self {
+            opened_total: AtomicU64::new(0),
+            closed_total: AtomicU64::new(0),
+            active_connections: AtomicU64::new(0),
+            subscriptions_total: AtomicU64::new(0),
+            unsubscribes_total: AtomicU64::new(0),
+            active_subscriptions: AtomicU64::new(0),
+            inbound_messages_total: AtomicU64::new(0),
+            outbound_messages_total: AtomicU64::new(0),
+            per_channel: RwLock::new(HashMap::new()),
+            channel_retention,
+        }
+    }
 }
 
 impl WebSocketCounters {
@@ -530,6 +585,10 @@ impl WebSocketCounters {
     }
 
     fn entry(&self, channel: &ChannelId) -> Arc<PerChannelWebSocketCounters> {
+        if self.channel_retention == 0 {
+            return Arc::new(PerChannelWebSocketCounters::default());
+        }
+
         // Fast path: read lock and return if present.
         {
             let map = read_unpoisoned(&self.per_channel, "websocket per-channel counters");
@@ -539,9 +598,27 @@ impl WebSocketCounters {
         }
         // Slow path: upgrade to write lock and insert.
         let mut map = write_unpoisoned(&self.per_channel, "websocket per-channel counters");
+        prune_idle_websocket_channels(&mut map, self.channel_retention);
         map.entry(channel.clone())
             .or_insert_with(|| Arc::new(PerChannelWebSocketCounters::default()))
             .clone()
+    }
+}
+
+fn prune_idle_websocket_channels(
+    map: &mut HashMap<ChannelId, Arc<PerChannelWebSocketCounters>>,
+    retention: usize,
+) {
+    while map.len() >= retention {
+        let Some(channel) = map
+            .iter()
+            .filter(|(_, counters)| counters.active_subscriptions.load(Ordering::Relaxed) == 0)
+            .map(|(channel, _)| channel.clone())
+            .min()
+        else {
+            break;
+        };
+        map.remove(&channel);
     }
 }
 
@@ -594,6 +671,7 @@ impl JobCounters {
 pub struct RuntimeDiagnostics {
     backend: RuntimeBackendKind,
     bootstrap_complete: AtomicBool,
+    capture_enabled: bool,
     readiness: ReadinessRegistry,
     http: HttpCounters,
     auth: AuthCounters,
@@ -603,14 +681,24 @@ pub struct RuntimeDiagnostics {
 }
 
 impl RuntimeDiagnostics {
+    #[cfg(test)]
     pub(crate) fn new(backend: RuntimeBackendKind, readiness: ReadinessRegistry) -> Self {
+        Self::new_with_config(backend, readiness, RuntimeDiagnosticsConfig::default())
+    }
+
+    pub(crate) fn new_with_config(
+        backend: RuntimeBackendKind,
+        readiness: ReadinessRegistry,
+        config: RuntimeDiagnosticsConfig,
+    ) -> Self {
         Self {
             backend,
             bootstrap_complete: AtomicBool::new(false),
+            capture_enabled: config.capture_enabled,
             readiness,
-            http: HttpCounters::default(),
+            http: HttpCounters::new(config.http_sample_retention),
             auth: AuthCounters::default(),
-            websocket: WebSocketCounters::default(),
+            websocket: WebSocketCounters::new(config.websocket_channel_retention),
             scheduler: SchedulerCounters::default(),
             jobs: JobCounters::default(),
         }
@@ -618,6 +706,10 @@ impl RuntimeDiagnostics {
 
     pub fn backend_kind(&self) -> RuntimeBackendKind {
         self.backend
+    }
+
+    pub(crate) fn capture_enabled(&self) -> bool {
+        self.capture_enabled
     }
 
     pub fn mark_bootstrap_complete(&self) {
@@ -698,6 +790,9 @@ impl RuntimeDiagnostics {
     }
 
     pub(crate) fn record_http_request(&self, request: HttpRequestRecord) {
+        if !self.capture_enabled {
+            return;
+        }
         let status = request.status;
         let duration_ms = request.duration_ms;
         self.record_http_response_inner(status, Some(duration_ms));
@@ -705,6 +800,9 @@ impl RuntimeDiagnostics {
     }
 
     fn record_http_response_inner(&self, status: axum::http::StatusCode, duration_ms: Option<u64>) {
+        if !self.capture_enabled {
+            return;
+        }
         self.http.requests_total.fetch_add(1, Ordering::Relaxed);
         if let Some(duration_ms) = duration_ms {
             self.http.duration_ms.record(duration_ms);
@@ -731,6 +829,9 @@ impl RuntimeDiagnostics {
     }
 
     pub fn record_auth_outcome(&self, outcome: AuthOutcome) {
+        if !self.capture_enabled {
+            return;
+        }
         match outcome {
             AuthOutcome::Success => {
                 self.auth.success_total.fetch_add(1, Ordering::Relaxed);
@@ -748,6 +849,9 @@ impl RuntimeDiagnostics {
     }
 
     pub fn record_websocket_connection(&self, state: WebSocketConnectionState) {
+        if !self.capture_enabled {
+            return;
+        }
         match state {
             WebSocketConnectionState::Opened => {
                 self.websocket.opened_total.fetch_add(1, Ordering::Relaxed);
@@ -767,6 +871,9 @@ impl RuntimeDiagnostics {
         note = "use `record_websocket_subscription_opened_on(&channel)` — the global-only variant bypasses per-channel tracking"
     )]
     pub fn record_websocket_subscription_opened(&self) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .subscriptions_total
             .fetch_add(1, Ordering::Relaxed);
@@ -780,6 +887,9 @@ impl RuntimeDiagnostics {
         note = "use `record_websocket_subscription_closed_on(&channel)` — the global-only variant bypasses per-channel tracking"
     )]
     pub fn record_websocket_subscription_closed(&self) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .unsubscribes_total
             .fetch_add(1, Ordering::Relaxed);
@@ -791,6 +901,9 @@ impl RuntimeDiagnostics {
         note = "use `record_websocket_inbound_message_on(&channel)` — the global-only variant bypasses per-channel tracking"
     )]
     pub fn record_websocket_inbound_message(&self) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .inbound_messages_total
             .fetch_add(1, Ordering::Relaxed);
@@ -801,12 +914,18 @@ impl RuntimeDiagnostics {
         note = "use `record_websocket_outbound_message_on(&channel)` — the global-only variant bypasses per-channel tracking"
     )]
     pub fn record_websocket_outbound_message(&self) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .outbound_messages_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_websocket_subscription_opened_on(&self, channel: &ChannelId) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .subscriptions_total
             .fetch_add(1, Ordering::Relaxed);
@@ -819,6 +938,9 @@ impl RuntimeDiagnostics {
     }
 
     pub fn record_websocket_subscription_closed_on(&self, channel: &ChannelId) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .unsubscribes_total
             .fetch_add(1, Ordering::Relaxed);
@@ -829,6 +951,9 @@ impl RuntimeDiagnostics {
     }
 
     pub fn record_websocket_inbound_message_on(&self, channel: &ChannelId) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .inbound_messages_total
             .fetch_add(1, Ordering::Relaxed);
@@ -839,6 +964,9 @@ impl RuntimeDiagnostics {
     }
 
     pub fn record_websocket_outbound_message_on(&self, channel: &ChannelId) {
+        if !self.capture_enabled {
+            return;
+        }
         self.websocket
             .outbound_messages_total
             .fetch_add(1, Ordering::Relaxed);
@@ -849,20 +977,32 @@ impl RuntimeDiagnostics {
     }
 
     pub fn register_websocket_channel(&self, channel: &ChannelId) {
+        if !self.capture_enabled {
+            return;
+        }
         let _ = self.websocket.entry(channel);
     }
 
     pub fn record_scheduler_tick(&self) {
+        if !self.capture_enabled {
+            return;
+        }
         self.scheduler.ticks_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_schedule_executed(&self) {
+        if !self.capture_enabled {
+            return;
+        }
         self.scheduler
             .executed_schedules_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_scheduler_leadership(&self, state: SchedulerLeadershipState) {
+        if !self.capture_enabled {
+            return;
+        }
         match state {
             SchedulerLeadershipState::Acquired => {
                 self.scheduler
@@ -880,12 +1020,18 @@ impl RuntimeDiagnostics {
     }
 
     pub fn set_scheduler_leader_active(&self, active: bool) {
+        if !self.capture_enabled {
+            return;
+        }
         self.scheduler
             .leader_active
             .store(active, Ordering::Relaxed);
     }
 
     pub fn record_job_outcome(&self, outcome: JobOutcome) {
+        if !self.capture_enabled {
+            return;
+        }
         match outcome {
             JobOutcome::Enqueued => {
                 self.jobs.enqueued_total.fetch_add(1, Ordering::Relaxed);
@@ -935,6 +1081,37 @@ impl Default for RuntimeDiagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diagnostics_with_config(config: RuntimeDiagnosticsConfig) -> RuntimeDiagnostics {
+        RuntimeDiagnostics::new_with_config(
+            RuntimeBackendKind::Memory,
+            ReadinessRegistry { checks: Vec::new() },
+            config,
+        )
+    }
+
+    #[test]
+    fn capture_disabled_makes_runtime_records_noop() {
+        use axum::http::StatusCode;
+
+        let diagnostics = diagnostics_with_config(RuntimeDiagnosticsConfig {
+            capture_enabled: false,
+            ..RuntimeDiagnosticsConfig::default()
+        });
+
+        diagnostics.record_http_response_with_duration(StatusCode::OK, 12);
+        diagnostics.record_auth_outcome(AuthOutcome::Success);
+        diagnostics.record_websocket_connection(WebSocketConnectionState::Opened);
+        diagnostics.record_scheduler_tick();
+        diagnostics.record_job_outcome(JobOutcome::Succeeded);
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.http.requests_total, 0);
+        assert_eq!(snapshot.auth.success_total, 0);
+        assert_eq!(snapshot.websocket.opened_total, 0);
+        assert_eq!(snapshot.scheduler.ticks_total, 0);
+        assert_eq!(snapshot.jobs.succeeded_total, 0);
+    }
 
     #[test]
     fn per_channel_counters_start_at_zero_and_increment() {
@@ -1092,5 +1269,57 @@ mod tests {
             HTTP_REQUEST_OBSERVATION_CAPACITY
         );
         assert_eq!(snapshot.top_slowest_routes[0].max_duration_ms, 5);
+    }
+
+    #[test]
+    fn http_observability_respects_configured_sample_retention() {
+        use axum::http::StatusCode;
+
+        let diagnostics = diagnostics_with_config(RuntimeDiagnosticsConfig {
+            http_sample_retention: 1,
+            ..RuntimeDiagnosticsConfig::default()
+        });
+
+        diagnostics.record_http_request(HttpRequestRecord {
+            method: "GET".to_string(),
+            path: "/first".to_string(),
+            status: StatusCode::OK,
+            duration_ms: 2_000,
+            request_id: Some("first".to_string()),
+            trace_id: None,
+        });
+        diagnostics.record_http_request(HttpRequestRecord {
+            method: "GET".to_string(),
+            path: "/second".to_string(),
+            status: StatusCode::OK,
+            duration_ms: 5,
+            request_id: Some("second".to_string()),
+            trace_id: None,
+        });
+
+        let snapshot = diagnostics.http_observability_snapshot();
+        assert_eq!(snapshot.stats.requests_total, 2);
+        assert_eq!(snapshot.stats.retained_request_count, 1);
+        assert_eq!(snapshot.stats.retention_capacity, 1);
+        assert_eq!(snapshot.top_slowest_routes[0].path, "/second");
+    }
+
+    #[test]
+    fn websocket_channel_retention_evicts_idle_channels() {
+        use crate::support::ChannelId;
+
+        let diagnostics = diagnostics_with_config(RuntimeDiagnosticsConfig {
+            websocket_channel_retention: 1,
+            ..RuntimeDiagnosticsConfig::default()
+        });
+        let alpha = ChannelId::new("alpha");
+        let beta = ChannelId::new("beta");
+
+        diagnostics.register_websocket_channel(&alpha);
+        diagnostics.record_websocket_inbound_message_on(&beta);
+
+        let channels = diagnostics.snapshot().websocket.channels;
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].id, beta);
     }
 }

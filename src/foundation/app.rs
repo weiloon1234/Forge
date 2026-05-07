@@ -991,7 +991,14 @@ impl AppBuilder {
         let error_reporter_registry = Arc::new(ErrorReporterRegistry::new(error_reporters));
         crate::logging::set_global_panic_reporters(error_reporter_registry.clone());
         registrar.register_job_middleware(crate::logging::ErrorReporterJobMiddleware)?;
-        let database = Arc::new(DatabaseManager::from_config(&app.config().database()?).await?);
+        let observability_config = app.config().observability()?;
+        let database = Arc::new(
+            DatabaseManager::from_config_with_observability(
+                &app.config().database()?,
+                Some(&observability_config),
+            )
+            .await?,
+        );
 
         let auth_config = app.config().auth()?;
         let backend = RuntimeBackend::from_config(app.config())?;
@@ -1052,9 +1059,14 @@ impl AppBuilder {
             registries.authenticatable.clone(),
         ));
         register_builtin_readiness_checks(&registries.readiness, backend_kind)?;
-        let diagnostics = Arc::new(RuntimeDiagnostics::new(
+        let diagnostics = Arc::new(RuntimeDiagnostics::new_with_config(
             backend_kind,
             ReadinessRegistryBuilder::freeze_shared(registries.readiness.clone()),
+            crate::logging::RuntimeDiagnosticsConfig {
+                capture_enabled: observability_config.capture_enabled,
+                http_sample_retention: observability_config.http_sample_retention,
+                websocket_channel_retention: observability_config.websocket_channel_retention,
+            },
         ));
         let ws_config = app.config().websocket()?;
         let websocket_publisher = Arc::new(WebSocketPublisher::new(

@@ -80,11 +80,11 @@ struct LocalStorageAdapter
 ## forge::storage::multipart
 
 ```rust
+pub type UploadedFile = UploadedFile;
 struct MultipartForm
   fn file(&self, name: &str) -> Result<&UploadedFile>
-  fn files(&self, name: &str) -> &[UploadedFile]
+  fn files(&self, name: &str) -> &[UploadedFile] ⓘ
   fn text(&self, name: &str) -> Option<&str>
-struct UploadedFile
 ```
 
 ## forge::storage::s3
@@ -103,13 +103,21 @@ struct StoredFile
 ## forge::storage::upload
 
 ```rust
+struct UploadCounters
+struct UploadLimits
+  fn from_config(config: &StorageConfig) -> Self
 struct UploadedFile
   fn generate_storage_name(&self) -> String
+  async fn from_multipart_field( field_name: String, field: Field<'_>, counters: &mut UploadCounters, ) -> Result<Option<Self>>
   fn original_extension(&self) -> Option<String>
   fn normalize_name(name: &str) -> String
   async fn store(&self, app: &AppContext, dir: &str) -> Result<StoredFile>
   async fn store_on( &self, app: &AppContext, disk_name: &str, dir: &str, ) -> Result<StoredFile>
   async fn store_as( &self, app: &AppContext, dir: &str, name: &str, ) -> Result<StoredFile>
   async fn store_as_on( &self, app: &AppContext, disk_name: &str, dir: &str, name: &str, ) -> Result<StoredFile>
+fn current_upload_limits() -> UploadLimits
+async fn prune_stale_upload_temp_files( retention_seconds: u64, batch_size: u64, ) -> Result<u64>
+async fn scope_upload_limits<F>( limits: UploadLimits, future: F, ) -> F::Output
+async fn uploaded_file_from_multipart_field( field_name: String, field: Field<'_>, limits: UploadLimits, counters: &mut UploadCounters, ) -> Result<Option<UploadedFile>>
 ```
 

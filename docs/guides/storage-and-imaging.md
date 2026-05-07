@@ -8,8 +8,7 @@ File storage with local + S3 backends, multipart uploads, and a chainable image 
 
 ```rust
 // Upload a file from a handler
-async fn upload(State(app): State<AppContext>, mut multipart: Multipart) -> Result<impl IntoResponse> {
-    let form = MultipartForm::from_multipart(&mut multipart).await?;
+async fn upload(State(app): State<AppContext>, form: MultipartForm) -> Result<impl IntoResponse> {
     let file = form.file("avatar")?;
     let stored = file.store(&app, "avatars").await?;
     Ok(Json(json!({ "url": stored.url })))
@@ -24,6 +23,12 @@ async fn upload(State(app): State<AppContext>, mut multipart: Multipart) -> Resu
 # config/storage.toml
 [storage]
 default = "local"
+max_upload_size_bytes = 0            # total file bytes per multipart request; 0 = no storage-level cap
+max_upload_file_size_bytes = 0       # per-file cap; 0 = no storage-level cap
+max_upload_files = 0                 # max files per multipart request; 0 = no storage-level cap
+upload_temp_retention_seconds = 3600 # worker cleanup age for forge-upload-* temp files; 0 = keep forever
+upload_temp_prune_interval_ms = 3600000
+upload_temp_prune_batch_size = 1000
 
 [storage.disks.local]
 driver = "local"
@@ -43,6 +48,10 @@ secret = "..."
 visibility = "public"
 ```
 
+Upload caps are storage-level guardrails for `UploadedFile`, `MultipartForm`, and derive-generated multipart DTOs. Route-level validators and file rules still own product-specific limits such as avatar size, gallery count, and allowed MIME types.
+
+Forge streams multipart files to OS temp files named `forge-upload-*`. The worker prunes stale temp files using the retention settings above, so consumers do not need to add a scheduler job. Stored attachments/files are not pruned by this temp cleanup.
+
 ---
 
 ## Handling Uploads
@@ -54,10 +63,8 @@ Extract files and text fields from multipart requests:
 ```rust
 async fn create_post(
     State(app): State<AppContext>,
-    mut multipart: Multipart,
+    form: MultipartForm,
 ) -> Result<impl IntoResponse> {
-    let form = MultipartForm::from_multipart(&mut multipart).await?;
-
     let title = form.text("title").unwrap_or("Untitled");
     let cover = form.file("cover")?;
 
@@ -96,6 +103,8 @@ file.content_type;     // Option<String> — "image/jpeg"
 file.size;             // u64 — bytes
 file.original_extension(); // Option<String> — "jpg"
 ```
+
+`content_type` is client-supplied metadata. Validation helpers such as `is_image` and `allowed_mimes` inspect file bytes first when possible.
 
 ### Multiple File Uploads
 
@@ -154,6 +163,8 @@ let url = storage.url("avatars/profile.jpg")?;
 // Temporary URL (signed, for private S3 files)
 let url = storage.temporary_url("documents/contract.pdf", DateTime::now().add_days(1)).await?;
 ```
+
+Attachment detach deletes database rows before best-effort file deletion. If storage deletion fails, Forge avoids leaving a visible attachment record pointing at a missing file; operators can clean any leftover storage object separately.
 
 ### Working with Specific Disks
 

@@ -834,18 +834,6 @@ pub trait HasAttachments: Send + Sync {
             )
             .await?;
 
-        if let Ok(storage) = app.storage() {
-            for row in &rows {
-                if let (Some(DbValue::Text(disk)), Some(DbValue::Text(path))) =
-                    (row.get("disk"), row.get("path"))
-                {
-                    if let Ok(d) = storage.disk(disk) {
-                        let _ = d.delete(path).await;
-                    }
-                }
-            }
-        }
-
         let affected = db
             .raw_execute(
                 "DELETE FROM attachments \
@@ -857,6 +845,8 @@ pub trait HasAttachments: Send + Sync {
                 ],
             )
             .await?;
+
+        delete_attachment_files(app, &rows).await;
         invalidate_attachment_cache(attachable_type, &attachable_id, Some(collection));
         Ok(affected)
     }
@@ -1023,31 +1013,20 @@ async fn detach_attachment_by_identity(
     delete_file: bool,
 ) -> Result<()> {
     let db = app.database()?;
-    if delete_file {
-        let rows = db
-            .raw_query(
-                "SELECT disk, path FROM attachments \
-                 WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
-                &[
-                    DbValue::Text(attachment_id.to_string()),
-                    DbValue::Text(attachable_type.to_string()),
-                    DbValue::Text(attachable_id.to_string()),
-                ],
-            )
-            .await?;
-
-        if let Some(row) = rows.first() {
-            if let (Some(DbValue::Text(disk)), Some(DbValue::Text(path))) =
-                (row.get("disk"), row.get("path"))
-            {
-                if let Ok(storage) = app.storage() {
-                    if let Ok(d) = storage.disk(disk) {
-                        let _ = d.delete(path).await;
-                    }
-                }
-            }
-        }
-    }
+    let rows = if delete_file {
+        db.raw_query(
+            "SELECT disk, path FROM attachments \
+             WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
+            &[
+                DbValue::Text(attachment_id.to_string()),
+                DbValue::Text(attachable_type.to_string()),
+                DbValue::Text(attachable_id.to_string()),
+            ],
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
 
     db.raw_execute(
         "DELETE FROM attachments \
@@ -1059,8 +1038,29 @@ async fn detach_attachment_by_identity(
         ],
     )
     .await?;
+    if delete_file {
+        delete_attachment_files(app, &rows).await;
+    }
     invalidate_attachment_cache(attachable_type, attachable_id, None);
     Ok(())
+}
+
+async fn delete_attachment_files(app: &AppContext, rows: &[crate::database::DbRecord]) {
+    let Ok(storage) = app.storage() else {
+        return;
+    };
+
+    for row in rows {
+        let (Some(DbValue::Text(disk)), Some(DbValue::Text(path))) =
+            (row.get("disk"), row.get("path"))
+        else {
+            continue;
+        };
+        let Ok(disk) = storage.disk(disk) else {
+            continue;
+        };
+        let _ = disk.delete(path).await;
+    }
 }
 
 async fn run_before_store_hooks<M>(

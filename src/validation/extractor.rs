@@ -120,8 +120,16 @@ where
                         )
                     })?;
 
-                T::from_multipart(&mut multipart).await.map_err(|e| {
-                    Error::http(StatusCode::BAD_REQUEST.as_u16(), e.to_string()).into_response()
+                let upload_limits = crate::storage::UploadLimits::from_app(&app);
+
+                crate::storage::scope_upload_limits(upload_limits, async {
+                    T::from_multipart(&mut multipart).await
+                })
+                .await
+                .map_err(|error| match error {
+                    Error::Http { .. } => error.into_response(),
+                    _ => Error::http(StatusCode::BAD_REQUEST.as_u16(), error.to_string())
+                        .into_response(),
                 })?
             } else {
                 let Json(v) = Json::<T>::from_request(req, state).await.map_err(|error| {

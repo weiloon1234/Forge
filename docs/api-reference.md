@@ -1673,6 +1673,8 @@ Local + S3 file storage with multipart uploads.
 | `StoredFile` | `disk`, `path`, `name`, `size`, `content_type`, `url` |
 | `UploadedFile` | `field_name`, `original_name`, `content_type`, `size`, `temp_path` |
 | `MultipartForm` | Parsed multipart form |
+| `UploadLimits` | Storage-level multipart upload caps |
+| `UploadCounters` | Request-local upload byte/file counters |
 
 ### Enums
 
@@ -1716,6 +1718,7 @@ fn configured_disks(&self) -> Vec<String>
 ### UploadedFile — methods
 
 ```rust
+fn from_multipart_field(field_name, field, counters) -> Result<Option<UploadedFile>>
 fn generate_storage_name(&self) -> String
 fn original_extension(&self) -> Option<String>
 fn normalize_name(name: &str) -> String
@@ -1732,6 +1735,8 @@ fn file(&self, name: &str) -> Result<&UploadedFile>
 fn files(&self, name: &str) -> &[UploadedFile]
 fn text(&self, name: &str) -> Option<&str>
 ```
+
+Multipart extraction honors `[storage]` upload caps and returns Forge JSON `413` errors for oversized uploads or too many uploaded files. Forge worker maintenance prunes stale `forge-upload-*` temp files according to storage retention settings.
 
 ---
 

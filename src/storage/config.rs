@@ -10,6 +10,12 @@ use super::adapter::StorageVisibility;
 #[serde(default)]
 pub struct StorageConfig {
     pub default: String,
+    pub max_upload_size_bytes: u64,
+    pub max_upload_file_size_bytes: u64,
+    pub max_upload_files: u64,
+    pub upload_temp_retention_seconds: u64,
+    pub upload_temp_prune_interval_ms: u64,
+    pub upload_temp_prune_batch_size: u64,
     #[serde(default)]
     pub disks: BTreeMap<String, toml::Table>,
 }
@@ -18,6 +24,12 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             default: "local".to_string(),
+            max_upload_size_bytes: 0,
+            max_upload_file_size_bytes: 0,
+            max_upload_files: 0,
+            upload_temp_retention_seconds: 3600,
+            upload_temp_prune_interval_ms: 3_600_000,
+            upload_temp_prune_batch_size: 1000,
             disks: BTreeMap::new(),
         }
     }
@@ -138,6 +150,12 @@ mod tests {
     fn default_storage_config_has_local_default_and_empty_disks() {
         let config = StorageConfig::default();
         assert_eq!(config.default, "local");
+        assert_eq!(config.max_upload_size_bytes, 0);
+        assert_eq!(config.max_upload_file_size_bytes, 0);
+        assert_eq!(config.max_upload_files, 0);
+        assert_eq!(config.upload_temp_retention_seconds, 3600);
+        assert_eq!(config.upload_temp_prune_interval_ms, 3_600_000);
+        assert_eq!(config.upload_temp_prune_batch_size, 1000);
         assert!(config.disks.is_empty());
     }
 
@@ -145,6 +163,12 @@ mod tests {
     fn parses_storage_config_with_local_disk() {
         let raw = r#"
             default = "local"
+            max_upload_size_bytes = 1048576
+            max_upload_file_size_bytes = 524288
+            max_upload_files = 5
+            upload_temp_retention_seconds = 900
+            upload_temp_prune_interval_ms = 60000
+            upload_temp_prune_batch_size = 50
 
             [disks.local]
             root = "/tmp/storage"
@@ -153,6 +177,12 @@ mod tests {
         "#;
         let config: StorageConfig = toml::from_str(raw).unwrap();
         assert_eq!(config.default, "local");
+        assert_eq!(config.max_upload_size_bytes, 1_048_576);
+        assert_eq!(config.max_upload_file_size_bytes, 524_288);
+        assert_eq!(config.max_upload_files, 5);
+        assert_eq!(config.upload_temp_retention_seconds, 900);
+        assert_eq!(config.upload_temp_prune_interval_ms, 60_000);
+        assert_eq!(config.upload_temp_prune_batch_size, 50);
         assert!(config.disks.contains_key("local"));
 
         let local_table = &config.disks["local"];

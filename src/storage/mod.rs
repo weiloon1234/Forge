@@ -224,7 +224,7 @@ pub use local::LocalStorageAdapter;
 pub use multipart::MultipartForm;
 pub use s3::S3StorageAdapter;
 pub use stored_file::StoredFile;
-pub use upload::UploadedFile;
+pub use upload::{scope_upload_limits, UploadCounters, UploadLimits, UploadedFile};
 
 #[cfg(test)]
 mod tests {

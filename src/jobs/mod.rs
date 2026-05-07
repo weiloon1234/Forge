@@ -642,6 +642,7 @@ pub struct Worker {
     diagnostics: Arc<RuntimeDiagnostics>,
     history_prune: Arc<Mutex<JobHistoryPruneState>>,
     auth_prune: Arc<Mutex<AuthCredentialPruneState>>,
+    upload_temp_prune: Arc<Mutex<UploadTempPruneState>>,
 }
 
 #[derive(Default)]
@@ -654,6 +655,11 @@ struct AuthCredentialPruneState {
     tokens_last_attempt: Option<Instant>,
     password_resets_last_attempt: Option<Instant>,
     email_verification_last_attempt: Option<Instant>,
+}
+
+#[derive(Default)]
+struct UploadTempPruneState {
+    last_attempt: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -673,6 +679,7 @@ impl Worker {
             diagnostics,
             history_prune: Arc::new(Mutex::new(JobHistoryPruneState::default())),
             auth_prune: Arc::new(Mutex::new(AuthCredentialPruneState::default())),
+            upload_temp_prune: Arc::new(Mutex::new(UploadTempPruneState::default())),
         })
     }
 
@@ -737,6 +744,7 @@ impl Worker {
                         }
                         maintenance_worker.prune_job_history_if_due().await;
                         maintenance_worker.prune_auth_credentials_if_due().await;
+                        maintenance_worker.prune_upload_temp_files_if_due().await;
                     }
                 }
             }
@@ -1053,12 +1061,68 @@ impl Worker {
             .await
     }
 
+    async fn prune_upload_temp_files_if_due(&self) {
+        let storage = match self.app.config().storage() {
+            Ok(storage) => storage,
+            Err(error) => {
+                tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to load storage config for upload temp pruning"
+                );
+                return;
+            }
+        };
+
+        if storage.upload_temp_retention_seconds == 0
+            || storage.upload_temp_prune_batch_size == 0
+            || !self.upload_temp_prune_due(storage.upload_temp_prune_interval_ms)
+        {
+            return;
+        }
+
+        match crate::storage::upload::prune_stale_upload_temp_files(
+            storage.upload_temp_retention_seconds,
+            storage.upload_temp_prune_batch_size,
+        )
+        .await
+        {
+            Ok(deleted) if deleted > 0 => tracing::info!(
+                target: "forge.worker",
+                deleted,
+                retention_seconds = storage.upload_temp_retention_seconds,
+                "pruned upload temp files"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                target: "forge.worker",
+                error = %error,
+                "failed to prune upload temp files"
+            ),
+        }
+    }
+
+    fn upload_temp_prune_due(&self, interval_ms: u64) -> bool {
+        let interval = Duration::from_millis(interval_ms.max(1));
+        let now = Instant::now();
+        let mut state = lock_unpoisoned(&self.upload_temp_prune, "upload temp prune state");
+        if state
+            .last_attempt
+            .is_some_and(|last| now.duration_since(last) < interval)
+        {
+            return false;
+        }
+        state.last_attempt = Some(now);
+        true
+    }
+
     pub async fn run_once(&self) -> Result<bool> {
         let now_millis = Utc::now().timestamp_millis();
         let promoted = self.runtime.promote_due_jobs(now_millis).await?;
         let requeued = self.runtime.requeue_expired_jobs(now_millis).await?;
         self.prune_job_history_if_due().await;
         self.prune_auth_credentials_if_due().await;
+        self.prune_upload_temp_files_if_due().await;
         for _ in 0..requeued {
             self.diagnostics
                 .record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);

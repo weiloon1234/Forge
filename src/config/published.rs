@@ -806,8 +806,57 @@ const EMAIL_FROM_FIELDS: &[PublishedField] = &[
     field("name", "\"\"", "", false, false, None),
 ];
 
-const STORAGE_FIELDS: &[PublishedField] =
-    &[field("default", "\"local\"", "local", false, false, None)];
+const STORAGE_FIELDS: &[PublishedField] = &[
+    field("default", "\"local\"", "local", false, false, None),
+    field(
+        "max_upload_size_bytes",
+        "0",
+        "0",
+        false,
+        false,
+        Some("Total multipart file bytes per request (0 = no storage-level cap)"),
+    ),
+    field(
+        "max_upload_file_size_bytes",
+        "0",
+        "0",
+        false,
+        false,
+        Some("Per-file multipart upload cap (0 = no storage-level cap)"),
+    ),
+    field(
+        "max_upload_files",
+        "0",
+        "0",
+        false,
+        false,
+        Some("Max uploaded files per multipart request (0 = no storage-level cap)"),
+    ),
+    field(
+        "upload_temp_retention_seconds",
+        "3600",
+        "3600",
+        false,
+        false,
+        Some("Worker cleanup age for forge-upload-* temp files (0 = keep forever)"),
+    ),
+    field(
+        "upload_temp_prune_interval_ms",
+        "3600000",
+        "3600000",
+        false,
+        false,
+        Some("How often workers attempt upload temp cleanup"),
+    ),
+    field(
+        "upload_temp_prune_batch_size",
+        "1000",
+        "1000",
+        false,
+        false,
+        Some("Max upload temp files deleted per prune pass"),
+    ),
+];
 
 const PUBLISHED_SECTIONS: &[PublishedSection] = &[
     section(
@@ -1415,6 +1464,24 @@ mod tests {
         assert!(env.contains("# AUTH__TOKENS__PRUNE_RETENTION_DAYS=30"));
         assert!(env.contains("# AUTH__PASSWORD_RESETS__EXPIRY_MINUTES=60"));
         assert!(env.contains("# AUTH__EMAIL_VERIFICATION__EXPIRY_MINUTES=1440"));
+    }
+
+    #[test]
+    fn published_storage_config_includes_upload_cost_controls() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[storage]"));
+        assert!(output.contains("# max_upload_size_bytes = 0  # Total multipart file bytes per request (0 = no storage-level cap)"));
+        assert!(
+            output.contains("# max_upload_file_size_bytes = 0  # Per-file multipart upload cap")
+        );
+        assert!(
+            output.contains("# max_upload_files = 0  # Max uploaded files per multipart request")
+        );
+        assert!(output.contains("# upload_temp_retention_seconds = 3600"));
+        assert!(env.contains("# STORAGE__MAX_UPLOAD_SIZE_BYTES=0"));
+        assert!(env.contains("# STORAGE__UPLOAD_TEMP_RETENTION_SECONDS=3600"));
     }
 
     fn config_repository_root_sections() -> BTreeSet<String> {

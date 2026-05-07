@@ -1,14 +1,21 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
+use axum::extract::multipart::Field;
+use axum::extract::FromRef;
 use axum::extract::FromRequest;
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use tokio::io::AsyncWriteExt as _;
 
-use crate::foundation::{AppContext, Result};
+use crate::foundation::{AppContext, Error, Result};
 use serde::de::{self, Deserialize, Deserializer};
 
 use super::stored_file::StoredFile;
+use super::StorageConfig;
 use super::StorageManager;
+
+const UPLOAD_TEMP_PREFIX: &str = "forge-upload-";
 
 /// Represents a file received from an HTTP request (multipart upload).
 ///
@@ -23,6 +30,53 @@ pub struct UploadedFile {
     pub content_type: Option<String>,
     pub size: u64,
     pub temp_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UploadLimits {
+    pub max_upload_size_bytes: u64,
+    pub max_upload_file_size_bytes: u64,
+    pub max_upload_files: u64,
+}
+
+impl UploadLimits {
+    pub fn from_config(config: &StorageConfig) -> Self {
+        Self {
+            max_upload_size_bytes: config.max_upload_size_bytes,
+            max_upload_file_size_bytes: config.max_upload_file_size_bytes,
+            max_upload_files: config.max_upload_files,
+        }
+    }
+
+    pub(crate) fn from_app(app: &AppContext) -> Self {
+        app.config()
+            .storage()
+            .map(|config| Self::from_config(&config))
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UploadCounters {
+    pub uploaded_bytes: u64,
+    pub uploaded_files: u64,
+}
+
+tokio::task_local! {
+    static CURRENT_UPLOAD_LIMITS: UploadLimits;
+}
+
+pub async fn scope_upload_limits<F>(limits: UploadLimits, future: F) -> F::Output
+where
+    F: Future,
+{
+    CURRENT_UPLOAD_LIMITS.scope(limits, future).await
+}
+
+pub fn current_upload_limits() -> UploadLimits {
+    CURRENT_UPLOAD_LIMITS
+        .try_with(|limits| *limits)
+        .unwrap_or_default()
 }
 
 /// `UploadedFile` cannot be deserialized from JSON — it is populated
@@ -48,6 +102,15 @@ impl UploadedFile {
             Some(ext) => format!("{uuid}.{ext}"),
             None => uuid,
         }
+    }
+
+    pub async fn from_multipart_field(
+        field_name: String,
+        field: Field<'_>,
+        counters: &mut UploadCounters,
+    ) -> Result<Option<Self>> {
+        uploaded_file_from_multipart_field(field_name, field, current_upload_limits(), counters)
+            .await
     }
 
     /// Extracts and normalizes the file extension from the original filename.
@@ -138,12 +201,165 @@ impl UploadedFile {
     }
 }
 
+pub async fn uploaded_file_from_multipart_field(
+    field_name: String,
+    field: Field<'_>,
+    limits: UploadLimits,
+    counters: &mut UploadCounters,
+) -> Result<Option<UploadedFile>> {
+    if field.file_name().is_none() {
+        return Ok(None);
+    }
+
+    let next_count = counters.uploaded_files.saturating_add(1);
+    if limits.max_upload_files > 0 && next_count > limits.max_upload_files {
+        return Err(upload_too_many_files_error());
+    }
+    counters.uploaded_files = next_count;
+
+    let original_name = field.file_name().map(str::to_string);
+    let content_type = field.content_type().map(str::to_string);
+    let temp_id = uuid::Uuid::now_v7().to_string();
+    let temp_path = std::env::temp_dir().join(format!("{UPLOAD_TEMP_PREFIX}{temp_id}"));
+
+    let result = stream_field_to_temp_file(field, &temp_path, limits, counters).await;
+    match result {
+        Ok(size) => Ok(Some(UploadedFile {
+            field_name,
+            original_name,
+            content_type,
+            size,
+            temp_path,
+        })),
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            Err(error)
+        }
+    }
+}
+
+async fn stream_field_to_temp_file(
+    mut field: Field<'_>,
+    temp_path: &Path,
+    limits: UploadLimits,
+    counters: &mut UploadCounters,
+) -> Result<u64> {
+    let mut file = tokio::fs::File::create(temp_path)
+        .await
+        .map_err(|error| Error::message(format!("temp file error: {error}")))?;
+
+    let mut file_size = 0u64;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|error| Error::message(format!("chunk error: {error}")))?
+    {
+        let chunk_size = chunk.len() as u64;
+        file_size = file_size
+            .checked_add(chunk_size)
+            .ok_or_else(upload_too_large_error)?;
+        counters.uploaded_bytes = counters
+            .uploaded_bytes
+            .checked_add(chunk_size)
+            .ok_or_else(upload_too_large_error)?;
+
+        if limits.max_upload_file_size_bytes > 0 && file_size > limits.max_upload_file_size_bytes {
+            return Err(upload_file_too_large_error());
+        }
+        if limits.max_upload_size_bytes > 0
+            && counters.uploaded_bytes > limits.max_upload_size_bytes
+        {
+            return Err(upload_too_large_error());
+        }
+
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| Error::message(format!("write error: {error}")))?;
+    }
+
+    Ok(file_size)
+}
+
+pub async fn prune_stale_upload_temp_files(retention_seconds: u64, batch_size: u64) -> Result<u64> {
+    prune_stale_upload_temp_files_in_dir(&std::env::temp_dir(), retention_seconds, batch_size).await
+}
+
+async fn prune_stale_upload_temp_files_in_dir(
+    dir: &Path,
+    retention_seconds: u64,
+    batch_size: u64,
+) -> Result<u64> {
+    if retention_seconds == 0 || batch_size == 0 {
+        return Ok(0);
+    }
+
+    let mut deleted = 0u64;
+    let now = SystemTime::now();
+    let retention = Duration::from_secs(retention_seconds);
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(Error::other)?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(Error::other)? {
+        if deleted >= batch_size {
+            break;
+        }
+
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(UPLOAD_TEMP_PREFIX) {
+            continue;
+        }
+
+        let metadata = match entry.metadata().await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if now.duration_since(modified).unwrap_or_default() < retention {
+            continue;
+        }
+
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::other(error)),
+        }
+    }
+
+    Ok(deleted)
+}
+
+fn upload_too_large_error() -> Error {
+    Error::http_with_code(413, "Upload is too large", "upload_too_large")
+}
+
+fn upload_file_too_large_error() -> Error {
+    Error::http_with_code(413, "Uploaded file is too large", "uploaded_file_too_large")
+}
+
+fn upload_too_many_files_error() -> Error {
+    Error::http_with_code(413, "Too many uploaded files", "too_many_uploaded_files")
+}
+
+pub(crate) fn invalid_multipart_response(status: u16, error: impl std::fmt::Display) -> Response {
+    Error::http_with_code(
+        status,
+        format!("Invalid multipart request: {error}"),
+        "invalid_multipart_request",
+    )
+    .into_response()
+}
+
 /// Extracts the first file field from a multipart request.
 ///
 /// Returns `400 Bad Request` if no file field is found in the request body.
 impl<S> FromRequest<S> for UploadedFile
 where
     S: Send + Sync,
+    AppContext: FromRef<S>,
 {
     type Rejection = Response;
 
@@ -151,53 +367,72 @@ where
         req: axum::http::Request<axum::body::Body>,
         state: &S,
     ) -> std::result::Result<Self, Self::Rejection> {
+        let app = AppContext::from_ref(state);
+        let limits = UploadLimits::from_app(&app);
+
         let mut multipart = axum::extract::Multipart::from_request(req, state)
             .await
-            .map_err(|rejection| rejection.into_response())?;
+            .map_err(|rejection| {
+                invalid_multipart_response(rejection.status().as_u16(), rejection)
+            })?;
 
-        while let Ok(Some(field)) = multipart.next_field().await {
+        let mut counters = UploadCounters::default();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|error| invalid_multipart_response(400, error))?
+        {
             let field_name = field.name().unwrap_or("").to_string();
-            let original_name = field.file_name().map(|s| s.to_string());
-            let content_type = field.content_type().map(|s| s.to_string());
 
-            if original_name.is_some() {
-                let temp_id = uuid::Uuid::now_v7().to_string();
-                let temp_path = std::env::temp_dir().join(format!("forge-upload-{temp_id}"));
-
-                let mut file = tokio::fs::File::create(&temp_path)
+            if let Some(file) =
+                uploaded_file_from_multipart_field(field_name, field, limits, &mut counters)
                     .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
-
-                let mut size: u64 = 0;
-                let mut field = field;
-                while let Some(chunk) = field
-                    .chunk()
-                    .await
-                    .map_err(|_| StatusCode::BAD_REQUEST.into_response())?
-                {
-                    size += chunk.len() as u64;
-                    tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-                        .await
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
-                }
-
-                return Ok(UploadedFile {
-                    field_name,
-                    original_name,
-                    content_type,
-                    size,
-                    temp_path,
-                });
+                    .map_err(IntoResponse::into_response)?
+            {
+                return Ok(file);
             }
         }
 
-        Err(StatusCode::BAD_REQUEST.into_response())
+        Err(Error::http_with_code(400, "No file uploaded", "missing_uploaded_file").into_response())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::routing::post;
+    use serde_json::Value;
+    use tower::ServiceExt as _;
+
+    use crate::config::ConfigRepository;
+    use crate::foundation::{AppContext, Container};
+    use crate::validation::RuleRegistry;
+
     use super::*;
+
+    async fn accept_upload(file: UploadedFile) -> String {
+        file.original_name.unwrap_or_default()
+    }
+
+    fn app_with_storage_config(config: &str) -> AppContext {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("forge.toml"), config).unwrap();
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        AppContext::new(Container::new(), config, RuleRegistry::new()).unwrap()
+    }
+
+    fn multipart_request(body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(
+                header::CONTENT_TYPE,
+                "multipart/form-data; boundary=forge-test",
+            )
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
 
     fn make_upload(original_name: Option<&str>) -> UploadedFile {
         UploadedFile {
@@ -305,5 +540,101 @@ mod tests {
     fn storage_path_combines_dir_and_name() {
         let path = UploadedFile::storage_path("avatars", "uuid.png");
         assert_eq!(path, "avatars/uuid.png");
+    }
+
+    #[test]
+    fn upload_limits_resolve_from_storage_config() {
+        let config = StorageConfig {
+            max_upload_size_bytes: 1024,
+            max_upload_file_size_bytes: 512,
+            max_upload_files: 3,
+            ..StorageConfig::default()
+        };
+
+        assert_eq!(
+            UploadLimits::from_config(&config),
+            UploadLimits {
+                max_upload_size_bytes: 1024,
+                max_upload_file_size_bytes: 512,
+                max_upload_files: 3,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_stale_upload_temp_files_is_bounded_to_forge_uploads() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(format!("{UPLOAD_TEMP_PREFIX}stale"));
+        let fresh = dir.path().join(format!("{UPLOAD_TEMP_PREFIX}fresh"));
+        let unrelated = dir.path().join("other-temp-file");
+
+        std::fs::write(&stale, b"old").unwrap();
+        std::fs::write(&fresh, b"new").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        std::fs::write(&fresh, b"newer").unwrap();
+
+        let deleted = prune_stale_upload_temp_files_in_dir(dir.path(), 1, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[tokio::test]
+    async fn uploaded_file_returns_json_error_when_missing() {
+        let app = app_with_storage_config("[storage]\n");
+        let router = axum::Router::new()
+            .route("/", post(accept_upload))
+            .with_state(app);
+        let body = concat!(
+            "--forge-test\r\n",
+            "Content-Disposition: form-data; name=\"title\"\r\n\r\n",
+            "hello\r\n",
+            "--forge-test--\r\n"
+        );
+
+        let response = router.oneshot(multipart_request(body)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["message"], "No file uploaded");
+        assert_eq!(json["error_code"], "missing_uploaded_file");
+    }
+
+    #[tokio::test]
+    async fn uploaded_file_returns_json_error_when_file_size_is_exceeded() {
+        let app = app_with_storage_config(
+            r#"
+            [storage]
+            max_upload_file_size_bytes = 3
+            "#,
+        );
+        let router = axum::Router::new()
+            .route("/", post(accept_upload))
+            .with_state(app);
+        let body = concat!(
+            "--forge-test\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "abcdef\r\n",
+            "--forge-test--\r\n"
+        );
+
+        let response = router.oneshot(multipart_request(body)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["message"], "Uploaded file is too large");
+        assert_eq!(json["error_code"], "uploaded_file_too_large");
     }
 }

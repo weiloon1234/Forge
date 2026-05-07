@@ -977,28 +977,14 @@ fn generate_from_multipart_impl(
 
             match_arms.push(quote! {
                 #name => {
-                    if __field.file_name().is_some() {
-                        let __original_name = __field.file_name().map(|s| s.to_string());
-                        let __content_type = __field.content_type().map(|s| s.to_string());
-                        let __temp_id = ::uuid::Uuid::now_v7().to_string();
-                        let __temp_path = std::env::temp_dir().join(format!("forge-upload-{}", __temp_id));
-                        let mut __file = ::tokio::fs::File::create(&__temp_path).await
-                            .map_err(|e| ::forge::foundation::Error::message(format!("temp file error: {e}")))?;
-                        let mut __size: u64 = 0;
-                        let mut __field = __field;
-                        while let Some(__chunk) = __field.chunk().await
-                            .map_err(|e| ::forge::foundation::Error::message(format!("chunk error: {e}")))? {
-                            __size += __chunk.len() as u64;
-                            ::tokio::io::AsyncWriteExt::write_all(&mut __file, &__chunk).await
-                                .map_err(|e| ::forge::foundation::Error::message(format!("write error: {e}")))?;
-                        }
-                        #var_name.push(::forge::storage::UploadedFile {
-                            field_name: __field_name,
-                            original_name: __original_name,
-                            content_type: __content_type,
-                            size: __size,
-                            temp_path: __temp_path,
-                        });
+                    if let Some(__file) = ::forge::storage::UploadedFile::from_multipart_field(
+                        __field_name,
+                        __field,
+                        &mut __upload_counters,
+                    )
+                    .await?
+                    {
+                        #var_name.push(__file);
                     }
                 }
             });
@@ -1014,28 +1000,14 @@ fn generate_from_multipart_impl(
 
             match_arms.push(quote! {
                 #name => {
-                    if __field.file_name().is_some() {
-                        let __original_name = __field.file_name().map(|s| s.to_string());
-                        let __content_type = __field.content_type().map(|s| s.to_string());
-                        let __temp_id = ::uuid::Uuid::now_v7().to_string();
-                        let __temp_path = std::env::temp_dir().join(format!("forge-upload-{}", __temp_id));
-                        let mut __file = ::tokio::fs::File::create(&__temp_path).await
-                            .map_err(|e| ::forge::foundation::Error::message(format!("temp file error: {e}")))?;
-                        let mut __size: u64 = 0;
-                        let mut __field = __field;
-                        while let Some(__chunk) = __field.chunk().await
-                            .map_err(|e| ::forge::foundation::Error::message(format!("chunk error: {e}")))? {
-                            __size += __chunk.len() as u64;
-                            ::tokio::io::AsyncWriteExt::write_all(&mut __file, &__chunk).await
-                                .map_err(|e| ::forge::foundation::Error::message(format!("write error: {e}")))?;
-                        }
-                        #var_name = Some(::forge::storage::UploadedFile {
-                            field_name: __field_name,
-                            original_name: __original_name,
-                            content_type: __content_type,
-                            size: __size,
-                            temp_path: __temp_path,
-                        });
+                    if let Some(__file) = ::forge::storage::UploadedFile::from_multipart_field(
+                        __field_name,
+                        __field,
+                        &mut __upload_counters,
+                    )
+                    .await?
+                    {
+                        #var_name = Some(__file);
                     }
                 }
             });
@@ -1136,6 +1108,7 @@ fn generate_from_multipart_impl(
                 __multipart: &mut axum::extract::Multipart,
             ) -> ::forge::foundation::Result<Self> {
                 #(#var_decls)*
+                let mut __upload_counters = ::forge::storage::UploadCounters::default();
 
                 while let Some(__field) = __multipart.next_field().await
                     .map_err(|e| ::forge::foundation::Error::message(format!("multipart error: {e}")))?

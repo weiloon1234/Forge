@@ -5,11 +5,12 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
+use serde::Serialize;
 
 use super::metrics;
 use crate::auth::AccessScope;
 use crate::config::ObservabilityConfig;
-use crate::database::DbValue;
+use crate::database::{DbValue, SlowQueryEntry};
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::{
     wrap_http_authorize_callback, HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions,
@@ -109,6 +110,103 @@ impl ObservabilityOptions {
         opts.authorize = self.authorize.clone();
         opts
     }
+}
+
+#[derive(Debug, Serialize)]
+struct JobsStatsResponse {
+    stats: Vec<JobStatusCountResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct JobStatusCountResponse {
+    status: String,
+    count: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct JobsFailedResponse {
+    failed_jobs: Vec<FailedJobResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct FailedJobResponse {
+    job_id: String,
+    queue: String,
+    status: String,
+    attempt: Option<i64>,
+    error: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    duration_ms: Option<i64>,
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SlowQueriesResponse {
+    slow_queries: Vec<SlowQueryEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketChannelsResponse {
+    channels: Vec<crate::websocket::WebSocketChannelDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketPresenceResponse {
+    channel: String,
+    count: usize,
+    members: Vec<WebSocketPresenceMemberResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketPresenceMemberResponse {
+    actor_id: String,
+    joined_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketHistoryResponse {
+    channel: String,
+    messages: Vec<WebSocketHistoryMessageResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketHistoryMessageResponse {
+    channel: String,
+    event: String,
+    room: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketStatsResponse {
+    global: WebSocketGlobalStatsResponse,
+    channels: Vec<WebSocketChannelStatsResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketGlobalStatsResponse {
+    active_connections: u64,
+    active_subscriptions: u64,
+    subscriptions_total: u64,
+    unsubscribes_total: u64,
+    inbound_messages_total: u64,
+    outbound_messages_total: u64,
+    opened_total: u64,
+    closed_total: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSocketChannelStatsResponse {
+    id: String,
+    subscriptions_total: u64,
+    unsubscribes_total: u64,
+    active_subscriptions: u64,
+    inbound_messages_total: u64,
+    outbound_messages_total: u64,
 }
 
 pub(crate) fn register_observability_routes(
@@ -229,27 +327,20 @@ async fn jobs_stats(State(app): State<AppContext>) -> Response {
 
     match db
         .raw_query(
-            "SELECT status, COUNT(*) as count FROM job_history GROUP BY status",
+            "SELECT status, COUNT(*) as count FROM job_history GROUP BY status ORDER BY status",
             &[],
         )
         .await
     {
         Ok(rows) => {
-            let stats: Vec<serde_json::Value> = rows
+            let stats = rows
                 .iter()
-                .map(|row| {
-                    let status = match row.get("status") {
-                        Some(DbValue::Text(s)) => s.clone(),
-                        _ => "unknown".to_string(),
-                    };
-                    let count = match row.get("count") {
-                        Some(DbValue::Int64(n)) => *n,
-                        _ => 0,
-                    };
-                    serde_json::json!({ "status": status, "count": count })
+                .map(|row| JobStatusCountResponse {
+                    status: db_string(row.get("status")).unwrap_or_else(|| "unknown".into()),
+                    count: db_i64(row.get("count")).unwrap_or(0),
                 })
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({ "stats": stats }))).into_response()
+            (StatusCode::OK, Json(JobsStatsResponse { stats })).into_response()
         }
         Err(error) => internal_error_response(error),
     }
@@ -269,37 +360,35 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
         .await
     {
         Ok(rows) => {
-            let jobs: Vec<serde_json::Value> = rows
+            let failed_jobs = rows
                 .iter()
                 .map(|row| {
-                    let mut entry = serde_json::Map::new();
-                    for field in &[
-                        "job_id", "queue", "status", "attempt", "error",
-                        "started_at", "completed_at", "duration_ms", "created_at",
-                    ] {
-                        if let Some(value) = row.get(field) {
-                            entry.insert(
-                                field.to_string(),
-                                db_value_to_json(value),
-                            );
-                        }
+                    FailedJobResponse {
+                        job_id: db_string(row.get("job_id")).unwrap_or_else(|| "unknown".into()),
+                        queue: db_string(row.get("queue")).unwrap_or_else(|| "unknown".into()),
+                        status: db_string(row.get("status")).unwrap_or_else(|| "unknown".into()),
+                        attempt: db_i64(row.get("attempt")),
+                        error: db_string(row.get("error")),
+                        started_at: db_string(row.get("started_at")),
+                        completed_at: db_string(row.get("completed_at")),
+                        duration_ms: db_i64(row.get("duration_ms")),
+                        created_at: db_string(row.get("created_at")),
                     }
-                    serde_json::Value::Object(entry)
                 })
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({ "failed_jobs": jobs }))).into_response()
+            (
+                StatusCode::OK,
+                Json(JobsFailedResponse { failed_jobs }),
+            )
+                .into_response()
         }
         Err(error) => internal_error_response(error),
     }
 }
 
 async fn slow_queries(State(_app): State<AppContext>) -> Response {
-    let queries = crate::database::recent_slow_queries();
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "slow_queries": queries })),
-    )
-        .into_response()
+    let slow_queries = crate::database::recent_slow_queries();
+    (StatusCode::OK, Json(SlowQueriesResponse { slow_queries })).into_response()
 }
 
 async fn ws_channels(State(app): State<AppContext>) -> Response {
@@ -309,7 +398,9 @@ async fn ws_channels(State(app): State<AppContext>) -> Response {
     };
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "channels": registry.descriptors() })),
+        Json(WebSocketChannelsResponse {
+            channels: registry.descriptors(),
+        }),
     )
         .into_response()
 }
@@ -352,38 +443,46 @@ async fn ws_presence(
         Err(error) => return internal_error_response(error),
     };
 
-    let members: Vec<serde_json::Value> = raw
+    let members: Vec<WebSocketPresenceMemberResponse> = raw
         .iter()
         .filter_map(|s| serde_json::from_str::<crate::websocket::PresenceInfo>(s).ok())
-        .map(|info| {
-            serde_json::json!({
-                "actor_id": info.actor_id,
-                "joined_at": info.joined_at,
-            })
+        .map(|info| WebSocketPresenceMemberResponse {
+            actor_id: info.actor_id,
+            joined_at: info.joined_at,
         })
         .collect();
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "channel": channel.as_str(),
-            "count": members.len(),
-            "members": members,
-        })),
+        Json(WebSocketPresenceResponse {
+            channel: channel.as_str().to_string(),
+            count: members.len(),
+            members,
+        }),
     )
         .into_response()
 }
 
-fn db_value_to_json(value: &DbValue) -> serde_json::Value {
+fn db_string(value: Option<&DbValue>) -> Option<String> {
     match value {
-        DbValue::Text(s) => serde_json::Value::String(s.clone()),
-        DbValue::Int32(n) => serde_json::json!(n),
-        DbValue::Int64(n) => serde_json::json!(n),
-        DbValue::Bool(b) => serde_json::json!(b),
-        DbValue::Float64(f) => serde_json::json!(f),
-        DbValue::Json(v) => v.clone(),
-        DbValue::Null(_) => serde_json::Value::Null,
-        _ => serde_json::Value::String(format!("{value:?}")),
+        Some(DbValue::Text(value)) => Some(value.clone()),
+        Some(DbValue::Uuid(value)) => Some(value.to_string()),
+        Some(DbValue::TimestampTz(value)) => Some(value.to_string()),
+        Some(DbValue::Timestamp(value)) => Some(value.to_string()),
+        Some(DbValue::Date(value)) => Some(value.to_string()),
+        Some(DbValue::Time(value)) => Some(value.to_string()),
+        Some(DbValue::Null(_)) | None => None,
+        Some(value) => Some(value.relation_key()),
+    }
+}
+
+fn db_i64(value: Option<&DbValue>) -> Option<i64> {
+    match value {
+        Some(DbValue::Int16(value)) => Some(i64::from(*value)),
+        Some(DbValue::Int32(value)) => Some(i64::from(*value)),
+        Some(DbValue::Int64(value)) => Some(*value),
+        Some(DbValue::Null(_)) | None => None,
+        _ => None,
     }
 }
 
@@ -484,44 +583,34 @@ async fn ws_history(
         Err(error) => return internal_error_response(error),
     };
 
-    let messages: Vec<serde_json::Value> = entries
+    let messages: Vec<WebSocketHistoryMessageResponse> = entries
         .iter()
         .filter_map(|raw| {
             let message = serde_json::from_str::<crate::websocket::ServerMessage>(raw).ok()?;
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "channel".to_string(),
-                serde_json::Value::String(message.channel.as_str().to_string()),
-            );
-            obj.insert(
-                "event".to_string(),
-                serde_json::Value::String(message.event.as_str().to_string()),
-            );
-            obj.insert(
-                "room".to_string(),
-                match message.room {
-                    Some(r) => serde_json::Value::String(r),
-                    None => serde_json::Value::Null,
-                },
-            );
-            if include_payloads {
-                obj.insert("payload".to_string(), message.payload);
+            let (payload, payload_size_bytes) = if include_payloads {
+                (Some(message.payload), None)
             } else {
-                let size = serde_json::to_vec(&message.payload)
-                    .map(|v| v.len() as u64)
+                let payload_size_bytes = serde_json::to_vec(&message.payload)
+                    .map(|value| value.len() as u64)
                     .unwrap_or(0);
-                obj.insert("payload_size_bytes".to_string(), size.into());
-            }
-            Some(serde_json::Value::Object(obj))
+                (None, Some(payload_size_bytes))
+            };
+            Some(WebSocketHistoryMessageResponse {
+                channel: message.channel.as_str().to_string(),
+                event: message.event.as_str().to_string(),
+                room: message.room,
+                payload,
+                payload_size_bytes,
+            })
         })
         .collect();
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "channel": channel.as_str(),
-            "messages": messages,
-        })),
+        Json(WebSocketHistoryResponse {
+            channel: channel.as_str().to_string(),
+            messages,
+        }),
     )
         .into_response()
 }
@@ -533,36 +622,34 @@ async fn ws_stats(State(app): State<AppContext>) -> Response {
     };
     let ws = diagnostics.snapshot().websocket;
 
-    let channels: Vec<serde_json::Value> = ws
+    let channels: Vec<WebSocketChannelStatsResponse> = ws
         .channels
         .iter()
-        .map(|c| {
-            serde_json::json!({
-                "id": c.id.as_str(),
-                "subscriptions_total": c.subscriptions_total,
-                "unsubscribes_total": c.unsubscribes_total,
-                "active_subscriptions": c.active_subscriptions,
-                "inbound_messages_total": c.inbound_messages_total,
-                "outbound_messages_total": c.outbound_messages_total,
-            })
+        .map(|channel| WebSocketChannelStatsResponse {
+            id: channel.id.as_str().to_string(),
+            subscriptions_total: channel.subscriptions_total,
+            unsubscribes_total: channel.unsubscribes_total,
+            active_subscriptions: channel.active_subscriptions,
+            inbound_messages_total: channel.inbound_messages_total,
+            outbound_messages_total: channel.outbound_messages_total,
         })
         .collect();
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "global": {
-                "active_connections": ws.active_connections,
-                "active_subscriptions": ws.active_subscriptions,
-                "subscriptions_total": ws.subscriptions_total,
-                "unsubscribes_total": ws.unsubscribes_total,
-                "inbound_messages_total": ws.inbound_messages_total,
-                "outbound_messages_total": ws.outbound_messages_total,
-                "opened_total": ws.opened_total,
-                "closed_total": ws.closed_total,
+        Json(WebSocketStatsResponse {
+            global: WebSocketGlobalStatsResponse {
+                active_connections: ws.active_connections,
+                active_subscriptions: ws.active_subscriptions,
+                subscriptions_total: ws.subscriptions_total,
+                unsubscribes_total: ws.unsubscribes_total,
+                inbound_messages_total: ws.inbound_messages_total,
+                outbound_messages_total: ws.outbound_messages_total,
+                opened_total: ws.opened_total,
+                closed_total: ws.closed_total,
             },
-            "channels": channels,
-        })),
+            channels,
+        }),
     )
         .into_response()
 }

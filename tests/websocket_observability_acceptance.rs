@@ -2,7 +2,80 @@ use axum::http::StatusCode;
 use forge::support::{ChannelId, GuardId, PermissionId};
 use forge::testing::TestApp;
 use forge::websocket::WebSocketChannelOptions;
+use serde::Deserialize;
 use serde_json::Value;
+
+#[derive(Debug, Deserialize)]
+struct WebSocketChannelsContract {
+    channels: Vec<WebSocketChannelConfigContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketChannelConfigContract {
+    id: String,
+    presence: bool,
+    replay_count: u32,
+    allow_client_events: bool,
+    requires_auth: bool,
+    guard: Option<String>,
+    permissions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketPresenceContract {
+    channel: String,
+    count: usize,
+    members: Vec<WebSocketPresenceMemberContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketPresenceMemberContract {
+    actor_id: String,
+    joined_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketHistoryContract {
+    channel: String,
+    messages: Vec<WebSocketHistoryMessageContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketHistoryMessageContract {
+    channel: String,
+    event: String,
+    room: Option<String>,
+    payload: Option<Value>,
+    payload_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketStatsContract {
+    global: WebSocketGlobalStatsContract,
+    channels: Vec<WebSocketChannelStatsContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketGlobalStatsContract {
+    active_connections: u64,
+    active_subscriptions: u64,
+    subscriptions_total: u64,
+    unsubscribes_total: u64,
+    inbound_messages_total: u64,
+    outbound_messages_total: u64,
+    opened_total: u64,
+    closed_total: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSocketChannelStatsContract {
+    id: String,
+    subscriptions_total: u64,
+    unsubscribes_total: u64,
+    active_subscriptions: u64,
+    inbound_messages_total: u64,
+    outbound_messages_total: u64,
+}
 
 #[tokio::test]
 async fn ws_presence_endpoint_returns_members_for_presence_channel() {
@@ -26,13 +99,12 @@ async fn ws_presence_endpoint_returns_members_for_presence_channel() {
 
     let response = app.client().get("/_forge/ws/presence/team").send().await;
     assert_eq!(response.status(), 200);
-    let body: Value = response.json();
-    assert_eq!(body["channel"], "team");
-    assert_eq!(body["count"], 1);
-    let members = body["members"].as_array().unwrap();
-    assert_eq!(members.len(), 1);
-    assert_eq!(members[0]["actor_id"], "user_1");
-    assert_eq!(members[0]["joined_at"], 1_713_000_000);
+    let body: WebSocketPresenceContract = response.json();
+    assert_eq!(body.channel, "team");
+    assert_eq!(body.count, 1);
+    assert_eq!(body.members.len(), 1);
+    assert_eq!(body.members[0].actor_id, "user_1");
+    assert_eq!(body.members[0].joined_at, 1_713_000_000);
 }
 
 #[tokio::test]
@@ -85,27 +157,28 @@ async fn ws_channels_endpoint_lists_registered_channels() {
 
     let response = app.client().get("/_forge/ws/channels").send().await;
     assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json();
-    let channels = body["channels"].as_array().expect("channels array");
-    assert_eq!(channels.len(), 2);
+    let body: WebSocketChannelsContract = response.json();
+    assert_eq!(body.channels.len(), 2);
 
-    let chat = channels
+    let chat = body
+        .channels
         .iter()
-        .find(|c| c["id"] == "chat")
+        .find(|channel| channel.id == "chat")
         .expect("chat present");
-    assert_eq!(chat["presence"], Value::Bool(true));
-    assert_eq!(chat["replay_count"], 10);
-    assert_eq!(chat["allow_client_events"], Value::Bool(false));
-    assert_eq!(chat["requires_auth"], Value::Bool(true));
-    assert_eq!(chat["guard"], "api");
-    assert_eq!(chat["permissions"], Value::Array(vec!["chat:read".into()]));
+    assert!(chat.presence);
+    assert_eq!(chat.replay_count, 10);
+    assert!(!chat.allow_client_events);
+    assert!(chat.requires_auth);
+    assert_eq!(chat.guard.as_deref(), Some("api"));
+    assert_eq!(chat.permissions, vec!["chat:read"]);
 
-    let public = channels
+    let public = body
+        .channels
         .iter()
-        .find(|c| c["id"] == "public")
+        .find(|channel| channel.id == "public")
         .expect("public present");
-    assert_eq!(public["presence"], Value::Bool(false));
-    assert_eq!(public["requires_auth"], Value::Bool(false));
+    assert!(!public.presence);
+    assert!(!public.requires_auth);
 }
 
 #[tokio::test]
@@ -140,17 +213,18 @@ async fn ws_history_redacts_payloads_by_default() {
         .send()
         .await;
     assert_eq!(response.status(), 200);
-    let body: Value = response.json();
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 1);
-    let message = &messages[0];
-    assert_eq!(message["channel"], "history-redact");
-    assert_eq!(message["event"], "created");
+    let body: WebSocketHistoryContract = response.json();
+    assert_eq!(body.channel, "history-redact");
+    assert_eq!(body.messages.len(), 1);
+    let message = &body.messages[0];
+    assert_eq!(message.channel, "history-redact");
+    assert_eq!(message.event, "created");
+    assert_eq!(message.room, None);
     assert!(
-        message.get("payload").is_none(),
+        message.payload.is_none(),
         "payload must be redacted by default"
     );
-    assert!(message["payload_size_bytes"].as_u64().unwrap() > 0);
+    assert!(message.payload_size_bytes.unwrap() > 0);
 }
 
 #[tokio::test]
@@ -197,9 +271,13 @@ include_payloads = true
         .send()
         .await;
     assert_eq!(response.status(), 200);
-    let body: Value = response.json();
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages[0]["payload"]["secret"], "hello world");
+    let body: WebSocketHistoryContract = response.json();
+    assert_eq!(body.channel, "history-full");
+    assert_eq!(
+        body.messages[0].payload.as_ref().unwrap()["secret"],
+        "hello world"
+    );
+    assert_eq!(body.messages[0].payload_size_bytes, None);
 }
 
 #[tokio::test]
@@ -248,30 +326,49 @@ async fn ws_stats_exposes_global_and_per_channel_counters() {
     // Drive traffic via the diagnostics API directly.
     let diagnostics = app.app().diagnostics().unwrap();
     diagnostics.record_websocket_subscription_opened_on(&ChannelId::new("alpha"));
+    diagnostics.record_websocket_subscription_closed_on(&ChannelId::new("alpha"));
     diagnostics.record_websocket_inbound_message_on(&ChannelId::new("alpha"));
     diagnostics.record_websocket_outbound_message_on(&ChannelId::new("alpha"));
     diagnostics.record_websocket_outbound_message_on(&ChannelId::new("alpha"));
 
     let response = app.client().get("/_forge/ws/stats").send().await;
     assert_eq!(response.status(), 200);
-    let body: Value = response.json();
+    let body: WebSocketStatsContract = response.json();
 
-    assert_eq!(body["global"]["active_subscriptions"], 1);
-    assert_eq!(body["global"]["inbound_messages_total"], 1);
-    assert_eq!(body["global"]["outbound_messages_total"], 2);
+    assert_eq!(body.global.active_connections, 0);
+    assert_eq!(body.global.subscriptions_total, 1);
+    assert_eq!(body.global.unsubscribes_total, 1);
+    assert_eq!(body.global.active_subscriptions, 0);
+    assert_eq!(body.global.inbound_messages_total, 1);
+    assert_eq!(body.global.outbound_messages_total, 2);
+    assert_eq!(body.global.opened_total, 0);
+    assert_eq!(body.global.closed_total, 0);
 
-    let channels = body["channels"].as_array().unwrap();
-    assert_eq!(channels.len(), 2, "registered-but-idle channels appear too");
+    assert_eq!(
+        body.channels.len(),
+        2,
+        "registered-but-idle channels appear too"
+    );
 
-    let alpha = channels.iter().find(|c| c["id"] == "alpha").unwrap();
-    assert_eq!(alpha["subscriptions_total"], 1);
-    assert_eq!(alpha["active_subscriptions"], 1);
-    assert_eq!(alpha["inbound_messages_total"], 1);
-    assert_eq!(alpha["outbound_messages_total"], 2);
+    let alpha = body
+        .channels
+        .iter()
+        .find(|channel| channel.id == "alpha")
+        .unwrap();
+    assert_eq!(alpha.subscriptions_total, 1);
+    assert_eq!(alpha.unsubscribes_total, 1);
+    assert_eq!(alpha.active_subscriptions, 0);
+    assert_eq!(alpha.inbound_messages_total, 1);
+    assert_eq!(alpha.outbound_messages_total, 2);
 
-    let idle = channels.iter().find(|c| c["id"] == "idle").unwrap();
-    assert_eq!(idle["subscriptions_total"], 0);
-    assert_eq!(idle["outbound_messages_total"], 0);
+    let idle = body
+        .channels
+        .iter()
+        .find(|channel| channel.id == "idle")
+        .unwrap();
+    assert_eq!(idle.subscriptions_total, 0);
+    assert_eq!(idle.unsubscribes_total, 0);
+    assert_eq!(idle.outbound_messages_total, 0);
 }
 
 #[tokio::test]

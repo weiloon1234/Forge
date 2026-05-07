@@ -1,12 +1,16 @@
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use forge::prelude::*;
+use forge::testing::TestApp;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tempfile::tempdir;
+use tokio::sync::Mutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -210,6 +214,17 @@ fn free_port() -> u16 {
         .port()
 }
 
+fn database_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn postgres_url() -> Option<String> {
+    std::env::var("FORGE_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn write_http_config(dir: &Path, server_port: u16, namespace: &str) {
     fs::write(
         dir.join("00-runtime.toml"),
@@ -225,6 +240,88 @@ fn write_http_config(dir: &Path, server_port: u16, namespace: &str) {
         ),
     )
     .unwrap();
+}
+
+fn write_database_config(dir: &Path, url: &str) {
+    fs::write(
+        dir.join("00-database.toml"),
+        format!(
+            r#"
+            [database]
+            url = "{url}"
+        "#
+        ),
+    )
+    .unwrap();
+}
+
+async fn recreate_job_history_table(db: &DatabaseManager) {
+    db.raw_execute("DROP TABLE IF EXISTS job_history", &[])
+        .await
+        .unwrap();
+    db.raw_execute(
+        r#"
+        CREATE TABLE job_history (
+            id UUID PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            queue TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload JSONB,
+            attempt INT NOT NULL DEFAULT 1,
+            error TEXT,
+            started_at TIMESTAMPTZ,
+            completed_at TIMESTAMPTZ,
+            duration_ms BIGINT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+        &[],
+    )
+    .await
+    .unwrap();
+}
+
+#[derive(Debug, Deserialize)]
+struct JobsStatsContract {
+    stats: Vec<JobStatusContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobStatusContract {
+    status: String,
+    count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobsFailedContract {
+    failed_jobs: Vec<FailedJobContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FailedJobContract {
+    job_id: String,
+    queue: String,
+    status: String,
+    attempt: Option<i64>,
+    error: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    duration_ms: Option<i64>,
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlowQueriesContract {
+    slow_queries: Vec<SlowQueryContract>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct SlowQueryContract {
+    sql: String,
+    duration_ms: u64,
+    label: Option<String>,
+    recorded_at: String,
 }
 
 fn write_websocket_config(dir: &Path, websocket_port: u16, namespace: &str) {
@@ -408,6 +505,13 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
     assert!(!snapshot.http.duration_ms.buckets.is_empty());
     assert!(snapshot.auth.success_total >= 1);
     assert!(snapshot.auth.unauthorized_total >= 1);
+    assert_eq!(snapshot.jobs.enqueued_total, 0);
+    assert_eq!(snapshot.jobs.leased_total, 0);
+    assert_eq!(snapshot.jobs.expired_requeues_total, 0);
+    assert_eq!(snapshot.scheduler.leadership_acquired_total, 0);
+    assert_eq!(snapshot.scheduler.leadership_lost_total, 0);
+    assert_eq!(snapshot.websocket.subscriptions_total, 0);
+    assert_eq!(snapshot.websocket.unsubscribes_total, 0);
 
     let metrics = client
         .get(format!("{base_url}/_forge/metrics"))
@@ -437,6 +541,79 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
     assert!(metrics_body.contains("forge_jobs_total{outcome=\"expired_lease_requeued\"}"));
 
     server.abort();
+}
+
+#[tokio::test]
+async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
+    let Some(url) = postgres_url() else {
+        return;
+    };
+    let _guard = database_lock().lock().await;
+    let config_dir = tempdir().unwrap();
+    write_database_config(config_dir.path(), &url);
+
+    let app = TestApp::builder()
+        .load_config_dir(config_dir.path())
+        .enable_observability()
+        .build()
+        .await;
+    let db = app.app().database().unwrap();
+    recreate_job_history_table(db.as_ref()).await;
+
+    db.raw_execute(
+        r#"
+        INSERT INTO job_history
+            (id, job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at)
+        VALUES
+            ('00000000-0000-0000-0000-000000000001', 'job-succeeded', 'default', 'succeeded', 1, NULL, '2026-04-08T12:00:00Z', '2026-04-08T12:00:01Z', 100, '2026-04-08T12:00:01Z'),
+            ('00000000-0000-0000-0000-000000000002', 'job-retried', 'emails', 'retried', 2, 'retry me', '2026-04-08T12:01:00Z', '2026-04-08T12:01:03Z', 3000, '2026-04-08T12:01:03Z'),
+            ('00000000-0000-0000-0000-000000000003', 'job-dead', 'critical', 'dead_lettered', 3, NULL, NULL, NULL, NULL, '2026-04-08T12:02:00Z')
+        "#,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let stats_response = app.client().get("/_forge/jobs/stats").send().await;
+    assert_eq!(stats_response.status(), reqwest::StatusCode::OK);
+    let stats: JobsStatsContract = stats_response.json();
+    assert_eq!(
+        stats
+            .stats
+            .iter()
+            .map(|entry| (entry.status.as_str(), entry.count))
+            .collect::<Vec<_>>(),
+        vec![("dead_lettered", 1), ("retried", 1), ("succeeded", 1)]
+    );
+
+    let failed_response = app.client().get("/_forge/jobs/failed").send().await;
+    assert_eq!(failed_response.status(), reqwest::StatusCode::OK);
+    let failed: JobsFailedContract = failed_response.json();
+    assert_eq!(failed.failed_jobs.len(), 2);
+    assert_eq!(failed.failed_jobs[0].job_id, "job-dead");
+    assert_eq!(failed.failed_jobs[0].queue, "critical");
+    assert_eq!(failed.failed_jobs[0].status, "dead_lettered");
+    assert_eq!(failed.failed_jobs[0].attempt, Some(3));
+    assert_eq!(failed.failed_jobs[0].error, None);
+    assert_eq!(failed.failed_jobs[0].started_at, None);
+    assert_eq!(failed.failed_jobs[0].completed_at, None);
+    assert_eq!(failed.failed_jobs[0].duration_ms, None);
+    DateTime::parse(failed.failed_jobs[0].created_at.as_deref().unwrap()).unwrap();
+
+    assert_eq!(failed.failed_jobs[1].job_id, "job-retried");
+    assert_eq!(failed.failed_jobs[1].queue, "emails");
+    assert_eq!(failed.failed_jobs[1].status, "retried");
+    assert_eq!(failed.failed_jobs[1].attempt, Some(2));
+    assert_eq!(failed.failed_jobs[1].error.as_deref(), Some("retry me"));
+    assert_eq!(failed.failed_jobs[1].duration_ms, Some(3000));
+    DateTime::parse(failed.failed_jobs[1].started_at.as_deref().unwrap()).unwrap();
+    DateTime::parse(failed.failed_jobs[1].completed_at.as_deref().unwrap()).unwrap();
+    DateTime::parse(failed.failed_jobs[1].created_at.as_deref().unwrap()).unwrap();
+
+    let sql_response = app.client().get("/_forge/sql").send().await;
+    assert_eq!(sql_response.status(), reqwest::StatusCode::OK);
+    let slow_queries: SlowQueriesContract = sql_response.json();
+    let _ = slow_queries.slow_queries;
 }
 
 #[tokio::test]
@@ -630,9 +807,11 @@ async fn diagnostics_track_websocket_job_and_scheduler_activity() {
 
     let snapshot = scheduler_app.diagnostics().unwrap().snapshot();
     assert_eq!(snapshot.jobs.enqueued_total, 1);
+    assert_eq!(snapshot.jobs.leased_total, 1);
     assert_eq!(snapshot.jobs.started_total, 1);
     assert_eq!(snapshot.jobs.succeeded_total, 1);
     assert_eq!(snapshot.jobs.retried_total, 0);
+    assert_eq!(snapshot.jobs.expired_requeues_total, 0);
     assert_eq!(snapshot.jobs.dead_lettered_total, 0);
     assert_eq!(snapshot.scheduler.ticks_total, 1);
     assert_eq!(snapshot.scheduler.executed_schedules_total, 1);

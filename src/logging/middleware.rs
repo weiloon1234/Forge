@@ -124,14 +124,18 @@ pub(crate) async fn request_context_middleware(
     .await;
     let status = response.status();
     if let Ok(diagnostics) = app.diagnostics() {
-        diagnostics.record_http_request(HttpRequestRecord {
-            method: method.to_string(),
-            path: route_path,
-            status,
-            duration_ms,
-            request_id: current_request.request_id.clone(),
-            trace_id: Some(request_id.clone()),
-        });
+        if should_sample_http_request(&app, &path) {
+            diagnostics.record_http_request(HttpRequestRecord {
+                method: method.to_string(),
+                path: route_path,
+                status,
+                duration_ms,
+                request_id: current_request.request_id.clone(),
+                trace_id: Some(request_id.clone()),
+            });
+        } else {
+            diagnostics.record_http_response_with_duration(status, duration_ms);
+        }
     }
 
     tracing::info!(
@@ -145,6 +149,34 @@ pub(crate) async fn request_context_middleware(
     );
 
     response
+}
+
+fn should_sample_http_request(app: &AppContext, path: &str) -> bool {
+    app.config()
+        .observability()
+        .map(|config| !path_is_under_observability_base(path, &config.base_path))
+        .unwrap_or(true)
+}
+
+fn path_is_under_observability_base(path: &str, base_path: &str) -> bool {
+    let base_path = normalized_observability_base_path(base_path);
+    if base_path == "/" {
+        return false;
+    }
+
+    path == base_path
+        || path
+            .strip_prefix(&base_path)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn normalized_observability_base_path(base_path: &str) -> String {
+    let trimmed = base_path.trim_end_matches('/');
+    match trimmed {
+        "" => "/".to_string(),
+        value if value.starts_with('/') => value.to_string(),
+        value => format!("/{value}"),
+    }
 }
 
 pub(crate) async fn request_origin_middleware(
@@ -192,7 +224,7 @@ mod tests {
     use axum::routing::get;
     use tower::ServiceExt;
 
-    use super::request_context_middleware;
+    use super::{path_is_under_observability_base, request_context_middleware};
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
     use crate::logging::{
@@ -390,5 +422,53 @@ mod tests {
         let http = diagnostics.http_observability_snapshot();
         assert_eq!(http.top_slowest_routes[0].path, "/users/{id}");
         assert_eq!(http.top_slowest_routes[0].requests_total, 1);
+    }
+
+    #[tokio::test]
+    async fn http_observability_samples_skip_forge_observability_routes() {
+        let reporter = Arc::new(StubReporter::default());
+        let (app, diagnostics) = test_app_with_reporter(reporter);
+        let router = axum::Router::new()
+            .route("/_forge/runtime", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                app,
+                request_context_middleware,
+            ));
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/_forge/runtime")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let counters = diagnostics.snapshot().http;
+        assert_eq!(counters.requests_total, 1);
+        assert_eq!(counters.success_total, 1);
+        assert_eq!(counters.duration_ms.count, 1);
+
+        let http = diagnostics.http_observability_snapshot();
+        assert_eq!(http.stats.retained_request_count, 0);
+        assert!(http.top_slowest_routes.is_empty());
+    }
+
+    #[test]
+    fn observability_path_filter_matches_only_configured_base_path() {
+        assert!(path_is_under_observability_base(
+            "/_forge/http/stats",
+            "/_forge"
+        ));
+        assert!(path_is_under_observability_base("/_ops/ws/stats", "/_ops/"));
+        assert!(!path_is_under_observability_base(
+            "/_forge-admin",
+            "/_forge"
+        ));
+        assert!(!path_is_under_observability_base("/users", "/_forge"));
+        assert!(!path_is_under_observability_base("/users", "/"));
     }
 }

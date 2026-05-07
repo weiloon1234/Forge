@@ -628,10 +628,10 @@ async fn observability_endpoints_expose_liveness_readiness_and_runtime_snapshot(
         .await
         .unwrap();
     assert!(http_stats.stats.requests_total >= snapshot.http.requests_total);
-    assert!(http_stats.stats.retained_request_count >= 5);
+    assert!(http_stats.stats.retained_request_count >= 3);
     assert_eq!(http_stats.stats.retention_capacity, 500);
     assert_eq!(http_stats.stats.slow_request_threshold_ms, 1_000);
-    assert!(http_stats.stats.route_count >= 3);
+    assert!(http_stats.stats.route_count >= 2);
     assert!(http_stats.stats.error_request_count >= 1);
     assert!(!http_stats.top_slowest_routes.is_empty());
     assert!(http_stats

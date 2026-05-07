@@ -2155,6 +2155,9 @@ bounded HTTP route rankings, recent slow requests, and recent error samples for 
 `/_forge/metrics` exposes runtime counter families in Prometheus text format, and new series are
 additive so existing metric names remain stable.
 
+HTTP runtime counters include observability endpoint traffic, while `/_forge/http/stats` rankings
+retain application routes only so dashboard polling does not crowd out useful samples.
+
 `/_forge/sql` preserves the existing `slow_queries` array and additively returns slow-query stats,
 top-slowest ranking, and potential HTTP N+1 suspects grouped by repeated SQL fingerprint.
 

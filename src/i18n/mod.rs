@@ -12,6 +12,9 @@ use serde_json::Value;
 use crate::config::I18nConfig;
 use crate::foundation::{Error, Result};
 
+const MAX_ACCEPT_LANGUAGE_CANDIDATES: usize = 32;
+const MAX_LANGUAGE_TAG_BYTES: usize = 64;
+
 /// Translate a key using the [`I18n`] extractor with named parameters.
 ///
 /// ```
@@ -162,8 +165,14 @@ impl I18nManager {
     /// or falls back to the default locale.
     pub fn resolve_locale(&self, accept_language: &str) -> String {
         for tag in parse_accept_language(accept_language) {
-            if self.has_locale(&tag) {
-                return tag;
+            if tag == "*" {
+                if self.has_locale(&self.default_locale) {
+                    return self.default_locale.clone();
+                }
+                continue;
+            }
+            if let Some(locale) = self.match_locale(&tag) {
+                return locale;
             }
         }
         self.default_locale.clone()
@@ -177,6 +186,22 @@ impl I18nManager {
     /// Whether a catalog exists for the given locale.
     pub fn has_locale(&self, locale: &str) -> bool {
         self.catalogs.contains_key(locale)
+    }
+
+    fn match_locale(&self, tag: &str) -> Option<String> {
+        if self.has_locale(tag) {
+            return Some(tag.to_string());
+        }
+
+        let mut candidate = tag;
+        while let Some((base, _rest)) = candidate.rsplit_once('-') {
+            if self.has_locale(base) {
+                return Some(base.to_string());
+            }
+            candidate = base;
+        }
+
+        None
     }
 
     /// List of all loaded locale names.
@@ -264,22 +289,87 @@ fn interpolate(template: &str, values: &[(&str, &str)]) -> String {
     result
 }
 
-/// Parse an `Accept-Language` header value into a list of locale tags.
-///
-/// Simple parsing: splits by `,`, strips quality values (`;q=...`),
-/// trims whitespace. Does not implement full RFC 7231 quality sorting.
+#[derive(Debug, PartialEq, Eq)]
+struct LanguagePreference {
+    order: usize,
+    quality: u16,
+    tag: String,
+}
+
+/// Parse an `Accept-Language` header value into quality-sorted locale tags.
 fn parse_accept_language(header: &str) -> Vec<String> {
-    header
+    let mut preferences = header
         .split(',')
-        .filter_map(|tag| {
-            let tag = tag.split(';').next()?.trim().to_string();
-            if tag.is_empty() {
-                None
-            } else {
-                Some(tag)
+        .take(MAX_ACCEPT_LANGUAGE_CANDIDATES)
+        .enumerate()
+        .filter_map(|(order, value)| {
+            let mut parts = value.split(';');
+            let tag = normalize_language_tag(parts.next()?.trim())?;
+            let mut quality = 1000;
+            for parameter in parts {
+                let parameter = parameter.trim();
+                let Some((name, value)) = parameter.split_once('=') else {
+                    continue;
+                };
+                if name.trim().eq_ignore_ascii_case("q") {
+                    quality = parse_quality(value.trim())?;
+                    break;
+                }
             }
+            (quality > 0).then_some(LanguagePreference {
+                order,
+                quality,
+                tag,
+            })
         })
+        .collect::<Vec<_>>();
+
+    preferences.sort_by(|left, right| {
+        right
+            .quality
+            .cmp(&left.quality)
+            .then_with(|| left.order.cmp(&right.order))
+    });
+    preferences
+        .into_iter()
+        .map(|preference| preference.tag)
         .collect()
+}
+
+fn normalize_language_tag(tag: &str) -> Option<String> {
+    let tag = tag.trim();
+    if tag == "*" {
+        return Some(tag.to_string());
+    }
+    if tag.is_empty() || tag.len() > MAX_LANGUAGE_TAG_BYTES {
+        return None;
+    }
+    if tag
+        .split('-')
+        .any(|segment| segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_alphanumeric()))
+    {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+fn parse_quality(value: &str) -> Option<u16> {
+    let value = value.trim();
+    if value == "1" || value == "1.0" || value == "1.00" || value == "1.000" {
+        return Some(1000);
+    }
+    if value == "0" {
+        return Some(0);
+    }
+    let fraction = value.strip_prefix("0.")?;
+    if fraction.is_empty() || fraction.len() > 3 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut quality = fraction.parse::<u16>().ok()?;
+    for _ in fraction.len()..3 {
+        quality *= 10;
+    }
+    Some(quality)
 }
 
 #[cfg(test)]
@@ -437,6 +527,26 @@ mod tests {
     }
 
     #[test]
+    fn resolves_locale_by_accept_language_quality_and_base_tag() {
+        let manager = I18nManager {
+            default_locale: "en".to_string(),
+            fallback_locale: "en".to_string(),
+            catalogs: {
+                let mut m = HashMap::new();
+                m.insert("en".to_string(), HashMap::new());
+                m.insert("ms".to_string(), HashMap::new());
+                m.insert("zh".to_string(), HashMap::new());
+                m
+            },
+        };
+
+        assert_eq!(manager.resolve_locale("ms;q=0.4,en;q=0.8"), "en");
+        assert_eq!(manager.resolve_locale("zh-CN;q=0.9,en;q=0.8"), "zh");
+        assert_eq!(manager.resolve_locale("fr;q=0.9,*;q=0.5"), "en");
+        assert_eq!(manager.resolve_locale("ms;q=0,en;q=0.8"), "en");
+    }
+
+    #[test]
     fn flattens_nested_json() {
         let dir = tempdir().unwrap();
         fs::create_dir(dir.path().join("en")).unwrap();
@@ -486,6 +596,18 @@ mod tests {
     fn parse_accept_language_basic() {
         let tags = parse_accept_language("en-US,en;q=0.9,ms;q=0.8");
         assert_eq!(tags, vec!["en-US", "en", "ms"]);
+    }
+
+    #[test]
+    fn parse_accept_language_sorts_by_quality_and_preserves_ties() {
+        let tags = parse_accept_language("ms;q=0.4,zh-CN;q=0.9,en;q=0.9,fr;q=0.1");
+        assert_eq!(tags, vec!["zh-CN", "en", "ms", "fr"]);
+    }
+
+    #[test]
+    fn parse_accept_language_ignores_invalid_or_zero_quality_entries() {
+        let tags = parse_accept_language("ms;q=0,bad tag,en;q=wat,zh;q=0.5,*;q=0.1");
+        assert_eq!(tags, vec!["zh", "*"]);
     }
 
     #[test]

@@ -1762,6 +1762,14 @@ impl TrustedProxy {
         })
     }
 
+    pub(crate) fn resolve_ip(&self, headers: &HeaderMap, peer_ip: IpAddr) -> IpAddr {
+        if self.trust_all || self.trusted_cidrs.iter().any(|cidr| cidr.contains(peer_ip)) {
+            resolve_real_ip(headers, &self.headers).unwrap_or(peer_ip)
+        } else {
+            peer_ip
+        }
+    }
+
     /// Convert into a `MiddlewareConfig`.
     pub fn build(self) -> MiddlewareConfig {
         MiddlewareConfig::TrustedProxy(self)
@@ -1805,21 +1813,15 @@ struct TrustedProxyState {
 }
 
 async fn trusted_proxy_fn(mut request: Request, next: Next, state: TrustedProxyState) -> Response {
-    let peer_ip = peer_ip(&request);
-    let ip = if state.trust_all || peer_ip.is_some_and(|ip| proxy_is_trusted(&state, ip)) {
-        resolve_real_ip(request.headers(), &state.headers).unwrap_or_else(|| fallback_ip(&request))
-    } else {
-        fallback_ip(&request)
+    let peer_ip = peer_ip(&request).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let proxy = TrustedProxy {
+        headers: state.headers,
+        trusted_cidrs: state.trusted_cidrs,
+        trust_all: state.trust_all,
     };
+    let ip = proxy.resolve_ip(request.headers(), peer_ip);
     request.extensions_mut().insert(RealIp(ip));
     next.run(request).await
-}
-
-fn proxy_is_trusted(state: &TrustedProxyState, peer_ip: IpAddr) -> bool {
-    state
-        .trusted_cidrs
-        .iter()
-        .any(|cidr| cidr.contains(peer_ip))
 }
 
 fn peer_ip(request: &Request) -> Option<IpAddr> {
@@ -1833,10 +1835,6 @@ fn peer_ip(request: &Request) -> Option<IpAddr> {
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ConnectInfo(addr)| addr.ip())
         })
-}
-
-fn fallback_ip(request: &Request) -> IpAddr {
-    peer_ip(request).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
 }
 
 pub(crate) fn resolve_real_ip(
@@ -1860,8 +1858,15 @@ pub(crate) fn resolve_real_ip(
     None
 }
 
-pub(crate) fn resolve_real_ip_from_default_headers(headers: &HeaderMap) -> Option<IpAddr> {
-    resolve_real_ip(headers, &default_proxy_headers())
+pub(crate) fn resolve_real_ip_from_trusted_proxy_config(
+    headers: &HeaderMap,
+    peer_ip: IpAddr,
+    config: &HttpTrustedProxyConfig,
+) -> Result<IpAddr> {
+    if !config.enabled {
+        return Ok(peer_ip);
+    }
+    Ok(TrustedProxy::from_config(config)?.resolve_ip(headers, peer_ip))
 }
 
 fn default_proxy_headers() -> Vec<HeaderName> {
@@ -2603,22 +2608,22 @@ mod tests {
         })
         .unwrap();
 
-        let state = TrustedProxyState {
-            headers: proxy.headers,
-            trusted_cidrs: proxy.trusted_cidrs,
-            trust_all: proxy.trust_all,
-        };
-
-        assert!(proxy_is_trusted(
-            &state,
-            IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40))
-        ));
-        assert!(!proxy_is_trusted(
-            &state,
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
-        ));
-        assert!(proxy_is_trusted(&state, "2001:db8::1".parse().unwrap()));
-        assert!(!proxy_is_trusted(&state, "2001:dead::1".parse().unwrap()));
+        assert!(proxy
+            .trusted_cidrs
+            .iter()
+            .any(|cidr| cidr.contains(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40)))));
+        assert!(!proxy
+            .trusted_cidrs
+            .iter()
+            .any(|cidr| cidr.contains(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))));
+        assert!(proxy
+            .trusted_cidrs
+            .iter()
+            .any(|cidr| cidr.contains("2001:db8::1".parse().unwrap())));
+        assert!(!proxy
+            .trusted_cidrs
+            .iter()
+            .any(|cidr| cidr.contains("2001:dead::1".parse().unwrap())));
     }
 
     #[test]

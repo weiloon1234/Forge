@@ -362,8 +362,16 @@ port = 3010
 path = "/ws"
 heartbeat_interval_seconds = 30       # server pings client
 heartbeat_timeout_seconds = 10        # disconnect if no pong
+max_message_size_bytes = 1048576      # inbound message cap; 0 uses transport default
+max_frame_size_bytes = 1048576        # inbound frame cap; 0 uses transport default
+max_write_buffer_size_bytes = 1048576 # socket write buffer cap; 0 uses transport default
 max_messages_per_second = 50          # per-connection flood protection
 max_connections_per_user = 5          # multi-device limit
+max_subscriptions_per_connection = 100 # active subscriptions per connection; 0 = unlimited
+max_channel_length = 128              # client-supplied channel id bytes
+max_room_length = 256                 # client-supplied room id bytes
+max_event_length = 128                # client-supplied event id bytes
+max_ack_id_length = 128               # client-supplied ack id bytes
 outbound_buffer_size = 1024           # queued outbound frames before disconnect
 allowed_origins = []                  # exact Origin allow-list; empty allows any
 history_buffer_size = 50              # recent messages retained per channel
@@ -371,6 +379,10 @@ history_ttl_seconds = 604800          # auto-reap idle history after 7 days
 ```
 
 If `allowed_origins` is non-empty, browser handshakes must include an `Origin` header that exactly matches one configured value. Use this with session-cookie authentication to prevent cross-site WebSocket handshakes.
+
+WebSocket client IP metadata follows the HTTP trusted-proxy config. Forwarded
+IP headers are honored only when `[http.trusted_proxy]` is enabled and the TCP
+peer matches a trusted CIDR; otherwise Forge uses the socket peer IP.
 
 ---
 

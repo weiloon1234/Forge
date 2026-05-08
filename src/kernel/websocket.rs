@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -109,10 +109,13 @@ impl BoundWebSocketServer {
             pubsub_task,
             ..
         } = self;
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await
-            .map_err(Error::other);
+        let result = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(Error::other);
         drop(pubsub_task);
         result
     }
@@ -502,6 +505,7 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     uri: axum::http::Uri,
     headers: HeaderMap,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebSocketServerState>,
 ) -> Response {
     if !origin_allowed(&headers, &state.ws_config.allowed_origins) {
@@ -519,20 +523,81 @@ async fn websocket_handler(
     let mut headers = headers;
     if !headers.contains_key(axum::http::header::AUTHORIZATION) {
         if let Some(query) = uri.query() {
-            for pair in query.split('&') {
-                if let Some(token) = pair.strip_prefix("token=") {
-                    if let Ok(value) = format!("Bearer {token}").parse() {
-                        headers.insert(axum::http::header::AUTHORIZATION, value);
-                    }
-                    break;
+            match bearer_token_from_query(query) {
+                Ok(Some(token)) => {
+                    let value = match format!("Bearer {token}").parse() {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return websocket_rejection(
+                                StatusCode::BAD_REQUEST,
+                                "websocket token query parameter is invalid",
+                            );
+                        }
+                    };
+                    headers.insert(axum::http::header::AUTHORIZATION, value);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return websocket_rejection(StatusCode::BAD_REQUEST, error.to_string());
                 }
             }
         }
     }
 
     let mut identity = state.capture_identity(&headers).await;
-    identity.client_ip = extract_client_ip_from_headers(&headers);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, identity))
+    match extract_client_ip(&state.app, &headers, peer_addr) {
+        Ok(ip) => identity.client_ip = ip,
+        Err(error) => {
+            return websocket_rejection(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+    }
+
+    let mut upgrade = ws;
+    if state.ws_config.max_message_size_bytes > 0 {
+        upgrade = upgrade.max_message_size(state.ws_config.max_message_size_bytes);
+    }
+    if state.ws_config.max_frame_size_bytes > 0 {
+        upgrade = upgrade.max_frame_size(state.ws_config.max_frame_size_bytes);
+    }
+    if state.ws_config.max_write_buffer_size_bytes > 0 {
+        upgrade = upgrade.max_write_buffer_size(state.ws_config.max_write_buffer_size_bytes);
+    }
+
+    upgrade.on_upgrade(move |socket| handle_socket(socket, state, identity))
+}
+
+fn websocket_rejection(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "message": message.into(),
+        })),
+    )
+        .into_response()
+}
+
+fn bearer_token_from_query(query: &str) -> Result<Option<String>> {
+    let mut token = None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key != "token" {
+            continue;
+        }
+        if token.is_some() {
+            return Err(Error::message("duplicate websocket token query parameter"));
+        }
+        if value.is_empty() {
+            return Err(Error::message(
+                "websocket token query parameter cannot be empty",
+            ));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(Error::message(
+                "websocket token query parameter cannot contain control characters",
+            ));
+        }
+        token = Some(value.into_owned());
+    }
+    Ok(token)
 }
 
 fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
@@ -550,12 +615,21 @@ fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
     allowed_origins.iter().any(|allowed| allowed == origin)
 }
 
-fn extract_client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
-    let ip = crate::http::middleware::resolve_real_ip_from_default_headers(headers)?;
+fn extract_client_ip(
+    app: &AppContext,
+    headers: &HeaderMap,
+    peer_addr: SocketAddr,
+) -> Result<Option<String>> {
+    let http = app.config().http()?;
+    let ip = crate::http::middleware::resolve_real_ip_from_trusted_proxy_config(
+        headers,
+        peer_addr.ip(),
+        &http.trusted_proxy,
+    )?;
     if ip.is_unspecified() {
-        None
+        Ok(None)
     } else {
-        Some(ip.to_string())
+        Ok(Some(ip.to_string()))
     }
 }
 
@@ -697,6 +771,12 @@ async fn process_client_message(
     connection_id: u64,
     payload: String,
 ) -> Result<()> {
+    if state.ws_config.max_message_size_bytes > 0
+        && payload.len() > state.ws_config.max_message_size_bytes
+    {
+        return Err(Error::http(413, "websocket message exceeds maximum size"));
+    }
+
     // Per-connection rate limiting.
     if !state
         .hub
@@ -720,6 +800,7 @@ async fn process_client_message(
 
     let message: ClientMessage = serde_json::from_str(&payload)
         .map_err(|error| Error::http(400, format!("invalid websocket message: {error}")))?;
+    validate_client_message(&message, &state.ws_config)?;
     if let Ok(diagnostics) = state.app.diagnostics() {
         diagnostics.record_websocket_inbound_message_on(&message.channel);
     }
@@ -781,8 +862,13 @@ async fn process_client_message(
 
             let subscribed = state
                 .hub
-                .subscribe(connection_id, &message.channel, message.room.clone())
-                .await;
+                .subscribe(
+                    connection_id,
+                    &message.channel,
+                    message.room.clone(),
+                    state.ws_config.max_subscriptions_per_connection,
+                )
+                .await?;
 
             // Track presence if enabled for this channel.
             if channel.options.presence && subscribed {
@@ -1053,6 +1139,43 @@ async fn process_client_message(
     Ok(())
 }
 
+fn validate_client_message(message: &ClientMessage, config: &WebSocketConfig) -> Result<()> {
+    validate_ws_identifier(
+        "websocket channel",
+        message.channel.as_str(),
+        config.max_channel_length,
+    )?;
+    if let Some(room) = &message.room {
+        validate_ws_identifier("websocket room", room, config.max_room_length)?;
+    }
+    if let Some(event) = &message.event {
+        validate_ws_identifier("websocket event", event.as_str(), config.max_event_length)?;
+    }
+    if let Some(ack_id) = &message.ack_id {
+        validate_ws_identifier("websocket ack_id", ack_id, config.max_ack_id_length)?;
+    }
+    Ok(())
+}
+
+fn validate_ws_identifier(label: &'static str, value: &str, max_length: usize) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::http(400, format!("{label} cannot be empty")));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::http(
+            400,
+            format!("{label} cannot contain control characters"),
+        ));
+    }
+    if max_length > 0 && value.len() > max_length {
+        return Err(Error::http(
+            400,
+            format!("{label} exceeds maximum length of {max_length} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 async fn run_channel_handler(
     channel: &RegisteredChannel,
     context: WebSocketContext,
@@ -1152,21 +1275,30 @@ impl ConnectionHub {
         connection_id: u64,
         channel: &ChannelId,
         room: Option<String>,
-    ) -> bool {
+        max_subscriptions_per_connection: usize,
+    ) -> Result<bool> {
         if let Some(state) = self.state.write().await.connections.get_mut(&connection_id) {
-            let created = state.subscriptions.insert(SubscriptionKey {
+            let subscription = SubscriptionKey {
                 channel: channel.clone(),
                 room,
-            });
+            };
+            if !state.subscriptions.contains(&subscription)
+                && max_subscriptions_per_connection > 0
+                && state.subscriptions.len() >= max_subscriptions_per_connection
+            {
+                return Err(Error::http(429, "websocket subscription limit exceeded"));
+            }
+
+            let created = state.subscriptions.insert(subscription);
             if created {
                 if let Some(diagnostics) = &self.diagnostics {
                     diagnostics.record_websocket_subscription_opened_on(channel);
                 }
             }
-            return created;
+            return Ok(created);
         }
 
-        false
+        Ok(false)
     }
 
     async fn unsubscribe(
@@ -1673,11 +1805,19 @@ mod tests {
         channels: Vec<RegisteredChannel>,
         namespace: &'static str,
     ) -> WebSocketServerState {
+        websocket_state_with_config(channels, namespace, WebSocketConfig::default())
+    }
+
+    fn websocket_state_with_config(
+        channels: Vec<RegisteredChannel>,
+        namespace: &'static str,
+        ws_config: WebSocketConfig,
+    ) -> WebSocketServerState {
         WebSocketServerState::new(
             test_app(),
             channels,
             RuntimeBackend::memory(namespace),
-            WebSocketConfig::default(),
+            ws_config,
         )
     }
 
@@ -1788,6 +1928,205 @@ mod tests {
         let subscribed = next_json(outbound).await;
         assert_eq!(subscribed.event, SUBSCRIBED_EVENT);
         assert_eq!(subscribed.channel, ChannelId::new(channel));
+    }
+
+    #[test]
+    fn websocket_query_token_is_decoded_and_validated() {
+        assert_eq!(
+            bearer_token_from_query("token=abc%20123&other=value")
+                .unwrap()
+                .as_deref(),
+            Some("abc 123")
+        );
+        assert!(bearer_token_from_query("other=value").unwrap().is_none());
+        assert_eq!(
+            bearer_token_from_query("token=one&token=two")
+                .unwrap_err()
+                .to_string(),
+            "duplicate websocket token query parameter"
+        );
+        assert_eq!(
+            bearer_token_from_query("token=").unwrap_err().to_string(),
+            "websocket token query parameter cannot be empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_uses_peer_ip_unless_trusted_proxy_matches() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.10".parse().unwrap());
+        let peer: SocketAddr = "203.0.113.5:443".parse().unwrap();
+        let app = test_app();
+
+        assert_eq!(
+            extract_client_ip(&app, &headers, peer).unwrap().as_deref(),
+            Some("203.0.113.5")
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("forge.toml"),
+            r#"
+                [http.trusted_proxy]
+                enabled = true
+                trusted_cidrs = ["203.0.113.0/24"]
+                headers = ["x-forwarded-for"]
+            "#,
+        )
+        .unwrap();
+        let trusted_app = AppContext::new(
+            Container::new(),
+            ConfigRepository::from_dir(directory.path()).unwrap(),
+            RuleRegistry::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            extract_client_ip(&trusted_app, &headers, peer)
+                .unwrap()
+                .as_deref(),
+            Some("198.51.100.10")
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_message_size_and_identifier_limits_are_enforced() {
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(
+                ChannelId::new("chat"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+            )
+            .unwrap();
+        let state = websocket_state_with_config(
+            registrar.into_channels(),
+            "ws-client-limits",
+            WebSocketConfig {
+                max_message_size_bytes: 32,
+                max_room_length: 4,
+                max_ack_id_length: 3,
+                ..WebSocketConfig::default()
+            },
+        );
+        let (connection_id, _outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+
+        let oversized = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "subscribe",
+                "channel": "chat",
+                "room": "long-room",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            &oversized,
+            Error::Http { status, .. } if *status == 413
+        ));
+        assert_eq!(
+            oversized.to_string(),
+            "websocket message exceeds maximum size"
+        );
+
+        let mut registrar = WebSocketRegistrar::new();
+        registrar
+            .channel(
+                ChannelId::new("chat"),
+                |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+            )
+            .unwrap();
+        let state = websocket_state_with_config(
+            registrar.into_channels(),
+            "ws-client-field-limits",
+            WebSocketConfig {
+                max_message_size_bytes: 0,
+                max_room_length: 4,
+                max_ack_id_length: 3,
+                ..WebSocketConfig::default()
+            },
+        );
+        let (connection_id, mut outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+
+        let room_error = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "subscribe",
+                "channel": "chat",
+                "room": "abcde",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            room_error.to_string(),
+            "websocket room exceeds maximum length of 4 bytes"
+        );
+
+        subscribe(&state, connection_id, &mut outbound, "chat").await;
+        let ack_error = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "message",
+                "channel": "chat",
+                "ack_id": "abcd",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            ack_error.to_string(),
+            "websocket ack_id exceeds maximum length of 3 bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_subscription_limit_rejects_new_subscriptions() {
+        let mut registrar = WebSocketRegistrar::new();
+        for channel in ["one", "two"] {
+            registrar
+                .channel(
+                    ChannelId::owned(channel.to_string()),
+                    |_context: WebSocketContext, _payload: serde_json::Value| async { Ok(()) },
+                )
+                .unwrap();
+        }
+        let state = websocket_state_with_config(
+            registrar.into_channels(),
+            "ws-subscription-limit",
+            WebSocketConfig {
+                max_subscriptions_per_connection: 1,
+                ..WebSocketConfig::default()
+            },
+        );
+        let (connection_id, mut outbound, _last_pong) =
+            state.hub.register(ConnectionIdentity::default()).await;
+        subscribe(&state, connection_id, &mut outbound, "one").await;
+
+        let error = process_client_message(
+            &state,
+            connection_id,
+            serde_json::json!({
+                "action": "subscribe",
+                "channel": "two",
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            Error::Http { status, .. } if *status == 429
+        ));
+        assert_eq!(error.to_string(), "websocket subscription limit exceeded");
     }
 
     #[tokio::test]

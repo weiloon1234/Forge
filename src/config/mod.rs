@@ -389,8 +389,27 @@ pub struct WebSocketConfig {
     pub path: String,
     pub heartbeat_interval_seconds: u64,
     pub heartbeat_timeout_seconds: u64,
+    /// Maximum accepted WebSocket message bytes. `0` leaves the transport
+    /// default in place.
+    pub max_message_size_bytes: usize,
+    /// Maximum accepted WebSocket frame bytes. `0` leaves the transport
+    /// default in place.
+    pub max_frame_size_bytes: usize,
+    /// Maximum WebSocket write buffer bytes. `0` leaves the transport default
+    /// in place.
+    pub max_write_buffer_size_bytes: usize,
     pub max_messages_per_second: u32,
     pub max_connections_per_user: u32,
+    /// Maximum active subscriptions per connection. `0` disables this cap.
+    pub max_subscriptions_per_connection: usize,
+    /// Maximum client-supplied channel identifier bytes. `0` disables this cap.
+    pub max_channel_length: usize,
+    /// Maximum client-supplied room identifier bytes. `0` disables this cap.
+    pub max_room_length: usize,
+    /// Maximum client-supplied event identifier bytes. `0` disables this cap.
+    pub max_event_length: usize,
+    /// Maximum client-supplied ack identifier bytes. `0` disables this cap.
+    pub max_ack_id_length: usize,
     /// Maximum queued outbound frames per connection before Forge drops the
     /// connection to protect process memory.
     pub outbound_buffer_size: usize,
@@ -415,8 +434,16 @@ impl Default for WebSocketConfig {
             path: "/ws".to_string(),
             heartbeat_interval_seconds: 30,
             heartbeat_timeout_seconds: 10,
+            max_message_size_bytes: 1_048_576,
+            max_frame_size_bytes: 1_048_576,
+            max_write_buffer_size_bytes: 1_048_576,
             max_messages_per_second: 50,
             max_connections_per_user: 5,
+            max_subscriptions_per_connection: 100,
+            max_channel_length: 128,
+            max_room_length: 256,
+            max_event_length: 128,
+            max_ack_id_length: 128,
             outbound_buffer_size: 1024,
             allowed_origins: Vec::new(),
             history_buffer_size: 50,
@@ -1317,6 +1344,14 @@ mod tests {
                 [websocket]
                 port = 4100
                 path = "/realtime"
+                max_message_size_bytes = 2048
+                max_frame_size_bytes = 1024
+                max_write_buffer_size_bytes = 4096
+                max_subscriptions_per_connection = 25
+                max_channel_length = 64
+                max_room_length = 80
+                max_event_length = 48
+                max_ack_id_length = 32
 
                 [jobs]
                 queue = "critical"
@@ -1360,6 +1395,14 @@ mod tests {
         assert_eq!(redis.namespace, "forge-tests");
         assert_eq!(websocket.path, "/realtime");
         assert_eq!(websocket.port, 4100);
+        assert_eq!(websocket.max_message_size_bytes, 2_048);
+        assert_eq!(websocket.max_frame_size_bytes, 1_024);
+        assert_eq!(websocket.max_write_buffer_size_bytes, 4_096);
+        assert_eq!(websocket.max_subscriptions_per_connection, 25);
+        assert_eq!(websocket.max_channel_length, 64);
+        assert_eq!(websocket.max_room_length, 80);
+        assert_eq!(websocket.max_event_length, 48);
+        assert_eq!(websocket.max_ack_id_length, 32);
         assert_eq!(jobs.queue, QueueId::new("critical"));
         assert_eq!(jobs.max_retries, 9);
         assert_eq!(jobs.lease_ttl_ms, 45_000);
@@ -1440,6 +1483,25 @@ mod tests {
         assert_eq!(http.rate_limit.window_seconds, 60);
         assert_eq!(http.rate_limit.by, HttpRateLimitByConfig::ActorOrIp);
         assert_eq!(http.rate_limit.key_prefix, "http:");
+    }
+
+    #[test]
+    fn websocket_config_defaults_bound_runtime_edges() {
+        let websocket: WebSocketConfig = ConfigRepository::empty().websocket().unwrap();
+
+        assert_eq!(websocket.heartbeat_interval_seconds, 30);
+        assert_eq!(websocket.heartbeat_timeout_seconds, 10);
+        assert_eq!(websocket.max_message_size_bytes, 1_048_576);
+        assert_eq!(websocket.max_frame_size_bytes, 1_048_576);
+        assert_eq!(websocket.max_write_buffer_size_bytes, 1_048_576);
+        assert_eq!(websocket.max_messages_per_second, 50);
+        assert_eq!(websocket.max_connections_per_user, 5);
+        assert_eq!(websocket.max_subscriptions_per_connection, 100);
+        assert_eq!(websocket.max_channel_length, 128);
+        assert_eq!(websocket.max_room_length, 256);
+        assert_eq!(websocket.max_event_length, 128);
+        assert_eq!(websocket.max_ack_id_length, 128);
+        assert_eq!(websocket.outbound_buffer_size, 1_024);
     }
 
     #[test]

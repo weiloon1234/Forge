@@ -59,3 +59,8 @@ trait ChannelHandler
   fn handle<'life0, 'async_trait>(
 ```
 
+## Notes
+
+- WebSocket handshakes use HTTP trusted-proxy config for client IP metadata; forwarded IP headers are ignored unless the TCP peer is trusted.
+- Inbound messages, frames, subscriptions, and client-supplied identifiers are bounded by `WebSocketConfig`.
+

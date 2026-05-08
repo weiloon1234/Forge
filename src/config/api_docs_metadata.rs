@@ -64,6 +64,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
             "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
             "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.",
+            "`WebSocketConfig` bounds inbound message/frame sizes and client-supplied channel, room, event, ack, and subscription cardinality.",
         ],
         "cache" => &[
             "Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.",
@@ -98,6 +99,10 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "Scheduler hooks are isolated: hook panics are logged and do not crash the scheduler task.",
             "`SchedulerConfig.shutdown_timeout_ms` defaults to `30000`; `0` aborts active schedules immediately on shutdown.",
         ],
+        "websocket" => &[
+            "WebSocket handshakes use HTTP trusted-proxy config for client IP metadata; forwarded IP headers are ignored unless the TCP peer is trusted.",
+            "Inbound messages, frames, subscriptions, and client-supplied identifiers are bounded by `WebSocketConfig`.",
+        ],
         _ => &[],
     }
 }
@@ -125,6 +130,7 @@ mod tests {
         assert!(config.contains("history_retention_days"));
         assert!(config.contains("ObservabilityConfig.enabled"));
         assert!(config.contains("SchedulerConfig"));
+        assert!(config.contains("WebSocketConfig"));
         assert!(config.contains("0` aborts"));
 
         let mut jobs = String::new();
@@ -161,5 +167,10 @@ mod tests {
         assert!(cache.contains("single-flight"));
         assert!(cache.contains("fail_open"));
         assert!(cache.contains("backend failures"));
+
+        let mut websocket = String::new();
+        append_module_notes("websocket", &mut websocket);
+        assert!(websocket.contains("trusted-proxy"));
+        assert!(websocket.contains("bounded"));
     }
 }

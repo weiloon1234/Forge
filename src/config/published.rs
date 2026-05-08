@@ -643,8 +643,44 @@ const WEBSOCKET_FIELDS: &[PublishedField] = &[
     field("path", "\"/ws\"", "/ws", false, false, None),
     field("heartbeat_interval_seconds", "30", "30", false, false, None),
     field("heartbeat_timeout_seconds", "10", "10", false, false, None),
+    field(
+        "max_message_size_bytes",
+        "1048576",
+        "1048576",
+        false,
+        false,
+        Some("0 = use transport default"),
+    ),
+    field(
+        "max_frame_size_bytes",
+        "1048576",
+        "1048576",
+        false,
+        false,
+        Some("0 = use transport default"),
+    ),
+    field(
+        "max_write_buffer_size_bytes",
+        "1048576",
+        "1048576",
+        false,
+        false,
+        Some("0 = use transport default"),
+    ),
     field("max_messages_per_second", "50", "50", false, false, None),
     field("max_connections_per_user", "5", "5", false, false, None),
+    field(
+        "max_subscriptions_per_connection",
+        "100",
+        "100",
+        false,
+        false,
+        Some("0 = unlimited active subscriptions per connection"),
+    ),
+    field("max_channel_length", "128", "128", false, false, None),
+    field("max_room_length", "256", "256", false, false, None),
+    field("max_event_length", "128", "128", false, false, None),
+    field("max_ack_id_length", "128", "128", false, false, None),
     field(
         "outbound_buffer_size",
         "1024",
@@ -1630,6 +1666,24 @@ mod tests {
         assert!(env.contains("# HTTP__CSRF__COOKIE_SAME_SITE=lax"));
         assert!(env.contains("# HTTP__TRUSTED_PROXY__TRUSTED_CIDRS=[]"));
         assert!(env.contains("# HTTP__RATE_LIMIT__BY=actor_or_ip"));
+    }
+
+    #[test]
+    fn published_websocket_config_includes_edge_bounds() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[websocket]"));
+        assert!(output.contains("# max_message_size_bytes = 1048576  # 0 = use transport default"));
+        assert!(output.contains("# max_frame_size_bytes = 1048576"));
+        assert!(output.contains("# max_write_buffer_size_bytes = 1048576"));
+        assert!(output.contains(
+            "# max_subscriptions_per_connection = 100  # 0 = unlimited active subscriptions per connection"
+        ));
+        assert!(output.contains("# max_room_length = 256"));
+        assert!(output.contains("# max_ack_id_length = 128"));
+        assert!(env.contains("# WEBSOCKET__MAX_MESSAGE_SIZE_BYTES=1048576"));
+        assert!(env.contains("# WEBSOCKET__MAX_SUBSCRIPTIONS_PER_CONNECTION=100"));
     }
 
     #[test]

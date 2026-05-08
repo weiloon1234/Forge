@@ -200,10 +200,14 @@ struct Cors
   fn build(self) -> MiddlewareConfig
 struct Csrf
   fn new() -> Self
+  fn from_config(config: &HttpCsrfConfig) -> Result<Self>
   fn cookie_name(self, name: &str) -> Self
   fn header_name(self, name: HeaderName) -> Self
   fn secure(self, secure: bool) -> Self
+  fn path(self, path: &str) -> Self
+  fn same_site(self, same_site: &str) -> Self
   fn exclude(self, path: &str) -> Self
+  fn exclude_paths<'a, I>(self, paths: I) -> Self
   fn build(self) -> MiddlewareConfig
 struct CsrfToken
   fn value(&self) -> &str
@@ -293,6 +297,7 @@ struct RouteRegistry
 - `HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.
 - `HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` remains compatible and trusts all headers.
 - Config-derived CORS validates origins, methods, and headers at boot; wildcard origins with credentials are rejected.
+- Config-derived CSRF is opt-in; code-registered `Csrf` remains source-compatible and path exclusions are segment-aware.
 - Config-derived body-limit, request-timeout, and rate-limit rejections return JSON `ErrorResponse` bodies with HTTP 413, 408, and 429.
 - Actor-only rate limits require an authenticated actor; use `actor_or_ip` when a global rate limit needs an IP fallback.
 - IP rate limits use `TrustedProxy` real IP when available and otherwise fall back to TCP peer connect info on the real server path.

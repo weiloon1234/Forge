@@ -474,6 +474,11 @@ async fn web_logout(
 
 ```rust
 let session_id = sessions.create_with_remember::<Admin>(&admin_id, remember_me).await?;
+let response = sessions.login_response_with_remember(
+    session_id,
+    remember_me,
+    Json(json!({ "ok": true })),
+)?;
 // remember_me = true  → uses remember_ttl_days (default: 30 days)
 // remember_me = false → uses ttl_minutes (default: 120 min)
 ```
@@ -484,7 +489,9 @@ When `sliding_expiry` is enabled, normal sessions extend by `ttl_minutes` and
 remember-me sessions extend by `remember_ttl_days`, so activity does not shorten
 long-lived remembered sessions. Forge also keeps the per-actor Redis session
 index bounded with a TTL, so naturally expired sessions do not leave permanent
-index keys behind.
+index keys behind. `login_response(...)` keeps a browser session cookie for
+source compatibility; use `login_response_with_remember(...)` when the cookie
+should persist with `Max-Age`.
 
 ### Session Config
 
@@ -494,6 +501,8 @@ ttl_minutes = 120                   # session duration
 cookie_name = "forge_session"       # cookie name
 cookie_secure = true                # HTTPS only
 cookie_path = "/"                   # Set-Cookie Path used for login/logout
+cookie_same_site = "lax"            # lax | strict | none; none requires secure cookies
+cookie_domain = ""                  # optional Set-Cookie Domain
 sliding_expiry = true               # extend TTL on activity
 remember_ttl_days = 30              # "remember me" duration
 ```
@@ -801,6 +810,8 @@ ttl_minutes = 120
 cookie_name = "forge_session"
 cookie_secure = true
 cookie_path = "/"
+cookie_same_site = "lax"
+cookie_domain = ""
 sliding_expiry = true
 remember_ttl_days = 30
 

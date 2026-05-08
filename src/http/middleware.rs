@@ -15,7 +15,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{
-    HttpConfig, HttpCorsConfig, HttpRateLimitByConfig, HttpRateLimitConfig,
+    HttpConfig, HttpCorsConfig, HttpCsrfConfig, HttpRateLimitByConfig, HttpRateLimitConfig,
     HttpSecurityHeadersConfig, HttpTrustedProxyConfig,
 };
 use crate::foundation::{AppContext, Error, Result};
@@ -162,6 +162,10 @@ pub(crate) fn configured_global_middlewares(
 
     if config.cors.enabled && !has(MiddlewareKind::Cors) {
         middlewares.push(Cors::from_config(&config.cors)?.build());
+    }
+
+    if config.csrf.enabled && !has(MiddlewareKind::Csrf) {
+        middlewares.push(Csrf::from_config(&config.csrf)?.build());
     }
 
     if config.security_headers.enabled && !has(MiddlewareKind::SecurityHeaders) {
@@ -704,6 +708,8 @@ pub struct Csrf {
     cookie_name: String,
     header_name: HeaderName,
     secure: bool,
+    path: String,
+    same_site: String,
     exclude: Vec<String>,
 }
 
@@ -713,8 +719,46 @@ impl Csrf {
             cookie_name: "forge_csrf".to_string(),
             header_name: HeaderName::from_static("x-csrf-token"),
             secure: true,
+            path: "/".to_string(),
+            same_site: "lax".to_string(),
             exclude: Vec::new(),
         }
+    }
+
+    pub fn from_config(config: &HttpCsrfConfig) -> Result<Self> {
+        let header_name =
+            HeaderName::from_bytes(config.header_name.as_bytes()).map_err(|error| {
+                Error::message(format!(
+                    "invalid http.csrf.header_name value `{}`: {error}",
+                    config.header_name
+                ))
+            })?;
+        let same_site = super::cookie::parse_same_site(&config.cookie_same_site)?;
+        if matches!(same_site, super::cookie::SameSite::None) && !config.cookie_secure {
+            return Err(Error::message(
+                "http.csrf.cookie_same_site = \"none\" requires cookie_secure = true",
+            ));
+        }
+        let csrf = Self::new()
+            .cookie_name(&config.cookie_name)
+            .header_name(header_name)
+            .secure(config.cookie_secure)
+            .path(&config.cookie_path)
+            .same_site(&config.cookie_same_site)
+            .exclude_paths(config.exclude_paths.iter().map(String::as_str));
+
+        super::cookie::build_cookie_header_value(super::cookie::CookieHeaderOptions {
+            name: &csrf.cookie_name,
+            value: "probe",
+            http_only: false,
+            secure: csrf.secure,
+            path: &csrf.path,
+            same_site,
+            domain: None,
+            max_age_secs: None,
+        })?;
+
+        Ok(csrf)
     }
 
     pub fn cookie_name(mut self, name: &str) -> Self {
@@ -732,9 +776,27 @@ impl Csrf {
         self
     }
 
+    pub fn path(mut self, path: &str) -> Self {
+        self.path = path.to_string();
+        self
+    }
+
+    pub fn same_site(mut self, same_site: &str) -> Self {
+        self.same_site = same_site.to_string();
+        self
+    }
+
     /// Add a path prefix to exclude from CSRF validation (e.g., "/api").
     pub fn exclude(mut self, path: &str) -> Self {
         self.exclude.push(path.to_string());
+        self
+    }
+
+    pub fn exclude_paths<'a, I>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        self.exclude.extend(paths.into_iter().map(str::to_string));
         self
     }
 
@@ -747,6 +809,8 @@ impl Csrf {
             cookie_name: self.cookie_name,
             header_name: self.header_name,
             secure: self.secure,
+            path: self.path,
+            same_site: self.same_site,
             exclude: self.exclude,
         };
         router.layer(middleware::from_fn_with_state(state, csrf_middleware))
@@ -764,6 +828,8 @@ struct CsrfState {
     cookie_name: String,
     header_name: HeaderName,
     secure: bool,
+    path: String,
+    same_site: String,
     exclude: Vec<String>,
 }
 
@@ -809,7 +875,11 @@ async fn csrf_middleware(
     let path = request.uri().path().to_string();
 
     // Check if path is excluded
-    if state.exclude.iter().any(|prefix| path.starts_with(prefix)) {
+    if state
+        .exclude
+        .iter()
+        .any(|prefix| path_matches_csrf_exclusion(&path, prefix))
+    {
         return next.run(request).await;
     }
 
@@ -822,7 +892,10 @@ async fn csrf_middleware(
     if is_safe {
         // Safe methods: ensure token cookie exists, set extension
         let token = match existing_token {
-            Some(ref token) => token.clone(),
+            Some(ref token) if is_valid_csrf_token(token) => token.clone(),
+            Some(_) => {
+                return csrf_forbidden("CSRF token malformed");
+            }
             None => {
                 // Generate new token
                 match crate::support::Token::base64(32) {
@@ -846,9 +919,20 @@ async fn csrf_middleware(
 
         // Set cookie if it wasn't present
         if existing_token.is_none() {
-            let cookie = build_csrf_cookie(&state.cookie_name, &token, state.secure);
-            if let Ok(hv) = HeaderValue::from_str(&cookie.to_string()) {
-                response.headers_mut().append(header::SET_COOKIE, hv);
+            match build_csrf_cookie(&state.cookie_name, &token, &state) {
+                Ok(hv) => {
+                    response.headers_mut().append(header::SET_COOKIE, hv);
+                }
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({
+                            "message": error.to_string(),
+                            "status": 500
+                        })),
+                    )
+                        .into_response();
+                }
             }
         }
 
@@ -858,6 +942,9 @@ async fn csrf_middleware(
         let Some(cookie_token) = existing_token else {
             return csrf_forbidden("CSRF token cookie missing");
         };
+        if !is_valid_csrf_token(&cookie_token) {
+            return csrf_forbidden("CSRF token malformed");
+        }
 
         // Check header first, then query for the form field value won't work easily
         // without consuming the body. For API-first framework, header is primary.
@@ -870,6 +957,9 @@ async fn csrf_middleware(
         let Some(request_token) = request_token else {
             return csrf_forbidden("CSRF token missing from request header");
         };
+        if !is_valid_csrf_token(&request_token) {
+            return csrf_forbidden("CSRF token malformed");
+        }
 
         if !crate::support::hmac::constant_time_eq(
             cookie_token.as_bytes(),
@@ -886,14 +976,18 @@ async fn csrf_middleware(
 /// Build a CSRF cookie string. Intentionally NOT HttpOnly — the frontend JS must
 /// read this cookie to include the token in the X-CSRF-TOKEN request header
 /// (double-submit cookie pattern).
-fn build_csrf_cookie(name: &str, value: &str, secure: bool) -> String {
-    let mut builder = super::cookie::Cookie::build((name, value))
-        .same_site(super::cookie::SameSite::Lax)
-        .path("/");
-    if secure {
-        builder = builder.secure(true);
-    }
-    builder.build().to_string()
+fn build_csrf_cookie(name: &str, value: &str, state: &CsrfState) -> Result<HeaderValue> {
+    let same_site = super::cookie::parse_same_site(&state.same_site)?;
+    super::cookie::build_cookie_header_value(super::cookie::CookieHeaderOptions {
+        name,
+        value,
+        http_only: false,
+        secure: state.secure,
+        path: &state.path,
+        same_site,
+        domain: None,
+        max_age_secs: None,
+    })
 }
 
 fn csrf_forbidden(message: &str) -> Response {
@@ -905,6 +999,28 @@ fn csrf_forbidden(message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+fn path_matches_csrf_exclusion(path: &str, prefix: &str) -> bool {
+    if prefix == "/" {
+        return true;
+    }
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn is_valid_csrf_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 128
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 // extract_cookie_value is in crate::http::cookie (shared with session auth)
@@ -2053,6 +2169,107 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn csrf_exclude_matches_path_segments_only() {
+        let router = Csrf::new()
+            .secure(false)
+            .exclude("/api")
+            .apply(
+                axum::Router::<AppContext>::new()
+                    .route("/api/users", post(ok_handler))
+                    .route("/apiary", post(ok_handler)),
+            )
+            .with_state(test_app());
+
+        let excluded = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/users")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let protected = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/apiary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(excluded.status(), StatusCode::OK);
+        assert_eq!(protected.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_malformed_token_returns_json_403() {
+        let router = Csrf::new()
+            .secure(false)
+            .apply(axum::Router::<AppContext>::new().route("/", post(ok_handler)))
+            .with_state(test_app());
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(header::COOKIE, "forge_csrf=bad token")
+                    .header("x-csrf-token", "bad token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["message"], "CSRF token malformed");
+        assert_eq!(payload["status"], 403);
+    }
+
+    #[test]
+    fn csrf_from_config_validates_cookie_and_header_settings() {
+        let csrf = Csrf::from_config(&crate::config::HttpCsrfConfig {
+            enabled: true,
+            cookie_name: "app_csrf".to_string(),
+            header_name: "x-app-csrf".to_string(),
+            cookie_secure: true,
+            cookie_path: "/admin".to_string(),
+            cookie_same_site: "none".to_string(),
+            exclude_paths: vec!["/api".to_string()],
+        })
+        .unwrap();
+
+        assert_eq!(csrf.cookie_name, "app_csrf");
+        assert_eq!(csrf.header_name, HeaderName::from_static("x-app-csrf"));
+        assert_eq!(csrf.path, "/admin");
+        assert_eq!(csrf.same_site, "none");
+        assert_eq!(csrf.exclude, vec!["/api"]);
+
+        let error = Csrf::from_config(&crate::config::HttpCsrfConfig {
+            enabled: true,
+            cookie_name: "app_csrf".to_string(),
+            header_name: "x-app-csrf".to_string(),
+            cookie_secure: false,
+            cookie_path: "/".to_string(),
+            cookie_same_site: "none".to_string(),
+            exclude_paths: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("http.csrf.cookie_same_site = \"none\" requires"));
+    }
+
     // ---- Cors tests ----
 
     #[tokio::test]
@@ -2416,6 +2633,11 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             },
+            csrf: crate::config::HttpCsrfConfig {
+                enabled: true,
+                cookie_secure: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -2428,6 +2650,9 @@ mod tests {
         assert!(middlewares
             .iter()
             .any(|middleware| matches!(middleware, MiddlewareConfig::RateLimit(_))));
+        assert!(middlewares
+            .iter()
+            .any(|middleware| matches!(middleware, MiddlewareConfig::Csrf(_))));
         assert!(!middlewares
             .iter()
             .any(|middleware| matches!(middleware, MiddlewareConfig::SecurityHeaders(_))));

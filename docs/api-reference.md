@@ -1189,8 +1189,13 @@ async fn validate(&self, session_id: &str) -> Result<Option<Actor>>
 async fn destroy(&self, session_id: &str) -> Result<()>
 async fn destroy_all<M: Authenticatable>(&self, actor_id: &str) -> Result<()>
 fn login_response(&self, session_id: String, body: impl IntoResponse) -> Result<Response>
+fn login_response_with_remember(&self, session_id: String, remember: bool, body: impl IntoResponse) -> Result<Response>
 fn logout_response(&self, body: impl IntoResponse) -> Result<Response>
 ```
+
+Session cookies validate configured name/path/domain/SameSite values. `SameSite=None`
+requires secure cookies. `login_response_with_remember` adds a persistent `Max-Age`
+only when `remember` is true; `login_response` remains a browser-session cookie.
 
 ---
 
@@ -1356,6 +1361,23 @@ fn content_disposition_value(disposition: ContentDispositionType, filename: &str
 Download helpers sanitize path-like/control-character filenames, emit a safe ASCII
 `filename`, and include RFC 5987 `filename*` for Unicode clients.
 
+**Csrf — methods:**
+
+```rust
+fn new() -> Self
+fn from_config(config: &HttpCsrfConfig) -> Result<Self>
+fn cookie_name(self, name: &str) -> Self
+fn header_name(self, name: HeaderName) -> Self
+fn secure(self, secure: bool) -> Self
+fn path(self, path: &str) -> Self
+fn same_site(self, same_site: &str) -> Self
+fn exclude(self, path: &str) -> Self
+fn exclude_paths<'a, I>(self, paths: I) -> Self where I: IntoIterator<Item = &'a str>
+fn build(self) -> MiddlewareConfig
+```
+
+CSRF exclusions are segment-aware: `/api` excludes `/api` and `/api/...`, not `/apiary`.
+
 **Cors — methods:**
 
 ```rust
@@ -1435,6 +1457,10 @@ fn iter(&self) -> impl Iterator<Item = (&RouteId, &String)>
 fn signed_url(&self, name: impl Into<RouteId>, params: &[(&str, &str)], signing_key: &[u8], expires_at: DateTime) -> Result<String>
 fn verify_signature(url: &str, signing_key: &[u8]) -> Result<()>  // static
 ```
+
+Signed URL verification rejects duplicate `expires` or `signature` parameters,
+invalid signature shape, expired URLs, and query parameters appended after the
+signature.
 
 ---
 

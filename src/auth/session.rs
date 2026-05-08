@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::SessionConfig;
 use crate::foundation::{Error, Result};
-use crate::http::cookie::SessionCookie;
+use crate::http::cookie::{
+    build_cookie_header_value, clear_cookie_header_value, parse_same_site,
+    ClearCookieHeaderOptions, CookieHeaderOptions,
+};
 use crate::redis::RedisManager;
 use crate::support::{GuardId, Token};
 
@@ -158,19 +161,52 @@ impl SessionManager {
 
     /// Build a response that sets the session cookie alongside the given body.
     pub fn login_response(&self, session_id: String, body: impl IntoResponse) -> Result<Response> {
-        let cookie = SessionCookie::build_with_path(
-            &self.config.cookie_name,
-            &session_id,
-            self.config.cookie_secure,
-            &self.config.cookie_path,
-        );
-        self.with_cookie_header(cookie, body)
+        self.login_response_with_options(session_id, None, body)
+    }
+
+    /// Build a response that sets the session cookie and, when requested,
+    /// persists it for the configured remember-me TTL.
+    pub fn login_response_with_remember(
+        &self,
+        session_id: String,
+        remember: bool,
+        body: impl IntoResponse,
+    ) -> Result<Response> {
+        let max_age_secs = remember.then(|| self.session_ttl_secs(true));
+        self.login_response_with_options(session_id, max_age_secs, body)
     }
 
     /// Build a response that clears the session cookie.
     pub fn logout_response(&self, body: impl IntoResponse) -> Result<Response> {
-        let cookie =
-            SessionCookie::clear_with_path(&self.config.cookie_name, &self.config.cookie_path);
+        let same_site = parse_same_site(&self.config.cookie_same_site)?;
+        let cookie = clear_cookie_header_value(ClearCookieHeaderOptions {
+            name: &self.config.cookie_name,
+            http_only: true,
+            secure: self.config.cookie_secure,
+            path: &self.config.cookie_path,
+            same_site,
+            domain: Some(&self.config.cookie_domain),
+        })?;
+        self.with_cookie_header(cookie, body)
+    }
+
+    fn login_response_with_options(
+        &self,
+        session_id: String,
+        max_age_secs: Option<u64>,
+        body: impl IntoResponse,
+    ) -> Result<Response> {
+        let same_site = parse_same_site(&self.config.cookie_same_site)?;
+        let cookie = build_cookie_header_value(CookieHeaderOptions {
+            name: &self.config.cookie_name,
+            value: &session_id,
+            http_only: true,
+            secure: self.config.cookie_secure,
+            path: &self.config.cookie_path,
+            same_site,
+            domain: Some(&self.config.cookie_domain),
+            max_age_secs,
+        })?;
         self.with_cookie_header(cookie, body)
     }
 
@@ -187,17 +223,9 @@ impl SessionManager {
             .max(self.session_ttl_secs(true))
     }
 
-    fn with_cookie_header(
-        &self,
-        cookie: crate::http::cookie::Cookie<'_>,
-        body: impl IntoResponse,
-    ) -> Result<Response> {
-        let header_value = HeaderValue::from_str(&cookie.to_string())
-            .map_err(|e| Error::message(format!("invalid session cookie value: {e}")))?;
+    fn with_cookie_header(&self, cookie: HeaderValue, body: impl IntoResponse) -> Result<Response> {
         let mut response = body.into_response();
-        response
-            .headers_mut()
-            .append(header::SET_COOKIE, header_value);
+        response.headers_mut().append(header::SET_COOKIE, cookie);
         Ok(response)
     }
 }
@@ -229,6 +257,8 @@ mod tests {
     fn session_cookie_responses_honor_configured_path() {
         let manager = manager_with_config(SessionConfig {
             cookie_path: "/admin".to_string(),
+            cookie_same_site: "strict".to_string(),
+            cookie_domain: "example.com".to_string(),
             cookie_secure: false,
             ..Default::default()
         });
@@ -244,8 +274,9 @@ mod tests {
             .unwrap();
         assert!(login_cookie.starts_with("forge_session=abc_123-XYZ;"));
         assert!(login_cookie.contains("HttpOnly"));
-        assert!(login_cookie.contains("SameSite=Lax"));
+        assert!(login_cookie.contains("SameSite=Strict"));
         assert!(login_cookie.contains("Path=/admin"));
+        assert!(login_cookie.contains("Domain=example.com"));
         assert!(!login_cookie.contains("Secure"));
 
         let logout = manager
@@ -259,7 +290,48 @@ mod tests {
             .unwrap();
         assert!(logout_cookie.starts_with("forge_session=;"));
         assert!(logout_cookie.contains("Path=/admin"));
+        assert!(logout_cookie.contains("Domain=example.com"));
         assert!(logout_cookie.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn remember_login_response_sets_persistent_cookie_max_age() {
+        let manager = manager_with_config(SessionConfig {
+            remember_ttl_days: 14,
+            cookie_secure: false,
+            ..Default::default()
+        });
+
+        let login = manager
+            .login_response_with_remember(
+                "abc_123-XYZ".to_string(),
+                true,
+                Json(json!({ "ok": true })),
+            )
+            .unwrap();
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        assert!(cookie.contains("Max-Age=1209600"));
+    }
+
+    #[test]
+    fn insecure_same_site_none_session_cookie_returns_error() {
+        let manager = manager_with_config(SessionConfig {
+            cookie_same_site: "none".to_string(),
+            cookie_secure: false,
+            ..Default::default()
+        });
+
+        let error = manager
+            .login_response("abc_123-XYZ".to_string(), Json(json!({ "ok": true })))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("SameSite=None requires Secure"));
     }
 
     #[test]

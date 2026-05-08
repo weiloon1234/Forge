@@ -156,6 +156,7 @@ pub struct HttpConfig {
     pub security_headers: HttpSecurityHeadersConfig,
     pub trusted_proxy: HttpTrustedProxyConfig,
     pub cors: HttpCorsConfig,
+    pub csrf: HttpCsrfConfig,
     pub rate_limit: HttpRateLimitConfig,
 }
 
@@ -235,6 +236,32 @@ impl Default for HttpCorsConfig {
             ],
             allow_credentials: false,
             max_age_seconds: 600,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HttpCsrfConfig {
+    pub enabled: bool,
+    pub cookie_name: String,
+    pub header_name: String,
+    pub cookie_secure: bool,
+    pub cookie_path: String,
+    pub cookie_same_site: String,
+    pub exclude_paths: Vec<String>,
+}
+
+impl Default for HttpCsrfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cookie_name: "forge_csrf".to_string(),
+            header_name: "x-csrf-token".to_string(),
+            cookie_secure: true,
+            cookie_path: "/".to_string(),
+            cookie_same_site: "lax".to_string(),
+            exclude_paths: Vec::new(),
         }
     }
 }
@@ -622,6 +649,8 @@ pub struct SessionConfig {
     pub cookie_name: String,
     pub cookie_secure: bool,
     pub cookie_path: String,
+    pub cookie_same_site: String,
+    pub cookie_domain: String,
     pub sliding_expiry: bool,
     pub remember_ttl_days: u64,
 }
@@ -633,6 +662,8 @@ impl Default for SessionConfig {
             cookie_name: "forge_session".to_string(),
             cookie_secure: true,
             cookie_path: "/".to_string(),
+            cookie_same_site: "lax".to_string(),
+            cookie_domain: String::new(),
             sliding_expiry: true,
             remember_ttl_days: 30,
         }
@@ -1359,6 +1390,13 @@ mod tests {
                 "x-csrf-token"
             ]
         );
+        assert!(!http.csrf.enabled);
+        assert_eq!(http.csrf.cookie_name, "forge_csrf");
+        assert_eq!(http.csrf.header_name, "x-csrf-token");
+        assert!(http.csrf.cookie_secure);
+        assert_eq!(http.csrf.cookie_path, "/");
+        assert_eq!(http.csrf.cookie_same_site, "lax");
+        assert!(http.csrf.exclude_paths.is_empty());
         assert!(!http.rate_limit.enabled);
         assert_eq!(http.rate_limit.max_requests, 600);
         assert_eq!(http.rate_limit.window_seconds, 60);
@@ -1396,6 +1434,15 @@ mod tests {
                 allow_credentials = true
                 max_age_seconds = 1200
 
+                [http.csrf]
+                enabled = true
+                cookie_name = "app_csrf"
+                header_name = "x-app-csrf"
+                cookie_secure = false
+                cookie_path = "/admin"
+                cookie_same_site = "strict"
+                exclude_paths = ["/api", "/webhooks"]
+
                 [http.rate_limit]
                 enabled = true
                 max_requests = 25
@@ -1430,6 +1477,13 @@ mod tests {
         assert_eq!(http.cors.allowed_headers, vec!["authorization"]);
         assert!(http.cors.allow_credentials);
         assert_eq!(http.cors.max_age_seconds, 1_200);
+        assert!(http.csrf.enabled);
+        assert_eq!(http.csrf.cookie_name, "app_csrf");
+        assert_eq!(http.csrf.header_name, "x-app-csrf");
+        assert!(!http.csrf.cookie_secure);
+        assert_eq!(http.csrf.cookie_path, "/admin");
+        assert_eq!(http.csrf.cookie_same_site, "strict");
+        assert_eq!(http.csrf.exclude_paths, vec!["/api", "/webhooks"]);
         assert!(http.rate_limit.enabled);
         assert_eq!(http.rate_limit.max_requests, 25);
         assert_eq!(http.rate_limit.window_seconds, 10);
@@ -1461,6 +1515,16 @@ mod tests {
 
                 [auth.tokens.guards.user]
                 refresh_token_ttl_days = 3
+
+                [auth.sessions]
+                ttl_minutes = 90
+                cookie_name = "app_session"
+                cookie_secure = false
+                cookie_path = "/admin"
+                cookie_same_site = "strict"
+                cookie_domain = "example.com"
+                sliding_expiry = false
+                remember_ttl_days = 14
 
                 [auth.password_resets]
                 expiry_minutes = 30
@@ -1505,6 +1569,14 @@ mod tests {
                 .refresh_token_ttl_days_for_guard(&GuardId::new("user")),
             3
         );
+        assert_eq!(auth.sessions.ttl_minutes, 90);
+        assert_eq!(auth.sessions.cookie_name, "app_session");
+        assert!(!auth.sessions.cookie_secure);
+        assert_eq!(auth.sessions.cookie_path, "/admin");
+        assert_eq!(auth.sessions.cookie_same_site, "strict");
+        assert_eq!(auth.sessions.cookie_domain, "example.com");
+        assert!(!auth.sessions.sliding_expiry);
+        assert_eq!(auth.sessions.remember_ttl_days, 14);
         assert_eq!(auth.password_resets.expiry_minutes, 30);
         assert_eq!(auth.password_resets.prune_interval_ms, 60_000);
         assert_eq!(auth.password_resets.prune_batch_size, 25);

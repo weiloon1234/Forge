@@ -166,6 +166,7 @@ struct SessionManager
   async fn destroy(&self, session_id: &str) -> Result<()>
   async fn destroy_all<M: Authenticatable>( &self, actor_id: &str, ) -> Result<()>
   fn login_response( &self, session_id: String, body: impl IntoResponse, ) -> Result<Response>
+  fn login_response_with_remember( &self, session_id: String, remember: bool, body: impl IntoResponse, ) -> Result<Response>
   fn logout_response(&self, body: impl IntoResponse) -> Result<Response>
 ```
 

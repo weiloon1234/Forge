@@ -227,6 +227,44 @@ const HTTP_CORS_FIELDS: &[PublishedField] = &[
     field("max_age_seconds", "600", "600", false, false, None),
 ];
 
+const HTTP_CSRF_FIELDS: &[PublishedField] = &[
+    field("enabled", "false", "false", false, false, None),
+    field(
+        "cookie_name",
+        "\"forge_csrf\"",
+        "forge_csrf",
+        false,
+        false,
+        None,
+    ),
+    field(
+        "header_name",
+        "\"x-csrf-token\"",
+        "x-csrf-token",
+        false,
+        false,
+        None,
+    ),
+    field("cookie_secure", "true", "true", false, false, None),
+    field("cookie_path", "\"/\"", "/", false, false, None),
+    field(
+        "cookie_same_site",
+        "\"lax\"",
+        "lax",
+        false,
+        false,
+        Some("\"lax\", \"strict\", or \"none\"; none requires secure cookies"),
+    ),
+    field(
+        "exclude_paths",
+        "[]",
+        "[]",
+        false,
+        false,
+        Some("Segment-aware prefixes excluded from CSRF checks"),
+    ),
+];
+
 const HTTP_RATE_LIMIT_FIELDS: &[PublishedField] = &[
     field("enabled", "false", "false", false, false, None),
     field("max_requests", "600", "600", false, false, None),
@@ -455,6 +493,22 @@ const AUTH_SESSION_FIELDS: &[PublishedField] = &[
     ),
     field("cookie_secure", "true", "true", false, false, None),
     field("cookie_path", "\"/\"", "/", false, false, None),
+    field(
+        "cookie_same_site",
+        "\"lax\"",
+        "lax",
+        false,
+        false,
+        Some("\"lax\", \"strict\", or \"none\"; none requires secure cookies"),
+    ),
+    field(
+        "cookie_domain",
+        "\"\"",
+        "",
+        false,
+        false,
+        Some("Optional Set-Cookie Domain; empty omits Domain"),
+    ),
     field("sliding_expiry", "true", "true", false, false, None),
     field("remember_ttl_days", "30", "30", false, false, None),
 ];
@@ -968,6 +1022,12 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                 Some("HTTP CORS"),
                 false,
                 HTTP_CORS_FIELDS,
+            ),
+            table(
+                &["http", "csrf"],
+                Some("HTTP CSRF"),
+                false,
+                HTTP_CSRF_FIELDS,
             ),
             table(
                 &["http", "rate_limit"],
@@ -1520,9 +1580,12 @@ mod tests {
         assert!(output
             .contains("# headers = [\"cf-connecting-ip\", \"x-real-ip\", \"x-forwarded-for\"]"));
         assert!(output.contains("[http.cors]"));
+        assert!(output.contains("[http.csrf]"));
+        assert!(output.contains("# cookie_same_site = \"lax\"  # \"lax\", \"strict\", or \"none\"; none requires secure cookies"));
         assert!(output.contains("[http.rate_limit]"));
         assert!(output.contains("# by = \"actor_or_ip\"  # \"ip\", \"actor\", or \"actor_or_ip\""));
         assert!(env.contains("# HTTP__MAX_BODY_SIZE_BYTES=0"));
+        assert!(env.contains("# HTTP__CSRF__COOKIE_SAME_SITE=lax"));
         assert!(env.contains("# HTTP__TRUSTED_PROXY__TRUSTED_CIDRS=[]"));
         assert!(env.contains("# HTTP__RATE_LIMIT__BY=actor_or_ip"));
     }
@@ -1535,6 +1598,8 @@ mod tests {
         assert!(output.contains("# prune_retention_days = 30  # Auto-prune expired/revoked tokens older than N days (0 = app-owned/manual)"));
         assert!(output.contains("# [auth.tokens.guards.admin]"));
         assert!(output.contains("# access_token_ttl_minutes = 43200"));
+        assert!(output
+            .contains("# cookie_domain = \"\"  # Optional Set-Cookie Domain; empty omits Domain"));
         assert!(output.contains("[auth.password_resets]"));
         assert!(output.contains(
             "# expiry_minutes = 60  # Password reset token lifetime (0 = no expiry/auto-prune)"
@@ -1542,6 +1607,7 @@ mod tests {
         assert!(output.contains("[auth.email_verification]"));
         assert!(output.contains("# expiry_minutes = 1440  # Email verification token lifetime (0 = no expiry/auto-prune)"));
         assert!(env.contains("# AUTH__TOKENS__PRUNE_RETENTION_DAYS=30"));
+        assert!(env.contains("# AUTH__SESSIONS__COOKIE_SAME_SITE=lax"));
         assert!(env.contains("# AUTH__PASSWORD_RESETS__EXPIRY_MINUTES=60"));
         assert!(env.contains("# AUTH__EMAIL_VERIFICATION__EXPIRY_MINUTES=1440"));
     }

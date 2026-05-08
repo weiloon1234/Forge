@@ -84,21 +84,18 @@ impl RouteRegistry {
 
     /// Verify a signed URL's signature and expiry.
     pub fn verify_signature(url: &str, signing_key: &[u8]) -> Result<()> {
-        // Find and extract the signature parameter
-        let (url_without_sig, signature) = extract_signature_param(url)?;
+        let signed = split_signed_url(url)?;
 
-        // Recompute HMAC
-        let expected = crate::support::hmac::hmac_sha256_hex(signing_key, &url_without_sig);
+        let expected =
+            crate::support::hmac::hmac_sha256_hex(signing_key, &signed.url_without_signature);
 
-        // Constant-time comparison
-        if !crate::support::hmac::constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
+        if !crate::support::hmac::constant_time_eq(signed.signature.as_bytes(), expected.as_bytes())
+        {
             return Err(Error::http(403, "invalid signature"));
         }
 
-        // Check expiry
-        let expires = extract_expires_param(&url_without_sig)?;
         let now = chrono::Utc::now().timestamp();
-        if now > expires {
+        if now > signed.expires {
             return Err(Error::http(403, "signed URL has expired"));
         }
 
@@ -124,28 +121,183 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn extract_signature_param(url: &str) -> Result<(String, String)> {
-    if let Some(pos) = url.rfind("&signature=") {
-        let signature = url[pos + 11..].to_string();
-        let url_without = url[..pos].to_string();
-        Ok((url_without, signature))
-    } else if let Some(pos) = url.rfind("?signature=") {
-        let signature = url[pos + 11..].to_string();
-        let url_without = url[..pos].to_string();
-        Ok((url_without, signature))
-    } else {
-        Err(Error::http(403, "missing signature"))
-    }
+struct SignedUrlParts {
+    url_without_signature: String,
+    signature: String,
+    expires: i64,
 }
 
-fn extract_expires_param(url: &str) -> Result<i64> {
-    let query = url.split('?').nth(1).unwrap_or("");
-    for param in query.split('&') {
-        if let Some(value) = param.strip_prefix("expires=") {
-            return value
-                .parse::<i64>()
-                .map_err(|_| Error::http(403, "invalid expires parameter"));
+fn split_signed_url(url: &str) -> Result<SignedUrlParts> {
+    let Some((base, query)) = url.split_once('?') else {
+        return Err(Error::http(403, "missing signature"));
+    };
+    if query.is_empty() {
+        return Err(Error::http(403, "missing signature"));
+    }
+
+    let params = query.split('&').collect::<Vec<_>>();
+    let mut signature = None;
+    let mut signature_index = None;
+    let mut expires = None;
+    let mut signature_count = 0;
+    let mut expires_count = 0;
+
+    for (index, param) in params.iter().enumerate() {
+        let (key, value) = param.split_once('=').unwrap_or((param, ""));
+        match key {
+            "signature" => {
+                signature_count += 1;
+                signature_index = Some(index);
+                if !is_valid_signature_value(value) {
+                    return Err(Error::http(403, "invalid signature"));
+                }
+                signature = Some(value.to_string());
+            }
+            "expires" => {
+                expires_count += 1;
+                let parsed = value
+                    .parse::<i64>()
+                    .map_err(|_| Error::http(403, "invalid expires parameter"))?;
+                expires = Some(parsed);
+            }
+            _ => {}
         }
     }
-    Err(Error::http(403, "missing expires parameter"))
+
+    if signature_count == 0 {
+        return Err(Error::http(403, "missing signature"));
+    }
+    if signature_count > 1 || signature_index != Some(params.len() - 1) {
+        return Err(Error::http(403, "invalid signature"));
+    }
+    if expires_count == 0 {
+        return Err(Error::http(403, "missing expires parameter"));
+    }
+    if expires_count > 1 {
+        return Err(Error::http(403, "invalid expires parameter"));
+    }
+
+    let signature_index = signature_index.expect("signature presence checked above");
+    let query_without_signature = params[..signature_index].join("&");
+    let url_without_signature = if query_without_signature.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{query_without_signature}")
+    };
+
+    Ok(SignedUrlParts {
+        url_without_signature,
+        signature: signature.expect("signature presence checked above"),
+        expires: expires.expect("expires presence checked above"),
+    })
+}
+
+fn is_valid_signature_value(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::support::{DateTime, RouteId};
+
+    fn registry() -> RouteRegistry {
+        let mut registry = RouteRegistry::new();
+        registry.register(RouteId::new("reset"), "/reset/{token}");
+        registry
+    }
+
+    fn signing_key() -> &'static [u8] {
+        b"test-signing-key"
+    }
+
+    fn error_message(error: Error) -> String {
+        error.to_string()
+    }
+
+    #[test]
+    fn signed_url_roundtrips_and_rejects_tampering() {
+        let url = registry()
+            .signed_url(
+                RouteId::new("reset"),
+                &[("token", "abc 123")],
+                signing_key(),
+                DateTime::now().add_days(1),
+            )
+            .unwrap();
+
+        RouteRegistry::verify_signature(&url, signing_key()).unwrap();
+
+        let tampered = url.replace("abc%20123", "abc%20456");
+        let error = RouteRegistry::verify_signature(&tampered, signing_key()).unwrap_err();
+        assert!(error_message(error).contains("invalid signature"));
+    }
+
+    #[test]
+    fn signed_url_rejects_duplicate_signature_and_expires_params() {
+        let url = registry()
+            .signed_url(
+                RouteId::new("reset"),
+                &[("token", "abc")],
+                signing_key(),
+                DateTime::now().add_days(1),
+            )
+            .unwrap();
+
+        let duplicate_signature = format!("{url}&signature=abc");
+        let error =
+            RouteRegistry::verify_signature(&duplicate_signature, signing_key()).unwrap_err();
+        assert!(error_message(error).contains("invalid signature"));
+
+        let duplicate_expires = url.replacen("expires=", "expires=1&expires=", 1);
+        let error = RouteRegistry::verify_signature(&duplicate_expires, signing_key()).unwrap_err();
+        assert!(error_message(error).contains("invalid expires parameter"));
+    }
+
+    #[test]
+    fn signed_url_rejects_unsigned_query_after_signature() {
+        let url = registry()
+            .signed_url(
+                RouteId::new("reset"),
+                &[("token", "abc")],
+                signing_key(),
+                DateTime::now().add_days(1),
+            )
+            .unwrap();
+
+        let error = RouteRegistry::verify_signature(&format!("{url}&admin=true"), signing_key())
+            .unwrap_err();
+
+        assert!(error_message(error).contains("invalid signature"));
+    }
+
+    #[test]
+    fn signed_url_rejects_missing_invalid_and_expired_values() {
+        let url = registry()
+            .signed_url(
+                RouteId::new("reset"),
+                &[("token", "abc")],
+                signing_key(),
+                DateTime::now().sub_days(1),
+            )
+            .unwrap();
+        let error = RouteRegistry::verify_signature(&url, signing_key()).unwrap_err();
+        assert!(error_message(error).contains("signed URL has expired"));
+
+        let error =
+            RouteRegistry::verify_signature("/reset/abc?expires=1", signing_key()).unwrap_err();
+        assert!(error_message(error).contains("missing signature"));
+
+        let error = RouteRegistry::verify_signature(
+            "/reset/abc?expires=nope&signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            signing_key(),
+        )
+        .unwrap_err();
+        assert!(error_message(error).contains("invalid expires parameter"));
+
+        let error =
+            RouteRegistry::verify_signature("/reset/abc?expires=1&signature=abc", signing_key())
+                .unwrap_err();
+        assert!(error_message(error).contains("invalid signature"));
+    }
 }

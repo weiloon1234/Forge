@@ -57,7 +57,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
     match group_key {
         "config" => &[
             "`AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.",
-            "`HttpConfig` is optional and additive: global body cap, request timeout, CORS, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.",
+            "`HttpConfig` is optional and additive: global body cap, request timeout, CORS, CSRF, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.",
             "`DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.",
             "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
@@ -68,6 +68,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.",
             "`HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` remains compatible and trusts all headers.",
             "Config-derived CORS validates origins, methods, and headers at boot; wildcard origins with credentials are rejected.",
+            "Config-derived CSRF is opt-in; code-registered `Csrf` remains source-compatible and path exclusions are segment-aware.",
             "Config-derived body-limit, request-timeout, and rate-limit rejections return JSON `ErrorResponse` bodies with HTTP 413, 408, and 429.",
             "Actor-only rate limits require an authenticated actor; use `actor_or_ip` when a global rate limit needs an IP fallback.",
             "IP rate limits use `TrustedProxy` real IP when available and otherwise fall back to TCP peer connect info on the real server path.",
@@ -144,6 +145,7 @@ mod tests {
         append_module_notes("http", &mut http);
         assert!(http.contains("security_headers"));
         assert!(http.contains("trusted_proxy"));
+        assert!(http.contains("CSRF"));
         assert!(http.contains("413"));
         assert!(http.contains("actor_or_ip"));
     }

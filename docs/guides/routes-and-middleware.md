@@ -392,10 +392,13 @@ Verify in a handler:
 ```rust
 async fn reset_form(State(app): State<AppContext>, request: Request) -> Result<impl IntoResponse> {
     app.verify_signed_url(&request.uri().to_string())?;
-    // Returns Error if expired or tampered
+    // Returns Error if expired, tampered, duplicated, or appended after signing
     Ok(Html("reset form"))
 }
 ```
+
+Signed URL verification rejects duplicate `expires` or `signature` parameters and rejects query
+parameters appended after `signature`, so only the originally signed URL shape is accepted.
 
 ---
 
@@ -451,6 +454,15 @@ allowed_headers = ["authorization", "content-type", "x-request-id", "x-csrf-toke
 allow_credentials = false
 max_age_seconds = 600
 
+[http.csrf]
+enabled = false
+cookie_name = "forge_csrf"
+header_name = "x-csrf-token"
+cookie_secure = true
+cookie_path = "/"
+cookie_same_site = "lax"       # lax | strict | none; none requires secure cookies
+exclude_paths = []
+
 [http.rate_limit]
 enabled = false
 max_requests = 600
@@ -459,9 +471,9 @@ by = "actor_or_ip"             # ip | actor | actor_or_ip
 key_prefix = "http:"
 ```
 
-Compatibility defaults keep hard caps, CORS, trusted proxy, and rate limiting opt-in. Security
-headers are enabled by default with HSTS off, so local HTTP and first deploys stay usable while
-still publishing the production hardening knobs.
+Compatibility defaults keep hard caps, CORS, trusted proxy, CSRF, and rate limiting opt-in.
+Security headers are enabled by default with HSTS off, so local HTTP and first deploys stay usable
+while still publishing the production hardening knobs.
 
 ### Execution Order
 
@@ -561,7 +573,8 @@ MiddlewareConfig::from(
 
 The CSRF cookie uses `Path=/` and `SameSite=Lax`. It is intentionally not
 `HttpOnly`, because browser JavaScript must read the token and echo it in the
-request header.
+request header. Exclusions are segment-aware: `.exclude("/api")` skips `/api`
+and `/api/...`, but does not skip `/apiary`.
 
 **Frontend integration:**
 

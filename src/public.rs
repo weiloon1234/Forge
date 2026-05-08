@@ -77,6 +77,10 @@ pub use crate::foundation::{
     ServiceRegistrar,
 };
 pub use crate::http::cookie::{Cookie, CookieJar, SessionCookie};
+pub use crate::http::download::{
+    attachment_content_disposition, content_disposition_header, content_disposition_value,
+    inline_content_disposition, ContentDispositionType,
+};
 pub use crate::http::middleware::{
     Compression, Cors, Csrf, CsrfToken, ETag, MaintenanceMode, MaxBodySize, MiddlewareConfig,
     MiddlewareGroups, RateLimit, RateLimitBy, RateLimitWindow, RealIp, RequestTimeout,

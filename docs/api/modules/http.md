@@ -165,6 +165,16 @@ struct SessionCookie
 fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String>
 ```
 
+## forge::http::download
+
+```rust
+enum ContentDispositionType { Attachment, Inline }
+fn attachment_content_disposition(filename: impl AsRef<str>) -> HeaderValue
+fn content_disposition_header( disposition: ContentDispositionType, filename: impl AsRef<str>, ) -> HeaderValue
+fn content_disposition_value( disposition: ContentDispositionType, filename: &str, ) -> String
+fn inline_content_disposition(filename: impl AsRef<str>) -> HeaderValue
+```
+
 ## forge::http::middleware
 
 ```rust

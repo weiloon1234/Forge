@@ -642,6 +642,21 @@ MiddlewareConfig::from(RequestTimeout::mins(5))
 
 Returns **408 Request Timeout** with a JSON error body if exceeded.
 
+### File Downloads
+
+Use Forge's download helpers when returning user-facing filenames:
+
+```rust
+use axum::http::header::CONTENT_DISPOSITION;
+use forge::http::download::attachment_content_disposition;
+
+Response::builder()
+    .header(CONTENT_DISPOSITION, attachment_content_disposition("report.xlsx"));
+```
+
+The helper strips path-like/control-character input, prevents header injection, emits a safe ASCII
+`filename`, and includes RFC 5987 `filename*` for Unicode clients.
+
 ### ETag
 
 Automatic conditional responses — returns 304 Not Modified when content hasn't changed:

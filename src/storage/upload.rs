@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use tokio::io::AsyncWriteExt as _;
 
 use crate::foundation::{AppContext, Error, Result};
+use crate::support::filename::{safe_extension_from_name, sanitize_filename};
 use serde::de::{self, Deserialize, Deserializer};
 
 use super::stored_file::StoredFile;
@@ -103,25 +104,7 @@ impl UploadedFile {
     /// removes control characters, trims unsafe wrapper whitespace/quotes,
     /// caps length, and falls back to `upload` when no safe name remains.
     pub fn sanitize_name(name: &str) -> String {
-        let segment = name
-            .rsplit(['/', '\\'])
-            .find(|segment| !segment.is_empty())
-            .unwrap_or(name);
-        let cleaned: String = segment
-            .chars()
-            .filter(|ch| !ch.is_control() && *ch != '/' && *ch != '\\')
-            .collect();
-        let trimmed = cleaned
-            .trim_matches(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\'')
-            .trim();
-
-        let name = if trimmed.is_empty() {
-            FALLBACK_UPLOAD_FILENAME
-        } else {
-            trimmed
-        };
-
-        truncate_filename(name)
+        sanitize_filename(name, FALLBACK_UPLOAD_FILENAME, MAX_UPLOAD_FILENAME_BYTES)
     }
 
     /// Generates a UUIDv7-based filename, preserving a safe normalized extension.
@@ -150,7 +133,7 @@ impl UploadedFile {
         self.original_name
             .as_ref()
             .map(|name| Self::sanitize_name(name))
-            .and_then(|name| safe_extension_from_sanitized_name(&name))
+            .and_then(|name| safe_extension_from_name(&name))
     }
 
     /// Normalizes a user-provided filename by stripping any path components,
@@ -415,55 +398,6 @@ fn normalize_content_type(value: &str) -> Option<String> {
         return None;
     }
     Some(value)
-}
-
-fn safe_extension_from_sanitized_name(name: &str) -> Option<String> {
-    let (_, ext) = name.rsplit_once('.')?;
-    if ext.is_empty() || ext.len() > 32 {
-        return None;
-    }
-    if !ext
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-        return None;
-    }
-    Some(ext.to_ascii_lowercase())
-}
-
-fn truncate_filename(name: &str) -> String {
-    if name.len() <= MAX_UPLOAD_FILENAME_BYTES {
-        return name.to_string();
-    }
-
-    let extension = safe_extension_from_sanitized_name(name);
-    let suffix = extension
-        .as_ref()
-        .map(|ext| format!(".{ext}"))
-        .unwrap_or_default();
-    let base_limit = MAX_UPLOAD_FILENAME_BYTES.saturating_sub(suffix.len());
-    let base = name
-        .rsplit_once('.')
-        .map(|(base, _)| base)
-        .filter(|_| extension.is_some())
-        .unwrap_or(name);
-    let mut truncated = truncate_to_byte_len(base, base_limit);
-    if truncated.is_empty() {
-        truncated = FALLBACK_UPLOAD_FILENAME.to_string();
-    }
-    truncated.push_str(&suffix);
-    truncated
-}
-
-fn truncate_to_byte_len(value: &str, limit: usize) -> String {
-    let mut output = String::new();
-    for ch in value.chars() {
-        if output.len() + ch.len_utf8() > limit {
-            break;
-        }
-        output.push(ch);
-    }
-    output
 }
 
 fn is_forge_upload_temp_path(path: &Path) -> bool {

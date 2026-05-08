@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use serde::Serialize;
 
 use crate::foundation::{AppContext, Error, Result};
+use crate::http::download::attachment_content_disposition;
 
 use super::callback::{datatable_columns, datatable_mappings};
 use super::column::DatatableColumn;
@@ -28,12 +30,12 @@ where
     let filename = format!("{}.xlsx", D::ID);
     axum::response::Response::builder()
         .header(
-            "Content-Type",
+            CONTENT_TYPE,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         .header(
-            "Content-Disposition",
-            format!("attachment; filename=\"{filename}\""),
+            CONTENT_DISPOSITION,
+            attachment_content_disposition(&filename),
         )
         .body(axum::body::Body::from(bytes))
         .map_err(|e| Error::message(format!("failed to build download response: {e}")))

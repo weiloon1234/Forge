@@ -1343,6 +1343,19 @@ fn deprecated(&mut self) -> &mut Self
 | `ETag` | HTTP ETag support |
 | `MiddlewareGroups` | Named middleware group registry |
 
+#### Download helpers
+
+```rust
+enum ContentDispositionType { Attachment, Inline }
+fn attachment_content_disposition(filename: impl AsRef<str>) -> HeaderValue
+fn inline_content_disposition(filename: impl AsRef<str>) -> HeaderValue
+fn content_disposition_header(disposition: ContentDispositionType, filename: impl AsRef<str>) -> HeaderValue
+fn content_disposition_value(disposition: ContentDispositionType, filename: &str) -> String
+```
+
+Download helpers sanitize path-like/control-character filenames, emit a safe ASCII
+`filename`, and include RFC 5987 `filename*` for Unicode clients.
+
 **Cors — methods:**
 
 ```rust

@@ -1,4 +1,5 @@
 pub mod cookie;
+pub mod download;
 pub mod middleware;
 pub mod resource;
 pub mod response;

@@ -660,6 +660,10 @@ async fn projection_datatable_downloads_and_queues_exports_through_the_registry(
         response.headers().get("content-type").unwrap(),
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
+    assert_eq!(
+        response.headers().get("content-disposition").unwrap(),
+        "attachment; filename=\"merchant-sales.xlsx\"; filename*=UTF-8''merchant-sales.xlsx"
+    );
     let (_, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
     assert!(bytes.starts_with(b"PK"));

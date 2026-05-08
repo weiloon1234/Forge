@@ -4,6 +4,7 @@ use std::pin::Pin;
 mod collection;
 mod crypt;
 mod datetime;
+pub(crate) mod filename;
 mod hash;
 pub(crate) mod hmac;
 mod identifiers;

@@ -117,6 +117,7 @@ pub fn init(config: &ConfigRepository) -> Result<()> {
             .map(|s| s.to_string())
             .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown panic".to_string());
+        let message = crate::support::redaction::redact_sensitive_text(&message);
         tracing::error!(
             target: "forge.panic",
             location = %location,

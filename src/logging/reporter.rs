@@ -11,6 +11,7 @@ use crate::auth::Actor;
 use crate::events::EventOrigin;
 use crate::foundation::AppContext;
 use crate::jobs::{JobDeadLetterContext, JobMiddleware};
+use crate::support::redaction::{redact_sensitive_json, redact_sensitive_text};
 use crate::support::sync::lock_unpoisoned;
 
 use super::{
@@ -97,6 +98,7 @@ impl ErrorReporterRegistry {
         if report.status < self.handler_min_status {
             return;
         }
+        let report = redact_handler_error_report(report);
 
         for (index, reporter) in self.reporters.iter().enumerate() {
             report_with_panic_boundary("handler_error", index, || {
@@ -107,6 +109,7 @@ impl ErrorReporterRegistry {
     }
 
     pub(crate) async fn report_panic(&self, report: PanicReport) {
+        let report = redact_panic_report(report);
         for (index, reporter) in self.reporters.iter().enumerate() {
             report_with_panic_boundary("panic", index, || reporter.report_panic(report.clone()))
                 .await;
@@ -114,6 +117,7 @@ impl ErrorReporterRegistry {
     }
 
     pub(crate) async fn report_job_dead_lettered(&self, report: JobDeadLetteredReport) {
+        let report = redact_dead_letter_report(report);
         for (index, reporter) in self.reporters.iter().enumerate() {
             report_with_panic_boundary("job_dead_lettered", index, || {
                 reporter.report_job_dead_lettered(report.clone())
@@ -121,6 +125,27 @@ impl ErrorReporterRegistry {
             .await;
         }
     }
+}
+
+fn redact_handler_error_report(mut report: HandlerErrorReport) -> HandlerErrorReport {
+    report.error = redact_sensitive_text(&report.error);
+    report.chain = report
+        .chain
+        .into_iter()
+        .map(|entry| redact_sensitive_text(&entry))
+        .collect();
+    report
+}
+
+fn redact_panic_report(mut report: PanicReport) -> PanicReport {
+    report.message = redact_sensitive_text(&report.message);
+    report
+}
+
+fn redact_dead_letter_report(mut report: JobDeadLetteredReport) -> JobDeadLetteredReport {
+    report.last_error = redact_sensitive_text(&report.last_error);
+    redact_sensitive_json(&mut report.payload);
+    report
 }
 
 async fn report_with_panic_boundary<F, Fut>(report: &'static str, reporter_index: usize, run: F)
@@ -171,8 +196,11 @@ pub(crate) fn mark_handler_error_response(
         .extensions_mut()
         .insert(HandlerErrorResponseExtension {
             status,
-            error,
-            chain,
+            error: redact_sensitive_text(&error),
+            chain: chain
+                .into_iter()
+                .map(|entry| redact_sensitive_text(&entry))
+                .collect(),
         });
 }
 
@@ -252,13 +280,14 @@ pub(crate) async fn report_job_dead_lettered(app: &AppContext, report: JobDeadLe
 }
 
 pub(crate) fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
+    let message = if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
     } else if let Some(message) = payload.downcast_ref::<String>() {
         message.clone()
     } else {
         "unknown panic".to_string()
-    }
+    };
+    redact_sensitive_text(&message)
 }
 
 pub(crate) fn set_global_panic_reporters(registry: Arc<ErrorReporterRegistry>) {
@@ -327,14 +356,16 @@ impl JobMiddleware for ErrorReporterJobMiddleware {
         &self,
         context: &JobDeadLetterContext,
     ) -> crate::foundation::Result<()> {
+        let mut payload = context.payload.clone();
+        redact_sensitive_json(&mut payload);
         report_job_dead_lettered(
             &context.app,
             JobDeadLetteredReport {
                 job_class: context.class.clone(),
                 job_id: context.id.clone(),
                 attempts: context.attempts,
-                last_error: context.last_error.clone(),
-                payload: context.payload.clone(),
+                last_error: redact_sensitive_text(&context.last_error),
+                payload,
             },
         )
         .await;
@@ -621,6 +652,72 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].job_class, "email.send");
         assert_eq!(reports[0].job_id, "job-1");
+    }
+
+    #[tokio::test]
+    async fn reporter_delivery_redacts_sensitive_error_text_and_payloads() {
+        let reporter = Arc::new(StubReporter::default());
+        let registry = ErrorReporterRegistry::new(vec![reporter.clone() as Arc<dyn ErrorReporter>]);
+
+        registry
+            .report_handler_error(HandlerErrorReport {
+                method: "POST".to_string(),
+                path: "/login".to_string(),
+                status: 500,
+                error: "database postgres://user:secret@example.test/app token=abc".to_string(),
+                chain: vec!["Authorization: Bearer abc.def".to_string()],
+                origin: None,
+                request_id: Some("req-redact".to_string()),
+            })
+            .await;
+        registry
+            .report_panic(PanicReport {
+                message: "panic with password=\"pw\"".to_string(),
+                location: "src/tests.rs:1".to_string(),
+                backtrace: None,
+                context: PanicContext::Other,
+            })
+            .await;
+        registry
+            .report_job_dead_lettered(JobDeadLetteredReport {
+                job_class: "email.send".to_string(),
+                job_id: "job-1".to_string(),
+                attempts: 3,
+                last_error: "failed api_key=secret".to_string(),
+                payload: serde_json::json!({
+                    "token": "abc",
+                    "nested": { "password": "pw", "safe": "visible" }
+                }),
+            })
+            .await;
+
+        let handler_reports = reporter.handler_reports.lock().unwrap();
+        assert_eq!(
+            handler_reports[0].error,
+            "database postgres://[redacted]@example.test/app token=[redacted]"
+        );
+        assert_eq!(
+            handler_reports[0].chain[0],
+            "Authorization: Bearer [redacted]"
+        );
+
+        let panic_reports = reporter.panic_reports.lock().unwrap();
+        assert_eq!(
+            panic_reports[0].message,
+            "panic with password=\"[redacted]\""
+        );
+
+        let dead_letter_reports = reporter.dead_letter_reports.lock().unwrap();
+        assert_eq!(
+            dead_letter_reports[0].last_error,
+            "failed api_key=[redacted]"
+        );
+        assert_eq!(dead_letter_reports[0].payload["token"], "[redacted]");
+        assert_eq!(
+            dead_letter_reports[0].payload["nested"]["password"],
+            "[redacted]"
+        );
+        assert_eq!(dead_letter_reports[0].payload["nested"]["safe"], "visible");
     }
 
     #[tokio::test]

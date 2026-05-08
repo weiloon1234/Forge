@@ -9,6 +9,7 @@ mod hash;
 pub(crate) mod hmac;
 mod identifiers;
 pub mod lock;
+pub(crate) mod redaction;
 pub(crate) mod runtime;
 mod sanitize;
 pub(crate) mod sha256;

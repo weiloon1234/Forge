@@ -3,9 +3,9 @@ use std::time::Duration;
 use reqwest::StatusCode;
 
 use crate::foundation::Error;
+use crate::support::redaction::{redact_sensitive_json, redact_sensitive_text};
 
 const PROVIDER_ERROR_BODY_LIMIT: usize = 1024;
-const REDACTED: &str = "[redacted]";
 
 pub(super) fn client(provider: &'static str, timeout_secs: u64) -> reqwest::Client {
     let mut builder = reqwest::Client::builder();
@@ -46,39 +46,10 @@ fn sanitize_provider_error_body(body: &str) -> String {
         return truncate_chars(&value.to_string(), PROVIDER_ERROR_BODY_LIMIT);
     }
 
-    truncate_chars(&normalize_visible_text(body), PROVIDER_ERROR_BODY_LIMIT)
-}
-
-fn redact_sensitive_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, value) in map {
-                if is_sensitive_key(key) {
-                    *value = serde_json::Value::String(REDACTED.to_string());
-                } else {
-                    redact_sensitive_json(value);
-                }
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                redact_sensitive_json(value);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key.contains("authorization")
-        || key.contains("password")
-        || key.contains("secret")
-        || key.contains("signature")
-        || key.contains("token")
-        || key.ends_with("key")
-        || key.contains("_key")
-        || key.contains("-key")
+    truncate_chars(
+        &redact_sensitive_text(&normalize_visible_text(body)),
+        PROVIDER_ERROR_BODY_LIMIT,
+    )
 }
 
 fn normalize_visible_text(value: &str) -> String {
@@ -130,5 +101,19 @@ mod tests {
 
         assert!(sanitized.ends_with("..."));
         assert!(sanitized.len() < body.len());
+    }
+
+    #[test]
+    fn provider_error_body_redacts_sensitive_text_patterns() {
+        let body = "request failed: Authorization: Bearer abc.def api_key=secret postgres://user:pw@example.test/db";
+
+        let sanitized = sanitize_provider_error_body(body);
+
+        assert!(sanitized.contains("Authorization: Bearer [redacted]"));
+        assert!(sanitized.contains("api_key=[redacted]"));
+        assert!(sanitized.contains("postgres://[redacted]@example.test/db"));
+        assert!(!sanitized.contains("abc.def"));
+        assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("user:pw"));
     }
 }

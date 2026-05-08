@@ -60,6 +60,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`HttpConfig` is optional and additive: global body cap, request timeout, CORS, CSRF, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.",
             "`CacheConfig.error_mode` defaults to `strict`; `remember_singleflight` is enabled by default and distributed remember locks are opt-in.",
             "`DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.",
+            "`DatabaseConfig.redact_sql_literals` is enabled by default so SQL logs and `/_forge/sql` retain query shape without common literal values.",
             "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
             "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
@@ -92,7 +93,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "Forge does not store Prometheus samples; scrape retention belongs to Prometheus or your metrics backend.",
             "`ObservabilityConfig.enabled` controls `/_forge/*` route registration; `capture_enabled` controls passive runtime capture while preserving route availability.",
             "Runtime counters, HTTP samples, SQL slow queries, N+1 suspects, and WebSocket channel counters are bounded process memory and reset on restart.",
-            "`/_forge/sql` returns slow-query stats, top-slowest ranking, and potential HTTP N+1 suspects while preserving the existing `slow_queries` key.",
+            "`/_forge/sql` returns slow-query stats, top-slowest ranking, and potential HTTP N+1 suspects while preserving the existing `slow_queries` key; SQL literals and comments are redacted by default.",
         ],
         "scheduler" => &[
             "Schedule handler panics are handled as schedule failures and route through `ScheduleOptions::on_failure`.",
@@ -127,6 +128,7 @@ mod tests {
         assert!(config.contains("JobsConfig"));
         assert!(config.contains("HttpConfig"));
         assert!(config.contains("CacheConfig.error_mode"));
+        assert!(config.contains("redact_sql_literals"));
         assert!(config.contains("history_retention_days"));
         assert!(config.contains("ObservabilityConfig.enabled"));
         assert!(config.contains("SchedulerConfig"));
@@ -153,6 +155,7 @@ mod tests {
         assert!(logging.contains("/_forge/metrics"));
         assert!(logging.contains("Prometheus"));
         assert!(logging.contains("capture_enabled"));
+        assert!(logging.contains("literals and comments are redacted"));
 
         let mut http = String::new();
         append_module_notes("http", &mut http);

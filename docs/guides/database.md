@@ -989,7 +989,9 @@ url = "postgres://forge:secret@127.0.0.1:5432/forge"
 # min_connections = 1
 # max_connections = 10
 # acquire_timeout_ms = 5000
-# log_queries = false              # log all SQL
+# log_queries = false              # log SQL shape to tracing
+# log_query_bindings = false       # include binding values when log_queries=true (dev only)
+# redact_sql_literals = true       # redact SQL literals/comments in logs and /_forge/sql
 # slow_query_threshold_ms = 500    # log slow queries
 # slow_query_retention = 100       # retained slow-query entries for /_forge/sql; 0 disables retention
 # n_plus_one_detection = true      # detect repeated query shapes per HTTP request
@@ -1006,6 +1008,11 @@ N+1 query suspects. N+1 detection groups repeated SQL fingerprints inside a sing
 request; jobs and scheduler runs are intentionally excluded to avoid batch-work noise.
 
 SQL observability data is process-local and bounded in memory. It is cleared on restart and does
-not require a database migration or cleanup scheduler. Set `slow_query_threshold_ms = 0` to disable
-slow-query capture, `slow_query_retention = 0` to keep slow-query logs out of the dashboard, or
+not require a database migration or cleanup scheduler. SQL shown in logs and
+`/_forge/sql` redacts string/numeric literals and SQL comments by default, so
+slow-query and N+1 diagnostics keep query shape without retaining common secret
+values. Set `slow_query_threshold_ms = 0` to disable slow-query capture,
+`slow_query_retention = 0` to keep slow-query logs out of the dashboard, or
 `n_plus_one_detection = false` to avoid per-query HTTP fingerprinting overhead.
+Use `log_query_bindings = true` only for short-lived local debugging; binding
+values may contain user data or secrets.

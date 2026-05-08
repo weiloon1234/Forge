@@ -2228,7 +2228,8 @@ HTTP runtime counters include observability endpoint traffic, while `/_forge/htt
 retain application routes only so dashboard polling does not crowd out useful samples.
 
 `/_forge/sql` preserves the existing `slow_queries` array and additively returns slow-query stats,
-top-slowest ranking, and potential HTTP N+1 suspects grouped by repeated SQL fingerprint.
+top-slowest ranking, and potential HTTP N+1 suspects grouped by repeated SQL fingerprint. SQL
+literals and comments are redacted by default before logs or dashboard retention.
 
 `ObservabilityConfig.enabled = false` skips `/_forge/*` route registration. `capture_enabled = false`
 keeps routes available but stops passive runtime capture; existing endpoint responses remain

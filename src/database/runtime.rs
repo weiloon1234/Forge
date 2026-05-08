@@ -42,6 +42,8 @@ const SLOW_QUERY_LOG_CAPACITY: usize = 100;
 pub(crate) struct SqlLogConfig {
     pub capture_enabled: bool,
     pub log_queries: bool,
+    pub log_query_bindings: bool,
+    pub redact_sql_literals: bool,
     pub slow_threshold: Option<Duration>,
     pub slow_query_retention: usize,
 }
@@ -57,6 +59,8 @@ impl SqlLogConfig {
         Self {
             capture_enabled,
             log_queries: config.log_queries,
+            log_query_bindings: config.log_query_bindings,
+            redact_sql_literals: config.redact_sql_literals,
             slow_threshold: if capture_enabled && config.slow_query_threshold_ms > 0 {
                 Some(Duration::from_millis(config.slow_query_threshold_ms))
             } else {
@@ -71,6 +75,8 @@ impl SqlLogConfig {
         Self {
             capture_enabled: false,
             log_queries: false,
+            log_query_bindings: false,
+            redact_sql_literals: true,
             slow_threshold: None,
             slow_query_retention: 0,
         }
@@ -141,7 +147,13 @@ fn n_plus_one_log() -> &'static std::sync::Mutex<VecDeque<NPlusOneSuspect>> {
     N_PLUS_ONE_LOG.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(100)))
 }
 
-fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>, retention: usize) {
+fn record_slow_query(
+    sql: &str,
+    duration_ms: u64,
+    label: Option<&str>,
+    retention: usize,
+    redact_literals: bool,
+) {
     if retention == 0 {
         return;
     }
@@ -152,7 +164,7 @@ fn record_slow_query(sql: &str, duration_ms: u64, label: Option<&str>, retention
     }
     let trace = crate::logging::current_trace_context();
     log.push_back(SlowQueryEntry {
-        sql: sql.to_string(),
+        sql: sql_for_observability(sql, redact_literals),
         duration_ms,
         label: label.map(|s| s.to_string()),
         request_id: trace
@@ -246,6 +258,7 @@ struct SqlQueryTraceConfig {
     enabled: bool,
     min_repeats: u64,
     retention: usize,
+    redact_sql_literals: bool,
     method: String,
     path: String,
     request_id: Option<String>,
@@ -269,6 +282,7 @@ impl SqlQueryTraceConfig {
                 enabled: false,
                 min_repeats: 10,
                 retention: 0,
+                redact_sql_literals: true,
                 method,
                 path,
                 request_id,
@@ -281,6 +295,7 @@ impl SqlQueryTraceConfig {
             enabled: capture_enabled && config.n_plus_one_detection,
             min_repeats: config.n_plus_one_min_repeats.max(1),
             retention: config.n_plus_one_retention,
+            redact_sql_literals: config.redact_sql_literals,
             method,
             path,
             request_id: request_id.or_else(|| {
@@ -322,7 +337,7 @@ impl SqlQueryTrace {
             .or_insert_with(|| {
                 SqlQueryGroup::new(
                     fingerprint,
-                    sql,
+                    &sql_for_observability(sql, self.config.redact_sql_literals),
                     duration_ms,
                     label,
                     kind,
@@ -560,6 +575,147 @@ pub(crate) fn sql_fingerprint(sql: &str) -> String {
     }
 
     normalized.trim().to_string()
+}
+
+fn sql_for_observability(sql: &str, redact_literals: bool) -> String {
+    if redact_literals {
+        redact_sql_literals(sql)
+    } else {
+        sql.to_string()
+    }
+}
+
+pub(crate) fn redact_sql_literals(sql: &str) -> String {
+    let mut redacted = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut previous = None;
+
+    while let Some(ch) = chars.next() {
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            redacted.push_str("-- redacted");
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    redacted.push('\n');
+                    previous = Some('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            redacted.push_str("/* redacted */");
+            let mut saw_star = false;
+            for next in chars.by_ref() {
+                if saw_star && next == '/' {
+                    break;
+                }
+                saw_star = next == '*';
+            }
+            previous = Some('/');
+            continue;
+        }
+
+        if let Some(delimiter) = read_dollar_quote_delimiter(ch, &mut chars, previous) {
+            redacted.push('?');
+            consume_dollar_quoted_literal(&delimiter, &mut chars);
+            previous = Some('?');
+            continue;
+        }
+
+        if starts_single_quoted_literal(ch, chars.peek().copied(), previous) {
+            if ch == '\'' {
+                consume_single_quoted_literal(&mut chars);
+            } else {
+                chars.next();
+                consume_single_quoted_literal(&mut chars);
+            }
+            redacted.push('?');
+            previous = Some('?');
+            continue;
+        }
+
+        if ch.is_ascii_digit() && !previous.is_some_and(is_identifier_char) {
+            redacted.push('?');
+            while matches!(chars.peek(), Some(next) if next.is_ascii_digit() || *next == '.') {
+                chars.next();
+            }
+            previous = Some('?');
+            continue;
+        }
+
+        redacted.push(ch);
+        previous = Some(ch);
+    }
+
+    redacted
+}
+
+fn starts_single_quoted_literal(ch: char, next: Option<char>, previous: Option<char>) -> bool {
+    if ch == '\'' {
+        return true;
+    }
+    matches!(ch, 'e' | 'E' | 'n' | 'N')
+        && next == Some('\'')
+        && !previous.is_some_and(is_identifier_char)
+}
+
+fn consume_single_quoted_literal(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(next) = chars.next() {
+        if next == '\'' {
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+fn read_dollar_quote_delimiter(
+    first: char,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    previous: Option<char>,
+) -> Option<String> {
+    if first != '$' || previous.is_some_and(is_identifier_char) {
+        return None;
+    }
+
+    let mut probe = chars.clone();
+    let mut delimiter = String::from(first);
+    while let Some(next) = probe.next() {
+        delimiter.push(next);
+        if next == '$' {
+            *chars = probe;
+            return Some(delimiter);
+        }
+        if !(next == '_' || next.is_ascii_alphanumeric()) {
+            return None;
+        }
+    }
+    None
+}
+
+fn consume_dollar_quoted_literal(
+    delimiter: &str,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut pending = String::new();
+    for next in chars.by_ref() {
+        pending.push(next);
+        if pending.ends_with(delimiter) {
+            break;
+        }
+        while pending.len() > delimiter.len() {
+            pending.remove(0);
+        }
+    }
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn push_normalized_char(normalized: &mut String, pending_space: &mut bool, ch: char) {
@@ -1262,7 +1418,7 @@ fn spawn_native_stream(
         if sql_log.log_queries {
             tracing::debug!(
                 target: "forge.sql",
-                sql = %compiled.sql,
+                sql = %sql_for_observability(&compiled.sql, sql_log.redact_sql_literals),
                 label = ?options.label,
                 "stream started"
             );
@@ -1310,7 +1466,7 @@ fn spawn_session_stream(
         if sql_log.log_queries {
             tracing::debug!(
                 target: "forge.sql",
-                sql = %compiled.sql,
+                sql = %sql_for_observability(&compiled.sql, sql_log.redact_sql_literals),
                 label = ?options.label,
                 "stream started"
             );
@@ -1430,13 +1586,23 @@ fn log_sql_start(
     kind: &str,
 ) {
     if sql_log.log_queries {
-        tracing::debug!(
-            target: "forge.sql",
-            sql = %sql,
-            bindings = ?bindings,
-            label = ?label,
-            kind,
-        );
+        if sql_log.log_query_bindings {
+            tracing::debug!(
+                target: "forge.sql",
+                sql = %sql_for_observability(sql, sql_log.redact_sql_literals),
+                bindings = ?bindings,
+                label = ?label,
+                kind,
+            );
+        } else {
+            tracing::debug!(
+                target: "forge.sql",
+                sql = %sql_for_observability(sql, sql_log.redact_sql_literals),
+                binding_count = bindings.len(),
+                label = ?label,
+                kind,
+            );
+        }
     }
 }
 
@@ -1468,7 +1634,7 @@ fn log_sql_complete(
         if elapsed > threshold {
             tracing::warn!(
                 target: "forge.sql",
-                sql = %sql,
+                sql = %sql_for_observability(sql, sql_log.redact_sql_literals),
                 duration_ms = elapsed_ms,
                 label = ?label,
                 "slow query detected"
@@ -1478,6 +1644,7 @@ fn log_sql_complete(
                 elapsed_ms,
                 label.as_deref(),
                 sql_log.slow_query_retention,
+                sql_log.redact_sql_literals,
             );
         }
     }
@@ -2215,9 +2382,9 @@ mod tests {
 
     use super::{
         n_plus_one_log, normalize_type_name, receiver_stream, recent_n_plus_one_suspects,
-        recent_slow_queries, record_slow_query, record_sql_observation, scope_http_sql_query_trace,
-        slow_query_log, spawn_stream_task, sql_fingerprint, sql_observability_snapshot, DbRecord,
-        Result, SlowQueryEntry,
+        recent_slow_queries, record_slow_query, record_sql_observation, redact_sql_literals,
+        scope_http_sql_query_trace, slow_query_log, spawn_stream_task, sql_fingerprint,
+        sql_observability_snapshot, DbRecord, Result, SlowQueryEntry,
     };
 
     fn sql_observability_test_lock() -> &'static Mutex<()> {
@@ -2258,7 +2425,7 @@ mod tests {
         });
         assert!(result.is_err());
 
-        record_slow_query("SELECT after panic", 42, Some("poison-recovery"), 100);
+        record_slow_query("SELECT after panic", 42, Some("poison-recovery"), 100, true);
 
         let queries = recent_slow_queries();
         assert!(queries.iter().any(|query| query.sql == "SELECT after panic"
@@ -2283,13 +2450,62 @@ mod tests {
     }
 
     #[test]
+    fn sql_observability_redacts_literals_and_comments() {
+        let sql = "SELECT * FROM users WHERE email = 'secret@example.com' AND score > 42 -- api token\n/* password */ AND note = E'quoted'";
+
+        let redacted = redact_sql_literals(sql);
+
+        assert!(!redacted.contains("secret@example.com"));
+        assert!(!redacted.contains("api token"));
+        assert!(!redacted.contains("password"));
+        assert!(!redacted.contains("quoted"));
+        assert!(redacted.contains("email = ?"));
+        assert!(redacted.contains("score > ?"));
+        assert!(redacted.contains("-- redacted"));
+        assert!(redacted.contains("/* redacted */"));
+    }
+
+    #[test]
+    fn sql_observability_redacts_dollar_quoted_literals_without_eating_plain_tokens() {
+        let sql = "SELECT $$secret$$, $tag$hidden$tag$, price_$suffix FROM plans";
+
+        let redacted = redact_sql_literals(sql);
+
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("hidden"));
+        assert!(redacted.contains("?, ?"));
+        assert!(redacted.contains("price_$suffix"));
+    }
+
+    #[test]
+    fn slow_query_retention_redacts_sql_by_default() {
+        let _guard = sql_observability_test_lock().blocking_lock();
+        lock_unpoisoned(slow_query_log(), "slow query redaction setup").clear();
+
+        record_slow_query(
+            "SELECT * FROM users WHERE token = 'secret-token'",
+            900,
+            Some("secret.lookup"),
+            100,
+            true,
+        );
+
+        let queries = recent_slow_queries();
+        assert_eq!(queries.len(), 1);
+        assert!(!queries[0].sql.contains("secret-token"));
+        assert_eq!(queries[0].sql, "SELECT * FROM users WHERE token = ?");
+
+        lock_unpoisoned(slow_query_log(), "slow query redaction cleanup").clear();
+    }
+
+    #[test]
     fn sql_observability_snapshot_summarizes_and_ranks_slow_queries() {
         let _guard = sql_observability_test_lock().blocking_lock();
         lock_unpoisoned(slow_query_log(), "slow query snapshot setup").clear();
         lock_unpoisoned(n_plus_one_log(), "n+1 snapshot setup").clear();
 
-        record_slow_query("SELECT slow", 750, Some("slow"), 100);
-        record_slow_query("SELECT slower", 1_200, None, 100);
+        record_slow_query("SELECT slow", 750, Some("slow"), 100, true);
+        record_slow_query("SELECT slower", 1_200, None, 100, true);
 
         let snapshot = sql_observability_snapshot(500, 100);
         assert_eq!(snapshot.stats.retained_count, 2);
@@ -2310,8 +2526,8 @@ mod tests {
         lock_unpoisoned(slow_query_log(), "slow query retention setup").clear();
         lock_unpoisoned(n_plus_one_log(), "n+1 retention setup").clear();
 
-        record_slow_query("SELECT first", 100, None, 10);
-        record_slow_query("SELECT second", 200, None, 10);
+        record_slow_query("SELECT first", 100, None, 10, true);
+        record_slow_query("SELECT second", 200, None, 10, true);
 
         let snapshot = sql_observability_snapshot(500, 1);
         assert_eq!(snapshot.stats.retained_count, 1);
@@ -2342,7 +2558,7 @@ mod tests {
         crate::logging::scope_current_trace(
             TraceContext::http("req-sql-trace".to_string()),
             async {
-                record_slow_query("SELECT trace slow", 900, Some("trace.slow"), 100);
+                record_slow_query("SELECT trace slow", 900, Some("trace.slow"), 100, true);
                 scope_http_sql_query_trace(
                     Some(config),
                     None,
@@ -2404,7 +2620,7 @@ mod tests {
             async {
                 for _ in 0..3 {
                     record_sql_observation(
-                        "SELECT * FROM users WHERE id = $1",
+                        "SELECT * FROM users WHERE email = 'secret@example.com'",
                         12,
                         Some("user.lookup"),
                         "query",
@@ -2428,7 +2644,8 @@ mod tests {
         assert_eq!(suspect.rows_total, 3);
         assert_eq!(suspect.labels, vec!["user.lookup"]);
         assert_eq!(suspect.kinds, vec!["query"]);
-        assert_eq!(suspect.fingerprint, "select * from users where id = ?");
+        assert_eq!(suspect.fingerprint, "select * from users where email = ?");
+        assert_eq!(suspect.sample_sql, "SELECT * FROM users WHERE email = ?");
 
         lock_unpoisoned(n_plus_one_log(), "n+1 threshold cleanup").clear();
     }

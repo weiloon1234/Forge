@@ -369,6 +369,22 @@ const DATABASE_FIELDS: &[PublishedField] = &[
         Some("Log all SQL queries to tracing (dev only)"),
     ),
     field(
+        "log_query_bindings",
+        "false",
+        "false",
+        false,
+        false,
+        Some("Include SQL binding values when log_queries=true (dev only)"),
+    ),
+    field(
+        "redact_sql_literals",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Redact SQL literals/comments in logs and /_forge/sql"),
+    ),
+    field(
         "slow_query_threshold_ms",
         "500",
         "500",
@@ -1640,6 +1656,12 @@ mod tests {
         let output = render_sample_config();
         assert!(output.contains(
             "# migration_lock_timeout_ms = 0  # Migration advisory-lock wait timeout (0 = wait forever)"
+        ));
+        assert!(output.contains(
+            "# log_query_bindings = false  # Include SQL binding values when log_queries=true (dev only)"
+        ));
+        assert!(output.contains(
+            "# redact_sql_literals = true  # Redact SQL literals/comments in logs and /_forge/sql"
         ));
     }
 

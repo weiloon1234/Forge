@@ -344,6 +344,8 @@ pub struct DatabaseConfig {
     pub acquire_timeout_ms: u64,
     pub default_per_page: u64,
     pub log_queries: bool,
+    pub log_query_bindings: bool,
+    pub redact_sql_literals: bool,
     pub slow_query_threshold_ms: u64,
     pub slow_query_retention: usize,
     pub n_plus_one_detection: bool,
@@ -369,6 +371,8 @@ impl Default for DatabaseConfig {
             acquire_timeout_ms: 5_000,
             default_per_page: 15,
             log_queries: false,
+            log_query_bindings: false,
+            redact_sql_literals: true,
             slow_query_threshold_ms: 500,
             slow_query_retention: 100,
             n_plus_one_detection: true,
@@ -1332,6 +1336,8 @@ mod tests {
                 migrations_path = "database/migrations"
                 seeders_path = "database/seeders"
                 max_connections = 2
+                log_query_bindings = true
+                redact_sql_literals = false
                 slow_query_retention = 40
                 n_plus_one_detection = false
                 n_plus_one_min_repeats = 7
@@ -1385,6 +1391,8 @@ mod tests {
         assert_eq!(database.migrations_path, "database/migrations");
         assert_eq!(database.seeders_path, "database/seeders");
         assert_eq!(database.max_connections, 2);
+        assert!(database.log_query_bindings);
+        assert!(!database.redact_sql_literals);
         assert_eq!(database.slow_query_retention, 40);
         assert!(!database.n_plus_one_detection);
         assert_eq!(database.n_plus_one_min_repeats, 7);
@@ -1788,6 +1796,8 @@ mod tests {
     fn database_config_defaults_sql_n_plus_one_observability() {
         let database = DatabaseConfig::default();
 
+        assert!(!database.log_query_bindings);
+        assert!(database.redact_sql_literals);
         assert_eq!(database.slow_query_retention, 100);
         assert!(database.n_plus_one_detection);
         assert_eq!(database.n_plus_one_min_repeats, 10);

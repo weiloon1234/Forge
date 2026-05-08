@@ -597,6 +597,25 @@ const AUTH_MFA_FIELDS: &[PublishedField] = &[
     field("recovery_codes", "8", "8", false, false, None),
 ];
 
+const AUDIT_FIELDS: &[PublishedField] = &[
+    field(
+        "redact_sensitive_fields",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Redact common credential-like model columns in audit JSON"),
+    ),
+    field(
+        "sensitive_fields",
+        "[\"password\", \"password_hash\", \"passwd\", \"secret\", \"secret_key\", \"api_key\", \"access_key\", \"private_key\", \"token\", \"token_hash\", \"access_token\", \"refresh_token\", \"authorization\", \"credential\", \"credentials\", \"mfa_secret\", \"totp_secret\", \"otp_secret\", \"recovery_code\", \"recovery_codes\"]",
+        "[\"password\",\"password_hash\",\"passwd\",\"secret\",\"secret_key\",\"api_key\",\"access_key\",\"private_key\",\"token\",\"token_hash\",\"access_token\",\"refresh_token\",\"authorization\",\"credential\",\"credentials\",\"mfa_secret\",\"totp_secret\",\"otp_secret\",\"recovery_code\",\"recovery_codes\"]",
+        false,
+        false,
+        Some("Exact/normalized field names; #[forge(audit_exclude)] still removes fields entirely"),
+    ),
+];
+
 const JOBS_FIELDS: &[PublishedField] = &[
     field("queue", "\"default\"", "default", false, false, None),
     field("max_retries", "5", "5", false, false, None),
@@ -1248,6 +1267,7 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
             ),
         ],
     ),
+    section("Audit", &[table(&["audit"], None, false, AUDIT_FIELDS)]),
     section(
         "Jobs (Background Queue)",
         &[
@@ -1775,6 +1795,21 @@ mod tests {
         assert!(env.contains("# AUTH__SESSIONS__COOKIE_SAME_SITE=lax"));
         assert!(env.contains("# AUTH__PASSWORD_RESETS__EXPIRY_MINUTES=60"));
         assert!(env.contains("# AUTH__EMAIL_VERIFICATION__EXPIRY_MINUTES=1440"));
+    }
+
+    #[test]
+    fn published_audit_config_includes_redaction_defaults() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[audit]"));
+        assert!(output.contains(
+            "# redact_sensitive_fields = true  # Redact common credential-like model columns in audit JSON"
+        ));
+        assert!(output.contains("\"password_hash\""));
+        assert!(output.contains("\"refresh_token\""));
+        assert!(env.contains("# AUDIT__REDACT_SENSITIVE_FIELDS=true"));
+        assert!(env.contains("\"password_hash\""));
     }
 
     #[test]

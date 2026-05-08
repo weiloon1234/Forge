@@ -1,6 +1,6 @@
 # audit
 
-Built-in audit logging with automatic model mutation tracking
+Built-in audit logging with automatic model mutation tracking and redaction
 
 [Back to index](../index.md)
 
@@ -31,4 +31,10 @@ struct AuditLog
   fn force_delete() -> DeleteModel<Self>
   fn restore() -> RestoreModel<Self>
 ```
+
+## Notes
+
+- `#[forge(audit_exclude)]` still removes a field entirely from audit payloads.
+- `audit.redact_sensitive_fields = true` masks common credential-like field names with `[redacted]` in before/after/changes JSON.
+- `audit.sensitive_fields` adds project-specific names; set `redact_sensitive_fields = false` to return to explicit model-only exclusions.
 

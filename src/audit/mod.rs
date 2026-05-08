@@ -55,6 +55,67 @@ struct AuditPayload {
     changes: Option<serde_json::Value>,
 }
 
+struct AuditRedactionPolicy {
+    excluded: BTreeSet<String>,
+    sensitive: BTreeSet<String>,
+    redact_sensitive: bool,
+}
+
+const REDACTED_AUDIT_VALUE: &str = "[redacted]";
+const SENSITIVE_FIELD_SEGMENTS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "authorization",
+];
+
+impl AuditRedactionPolicy {
+    fn new(excluded_fields: &[&str], config: &crate::config::AuditConfig) -> Self {
+        Self {
+            excluded: excluded_fields
+                .iter()
+                .map(|field| normalize_audit_field_name(field))
+                .collect(),
+            sensitive: config
+                .sensitive_fields
+                .iter()
+                .map(|field| normalize_audit_field_name(field))
+                .collect(),
+            redact_sensitive: config.redact_sensitive_fields,
+        }
+    }
+
+    fn excluded(&self, field: &str) -> bool {
+        self.excluded.contains(&normalize_audit_field_name(field))
+    }
+
+    fn sensitive(&self, field: &str) -> bool {
+        if !self.redact_sensitive {
+            return false;
+        }
+
+        let normalized = normalize_audit_field_name(field);
+        if self.sensitive.contains(&normalized) {
+            return true;
+        }
+
+        let padded = format!("_{normalized}_");
+        SENSITIVE_FIELD_SEGMENTS
+            .iter()
+            .any(|segment| padded.contains(&format!("_{segment}_")))
+    }
+
+    fn value(&self, field: &str, value: &DbValue) -> serde_json::Value {
+        if self.sensitive(field) {
+            serde_json::Value::String(REDACTED_AUDIT_VALUE.to_string())
+        } else {
+            db_value_to_json(value)
+        }
+    }
+}
+
 pub(crate) struct AuditManager {
     availability: AtomicU8,
     warned_missing: AtomicBool,
@@ -154,7 +215,9 @@ where
         return Ok(());
     }
 
-    let payload = build_payload(event_type, before, after, M::audit_excluded_fields());
+    let audit_config = context.app().config().audit()?;
+    let redaction = AuditRedactionPolicy::new(M::audit_excluded_fields(), &audit_config);
+    let payload = build_payload(event_type, before, after, &redaction);
     let subject_source = after.or(before).ok_or_else(|| {
         Error::message(format!(
             "audit logging for `{}` requires a before or after record",
@@ -256,24 +319,24 @@ fn build_payload(
     event_type: AuditEventType,
     before: Option<&DbRecord>,
     after: Option<&DbRecord>,
-    excluded_fields: &[&str],
+    redaction: &AuditRedactionPolicy,
 ) -> AuditPayload {
     match event_type {
         AuditEventType::Created => AuditPayload {
             before_data: None,
-            after_data: after.map(|record| record_to_json(record, excluded_fields)),
+            after_data: after.map(|record| record_to_json(record, redaction)),
             changes: None,
         },
         AuditEventType::Deleted => AuditPayload {
-            before_data: before.map(|record| record_to_json(record, excluded_fields)),
+            before_data: before.map(|record| record_to_json(record, redaction)),
             after_data: None,
             changes: None,
         },
         AuditEventType::Updated | AuditEventType::SoftDeleted | AuditEventType::Restored => {
-            let before_data = before.map(|record| record_to_json(record, excluded_fields));
-            let after_data = after.map(|record| record_to_json(record, excluded_fields));
+            let before_data = before.map(|record| record_to_json(record, redaction));
+            let after_data = after.map(|record| record_to_json(record, redaction));
             AuditPayload {
-                changes: build_changes(before, after, excluded_fields),
+                changes: build_changes(before, after, redaction),
                 before_data,
                 after_data,
             }
@@ -284,30 +347,37 @@ fn build_payload(
 fn build_changes(
     before: Option<&DbRecord>,
     after: Option<&DbRecord>,
-    excluded_fields: &[&str],
+    redaction: &AuditRedactionPolicy,
 ) -> Option<serde_json::Value> {
     let (Some(before), Some(after)) = (before, after) else {
         return None;
     };
 
-    let excluded: BTreeSet<&str> = excluded_fields.iter().copied().collect();
     let mut keys = BTreeSet::new();
     for (key, _) in before.iter() {
-        if !excluded.contains(key.as_str()) {
+        if !redaction.excluded(key) {
             keys.insert(key.clone());
         }
     }
     for (key, _) in after.iter() {
-        if !excluded.contains(key.as_str()) {
+        if !redaction.excluded(key) {
             keys.insert(key.clone());
         }
     }
 
     let mut changes = serde_json::Map::new();
     for key in keys {
-        let before_value = before.get(&key).map(db_value_to_json).unwrap_or_default();
-        let after_value = after.get(&key).map(db_value_to_json).unwrap_or_default();
-        if before_value != after_value {
+        let raw_before = before.get(&key).map(db_value_to_json).unwrap_or_default();
+        let raw_after = after.get(&key).map(db_value_to_json).unwrap_or_default();
+        if raw_before != raw_after {
+            let before_value = before
+                .get(&key)
+                .map(|value| redaction.value(&key, value))
+                .unwrap_or_default();
+            let after_value = after
+                .get(&key)
+                .map(|value| redaction.value(&key, value))
+                .unwrap_or_default();
             changes.insert(
                 key,
                 serde_json::json!({
@@ -325,16 +395,38 @@ fn build_changes(
     }
 }
 
-fn record_to_json(record: &DbRecord, excluded_fields: &[&str]) -> serde_json::Value {
-    let excluded: BTreeSet<&str> = excluded_fields.iter().copied().collect();
+fn record_to_json(record: &DbRecord, redaction: &AuditRedactionPolicy) -> serde_json::Value {
     let mut values = serde_json::Map::new();
     for (key, value) in record.iter() {
-        if excluded.contains(key.as_str()) {
+        if redaction.excluded(key) {
             continue;
         }
-        values.insert(key.clone(), db_value_to_json(value));
+        values.insert(key.clone(), redaction.value(key, value));
     }
     serde_json::Value::Object(values)
+}
+
+fn normalize_audit_field_name(field: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_separator = true;
+    let mut previous_was_lower_or_digit = false;
+
+    for ch in field.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() && previous_was_lower_or_digit && !previous_was_separator {
+                normalized.push('_');
+            }
+            normalized.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+            previous_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else if !previous_was_separator {
+            normalized.push('_');
+            previous_was_separator = true;
+            previous_was_lower_or_digit = false;
+        }
+    }
+
+    normalized.trim_matches('_').to_string()
 }
 
 fn db_value_to_json(value: &DbValue) -> serde_json::Value {
@@ -460,7 +552,11 @@ fn db_value_to_string(value: &DbValue) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_payload, record_with_assignments, AuditEventType};
+    use super::{
+        build_payload, record_with_assignments, AuditEventType, AuditRedactionPolicy,
+        REDACTED_AUDIT_VALUE,
+    };
+    use crate::config::AuditConfig;
     use crate::{ColumnRef, DbRecord, DbType, DbValue, Expr};
 
     fn record(entries: &[(&str, DbValue)]) -> DbRecord {
@@ -471,6 +567,18 @@ mod tests {
         record
     }
 
+    fn policy(excluded_fields: &[&str]) -> AuditRedactionPolicy {
+        AuditRedactionPolicy::new(excluded_fields, &AuditConfig::default())
+    }
+
+    fn unredacted_policy(excluded_fields: &[&str]) -> AuditRedactionPolicy {
+        let config = AuditConfig {
+            redact_sensitive_fields: false,
+            ..AuditConfig::default()
+        };
+        AuditRedactionPolicy::new(excluded_fields, &config)
+    }
+
     #[test]
     fn created_payload_uses_after_data_only() {
         let after = record(&[
@@ -478,7 +586,7 @@ mod tests {
             ("title", DbValue::Text("Hello".into())),
         ]);
 
-        let payload = build_payload(AuditEventType::Created, None, Some(&after), &[]);
+        let payload = build_payload(AuditEventType::Created, None, Some(&after), &policy(&[]));
 
         assert!(payload.before_data.is_none());
         assert_eq!(payload.after_data.unwrap()["title"], "Hello");
@@ -502,7 +610,7 @@ mod tests {
             AuditEventType::Updated,
             Some(&before),
             Some(&after),
-            &["updated_at"],
+            &policy(&["updated_at"]),
         );
 
         let changes = payload.changes.unwrap();
@@ -518,7 +626,7 @@ mod tests {
             ("title", DbValue::Text("Gone".into())),
         ]);
 
-        let payload = build_payload(AuditEventType::Deleted, Some(&before), None, &[]);
+        let payload = build_payload(AuditEventType::Deleted, Some(&before), None, &policy(&[]));
 
         assert_eq!(payload.before_data.unwrap()["title"], "Gone");
         assert!(payload.after_data.is_none());
@@ -543,7 +651,7 @@ mod tests {
             AuditEventType::SoftDeleted,
             Some(&before),
             Some(&after),
-            &[],
+            &policy(&[]),
         );
 
         let changes = payload.changes.unwrap();
@@ -561,9 +669,92 @@ mod tests {
             ("deleted_at", DbValue::Null(DbType::TimestampTz)),
         ]);
 
-        let payload = build_payload(AuditEventType::Restored, Some(&before), Some(&after), &[]);
+        let payload = build_payload(
+            AuditEventType::Restored,
+            Some(&before),
+            Some(&after),
+            &policy(&[]),
+        );
 
         let changes = payload.changes.unwrap();
         assert!(changes.get("deleted_at").is_some());
+    }
+
+    #[test]
+    fn default_audit_redaction_masks_sensitive_fields_without_removing_keys() {
+        let after = record(&[
+            ("id", DbValue::Int64(1)),
+            ("password_hash", DbValue::Text("hash-secret".into())),
+            ("refreshToken", DbValue::Text("token-secret".into())),
+            ("title", DbValue::Text("Visible".into())),
+        ]);
+
+        let payload = build_payload(AuditEventType::Created, None, Some(&after), &policy(&[]));
+        let after_data = payload.after_data.unwrap();
+
+        assert_eq!(after_data["title"], "Visible");
+        assert_eq!(after_data["password_hash"], REDACTED_AUDIT_VALUE);
+        assert_eq!(after_data["refreshToken"], REDACTED_AUDIT_VALUE);
+        assert!(!after_data.to_string().contains("hash-secret"));
+        assert!(!after_data.to_string().contains("token-secret"));
+    }
+
+    #[test]
+    fn sensitive_audit_changes_record_redacted_markers_when_raw_values_change() {
+        let before = record(&[
+            ("id", DbValue::Int64(1)),
+            ("api_key", DbValue::Text("old-key".into())),
+        ]);
+        let after = record(&[
+            ("id", DbValue::Int64(1)),
+            ("api_key", DbValue::Text("new-key".into())),
+        ]);
+
+        let payload = build_payload(
+            AuditEventType::Updated,
+            Some(&before),
+            Some(&after),
+            &policy(&[]),
+        );
+        let changes = payload.changes.unwrap();
+
+        assert_eq!(changes["api_key"]["before"], REDACTED_AUDIT_VALUE);
+        assert_eq!(changes["api_key"]["after"], REDACTED_AUDIT_VALUE);
+        assert!(!changes.to_string().contains("old-key"));
+        assert!(!changes.to_string().contains("new-key"));
+    }
+
+    #[test]
+    fn explicit_audit_exclude_still_removes_fields_entirely() {
+        let after = record(&[
+            ("id", DbValue::Int64(1)),
+            ("secret", DbValue::Text("hidden".into())),
+        ]);
+
+        let payload = build_payload(
+            AuditEventType::Created,
+            None,
+            Some(&after),
+            &policy(&["secret"]),
+        );
+
+        assert!(payload.after_data.unwrap().get("secret").is_none());
+    }
+
+    #[test]
+    fn audit_redaction_can_be_disabled_by_config() {
+        let after = record(&[
+            ("id", DbValue::Int64(1)),
+            ("password", DbValue::Text("visible-for-test".into())),
+        ]);
+
+        let payload = build_payload(
+            AuditEventType::Created,
+            None,
+            Some(&after),
+            &unredacted_policy(&[]),
+        );
+
+        assert_eq!(payload.after_data.unwrap()["password"], "visible-for-test");
     }
 }

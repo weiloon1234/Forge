@@ -309,8 +309,9 @@ Redis cache driver without Redis configured, are reported but do not block the c
 per-guard token TTL examples, `[auth.password_resets]`, `[auth.email_verification]`,
 `[auth.lockout]`, and `[auth.mfa]`. `env:publish` writes the matching `AUTH__TOKENS__*`,
 `AUTH__PASSWORD_RESETS__*`, `AUTH__EMAIL_VERIFICATION__*`, `AUTH__LOCKOUT__*`,
-`AUTH__MFA__*`, and `AUTH__MFA__REQUIRED_ROLES__<GUARD>` entries. Built-in audit logging is code-driven via
-`audit_area(...)`, so it no longer appears in generated config files. Error reporters are
+`AUTH__MFA__*`, and `AUTH__MFA__REQUIRED_ROLES__<GUARD>` entries. Built-in audit logging is
+activated in code via `audit_area(...)`; `[audit]` / `AUDIT__*` config only controls default
+credential-like field redaction in audit payloads. Error reporters are
 registered in code with `AppBuilder::register_error_reporter*()`, so they are intentionally not
 part of the generated config files either.
 

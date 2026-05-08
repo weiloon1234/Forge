@@ -145,8 +145,8 @@ when all of the following are true:
 - the current HTTP route/scope/group resolves to an audit area
 - the model has not opted out with `#[forge(audit = false)]`
 
-Audit activation is code-driven only. `config:publish` and `env:publish` do not emit audit
-settings anymore.
+Audit activation is code-driven; config only controls payload redaction. `config:publish` and
+`env:publish` emit `[audit]` / `AUDIT__*` defaults for credential-like field redaction.
 
 The usual project-level setup is one line on the outer admin scope:
 

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 pub(crate) fn module_description(stem: &str) -> &'static str {
     match stem {
         "app_enum" => "Enum metadata and serialization (ForgeAppEnum)",
-        "audit" => "Built-in audit logging with automatic model mutation tracking",
+        "audit" => "Built-in audit logging with automatic model mutation tracking and redaction",
         "attachments" => "File attachments with lifecycle (HasAttachments)",
         "auth" => "Auth: guards, policies, tokens, sessions, password reset, email verification",
         "cache" => "In-memory and Redis-backed caching (CacheManager)",
@@ -57,6 +57,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
     match group_key {
         "config" => &[
             "`AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.",
+            "`AuditConfig.redact_sensitive_fields` is enabled by default and redacts common credential-like model columns in audit JSON.",
             "`HttpConfig` is optional and additive: global body cap, request timeout, CORS, CSRF, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.",
             "`CacheConfig.error_mode` defaults to `strict`; `remember_singleflight` is enabled by default and distributed remember locks are opt-in.",
             "`DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.",
@@ -72,6 +73,11 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.",
             "`remember()` uses local single-flight by default and can coordinate across workers with an opt-in distributed lock.",
             "`cache.error_mode = \"fail_open\"` logs backend I/O failures and continues, while validation, serialization, and callback errors remain strict.",
+        ],
+        "audit" => &[
+            "`#[forge(audit_exclude)]` still removes a field entirely from audit payloads.",
+            "`audit.redact_sensitive_fields = true` masks common credential-like field names with `[redacted]` in before/after/changes JSON.",
+            "`audit.sensitive_fields` adds project-specific names; set `redact_sensitive_fields = false` to return to explicit model-only exclusions.",
         ],
         "datatable" => &[
             "JSON responses clamp `DatatableRequest.per_page` to `datatable.max_per_page` unless the cap is `0`.",
@@ -125,7 +131,7 @@ mod tests {
     fn module_descriptions_cover_recent_public_modules() {
         assert_eq!(
             module_description("audit"),
-            "Built-in audit logging with automatic model mutation tracking"
+            "Built-in audit logging with automatic model mutation tracking and redaction"
         );
     }
 
@@ -179,6 +185,11 @@ mod tests {
         assert!(cache.contains("single-flight"));
         assert!(cache.contains("fail_open"));
         assert!(cache.contains("backend failures"));
+
+        let mut audit = String::new();
+        append_module_notes("audit", &mut audit);
+        assert!(audit.contains("audit_exclude"));
+        assert!(audit.contains("redacted"));
 
         let mut datatable = String::new();
         append_module_notes("datatable", &mut datatable);

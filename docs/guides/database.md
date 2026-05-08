@@ -672,7 +672,7 @@ ctx.dispatch(event).await?  // dispatch a domain event
 
 Forge can write one audit row per create, update, soft delete, restore, and hard delete. Audit
 rows are written inside the same database transaction as the model change, but only for HTTP
-requests that resolve to an explicit audit area. There is no global audit config switch.
+requests that resolve to an explicit audit area.
 
 Mark the route tree that should produce audit rows:
 
@@ -710,6 +710,19 @@ struct CacheEntry {
     value: String,
 }
 ```
+
+Common credential-like column names are redacted by default in audit JSON:
+
+```toml
+[audit]
+redact_sensitive_fields = true
+sensitive_fields = ["password", "password_hash", "secret", "api_key", "token", "refresh_token"]
+```
+
+Redacted fields remain present as `"[redacted]"` so reviewers can see that a value exists or
+changed without storing the value. Use `#[forge(audit_exclude)]` when a field should be omitted
+entirely, extend `audit.sensitive_fields` for project-specific credential names, or set
+`redact_sensitive_fields = false` to return to explicit model-only exclusions.
 
 Query audit rows through the built-in `AuditLog` model:
 

@@ -545,6 +545,43 @@ impl Default for AuthConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+pub struct AuditConfig {
+    pub redact_sensitive_fields: bool,
+    pub sensitive_fields: Vec<String>,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            redact_sensitive_fields: true,
+            sensitive_fields: vec![
+                "password".to_string(),
+                "password_hash".to_string(),
+                "passwd".to_string(),
+                "secret".to_string(),
+                "secret_key".to_string(),
+                "api_key".to_string(),
+                "access_key".to_string(),
+                "private_key".to_string(),
+                "token".to_string(),
+                "token_hash".to_string(),
+                "access_token".to_string(),
+                "refresh_token".to_string(),
+                "authorization".to_string(),
+                "credential".to_string(),
+                "credentials".to_string(),
+                "mfa_secret".to_string(),
+                "totp_secret".to_string(),
+                "otp_secret".to_string(),
+                "recovery_code".to_string(),
+                "recovery_codes".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct LockoutConfig {
     pub enabled: bool,
     pub max_failures: u32,
@@ -1040,6 +1077,10 @@ impl ConfigRepository {
         self.section("auth")
     }
 
+    pub fn audit(&self) -> Result<AuditConfig> {
+        self.section("audit")
+    }
+
     pub fn scheduler(&self) -> Result<SchedulerConfig> {
         self.section("scheduler")
     }
@@ -1184,10 +1225,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, AuthConfig, CacheConfig, CacheDriver, CacheErrorMode, ConfigRepository,
-        DatabaseConfig, DatatableConfig, Environment, HttpConfig, HttpRateLimitByConfig,
-        JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig, SchedulerConfig,
-        TypeScriptConfig, WebSocketConfig,
+        AppConfig, AuditConfig, AuthConfig, CacheConfig, CacheDriver, CacheErrorMode,
+        ConfigRepository, DatabaseConfig, DatatableConfig, Environment, HttpConfig,
+        HttpRateLimitByConfig, JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig,
+        SchedulerConfig, TypeScriptConfig, WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -1712,6 +1753,39 @@ mod tests {
         assert_eq!(auth.email_verification.expiry_minutes, 720);
         assert_eq!(auth.email_verification.prune_interval_ms, 90_000);
         assert_eq!(auth.email_verification.prune_batch_size, 30);
+    }
+
+    #[test]
+    fn audit_config_defaults_redact_common_credentials() {
+        let audit: AuditConfig = ConfigRepository::empty().audit().unwrap();
+
+        assert!(audit.redact_sensitive_fields);
+        assert!(audit.sensitive_fields.contains(&"password".to_string()));
+        assert!(audit.sensitive_fields.contains(&"api_key".to_string()));
+        assert!(audit
+            .sensitive_fields
+            .contains(&"refresh_token".to_string()));
+    }
+
+    #[test]
+    fn parses_audit_config_section() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-audit.toml"),
+            r#"
+                [audit]
+                redact_sensitive_fields = false
+                sensitive_fields = ["pin", "card_token"]
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let audit: AuditConfig = config.audit().unwrap();
+
+        assert!(!audit.redact_sensitive_fields);
+        assert_eq!(audit.sensitive_fields, vec!["pin", "card_token"]);
     }
 
     #[test]

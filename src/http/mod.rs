@@ -1573,7 +1573,7 @@ async fn http_auth_middleware(
 }
 
 fn internal_error_response(error: Error) -> Response {
-    AuthError::internal(error.to_string()).into_response()
+    error.into_response()
 }
 
 fn auth_outcome_from_error(error: &AuthError) -> AuthOutcome {

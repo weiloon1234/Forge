@@ -9,6 +9,7 @@ Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider
 ```rust
 pub type Result<T> = Result<T, Error>;
 enum Error { Message, Http, Validation, NotFound, Other }
+  const fn internal_server_error_message() -> &'static str
   fn message(message: impl Into<String>) -> Self
   fn http(status: u16, message: impl Into<String>) -> Self
   fn http_with_code( status: u16, message: impl Into<String>, code: impl Into<String>, ) -> Self

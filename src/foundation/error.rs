@@ -43,6 +43,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl Error {
     const INTERNAL_SERVER_ERROR_MESSAGE: &'static str = "Internal server error";
 
+    /// Public message used for server-side failures.
+    ///
+    /// The full internal error stays available to logs and error reporters via
+    /// the response extension added in [`IntoResponse`].
+    pub const fn internal_server_error_message() -> &'static str {
+        Self::INTERNAL_SERVER_ERROR_MESSAGE
+    }
+
     /// Create a message error (replaces old `Error::message()`).
     pub fn message(message: impl Into<String>) -> Self {
         Self::Message(message.into())
@@ -114,7 +122,7 @@ impl Error {
     fn public_message(&self) -> String {
         let status = self.status_code();
         if status.is_server_error() {
-            return Self::INTERNAL_SERVER_ERROR_MESSAGE.to_string();
+            return Self::internal_server_error_message().to_string();
         }
 
         self.to_string()

@@ -509,13 +509,22 @@ fn db_i64(value: Option<&DbValue>) -> Option<i64> {
 }
 
 fn internal_error_response(error: Error) -> Response {
-    (
+    let error_text = error.to_string();
+    let chain = error.source_chain();
+    let mut response = (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(serde_json::json!({
-            "message": error.to_string(),
+            "message": Error::internal_server_error_message(),
         })),
     )
-        .into_response()
+        .into_response();
+    crate::logging::mark_handler_error_response(
+        &mut response,
+        StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+        error_text,
+        chain,
+    );
+    response
 }
 
 /// Cached OpenAPI spec shared across requests.
@@ -682,5 +691,28 @@ fn join_route(base_path: &str, suffix: &str) -> String {
         format!("/{suffix}")
     } else {
         format!("{trimmed}/{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn internal_observability_errors_use_generic_public_message() {
+        let response = internal_error_response(Error::message(
+            "database URL postgres://user:secret@example.test/app leaked",
+        ));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["message"], Error::internal_server_error_message());
+        assert!(!payload["message"].as_str().unwrap().contains("secret"));
+        assert!(!payload["message"].as_str().unwrap().contains("postgres://"));
     }
 }

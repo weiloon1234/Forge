@@ -855,14 +855,7 @@ where
         _state: &S,
     ) -> std::result::Result<Self, Self::Rejection> {
         parts.extensions.get::<CsrfToken>().cloned().ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({
-                    "message": "CSRF middleware not active on this route",
-                    "status": 500
-                })),
-            )
-                .into_response()
+            Error::message("CSRF middleware not active on this route").into_response()
         })
     }
 }
@@ -901,14 +894,7 @@ async fn csrf_middleware(
                 match crate::support::Token::base64(32) {
                     Ok(t) => t,
                     Err(_) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({
-                                "message": "Failed to generate CSRF token",
-                                "status": 500
-                            })),
-                        )
-                            .into_response();
+                        return Error::message("Failed to generate CSRF token").into_response();
                     }
                 }
             }
@@ -924,14 +910,7 @@ async fn csrf_middleware(
                     response.headers_mut().append(header::SET_COOKIE, hv);
                 }
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(serde_json::json!({
-                            "message": error.to_string(),
-                            "status": 500
-                        })),
-                    )
-                        .into_response();
+                    return error.into_response();
                 }
             }
         }

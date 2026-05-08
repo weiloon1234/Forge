@@ -361,9 +361,16 @@ impl AuthError {
         }
     }
 
+    fn public_message(&self) -> &str {
+        match self {
+            Self::Internal(_) => Error::internal_server_error_message(),
+            Self::Unauthorized(_) | Self::Forbidden(_) => self.message(),
+        }
+    }
+
     pub fn payload(&self) -> serde_json::Value {
         let mut payload = serde_json::json!({
-            "message": self.message(),
+            "message": self.public_message(),
             "status": self.status_code().as_u16(),
         });
 
@@ -378,7 +385,18 @@ impl AuthError {
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        (self.status_code(), Json(self.payload())).into_response()
+        let status = self.status_code();
+        let error_text = self.message().to_string();
+        let mut response = (status, Json(self.payload())).into_response();
+        if status.is_server_error() {
+            crate::logging::mark_handler_error_response(
+                &mut response,
+                status.as_u16(),
+                error_text,
+                Vec::new(),
+            );
+        }
+        response
     }
 }
 
@@ -1032,7 +1050,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use axum::http::{header, HeaderMap};
+    use axum::body::to_bytes;
+    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
 
     use super::{
         Actor, AuthConfig, AuthManager, AuthenticatableRegistryBuilder, Authorizer,
@@ -1162,6 +1182,24 @@ mod tests {
         assert!(error
             .to_string()
             .contains("auth guard `api` panicked: guard boom"));
+    }
+
+    #[tokio::test]
+    async fn internal_auth_error_response_uses_generic_public_message() {
+        let response = super::AuthError::internal(
+            "database URL postgres://user:secret@example.test/app leaked",
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["message"], "Internal server error");
+        assert_eq!(payload["status"], 500);
+        assert!(!payload["message"].as_str().unwrap().contains("secret"));
+        assert!(!payload["message"].as_str().unwrap().contains("postgres://"));
     }
 
     #[tokio::test]

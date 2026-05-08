@@ -249,7 +249,7 @@ where
     value
         .validate(&mut validator)
         .await
-        .map_err(|error| internal_error(error).into_response())?;
+        .map_err(internal_error)?;
     validator.finish().map_err(IntoResponse::into_response)?;
 
     Ok(value)
@@ -275,12 +275,6 @@ pub(crate) fn resolve_request_locale(
     None
 }
 
-fn internal_error(error: Error) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({
-            "message": error.to_string(),
-            "status": 500,
-        })),
-    )
+fn internal_error(error: Error) -> Response {
+    error.into_response()
 }

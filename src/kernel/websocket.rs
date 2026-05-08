@@ -575,13 +575,28 @@ async fn websocket_handler(
 }
 
 fn websocket_rejection(status: StatusCode, message: impl Into<String>) -> Response {
-    (
+    let message = message.into();
+    let public_message = if status.is_server_error() {
+        Error::internal_server_error_message()
+    } else {
+        message.as_str()
+    };
+    let mut response = (
         status,
         axum::Json(serde_json::json!({
-            "message": message.into(),
+            "message": public_message,
         })),
     )
-        .into_response()
+        .into_response();
+    if status.is_server_error() {
+        crate::logging::mark_handler_error_response(
+            &mut response,
+            status.as_u16(),
+            message,
+            Vec::new(),
+        );
+    }
+    response
 }
 
 fn validate_query_token_config(config: &WebSocketConfig) -> Result<()> {
@@ -1771,6 +1786,8 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use axum::body::to_bytes;
+
     use crate::config::ConfigRepository;
     use crate::foundation::{AppContext, Container};
     use crate::support::runtime::RuntimeBackend;
@@ -2010,6 +2027,22 @@ mod tests {
                 .to_string(),
             "websocket token query parameter exceeds maximum length of 3 bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn websocket_server_rejections_hide_internal_error_messages() {
+        let response = websocket_rejection(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "trusted proxy config leaked secret=abc",
+        );
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["message"], Error::internal_server_error_message());
+        assert!(!payload["message"].as_str().unwrap().contains("secret"));
     }
 
     #[test]

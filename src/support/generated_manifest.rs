@@ -41,7 +41,45 @@ pub(crate) fn write_manifest(
 ) -> Result<()> {
     let files: Vec<&str> = output_files.iter().map(String::as_str).collect();
     let content = serde_json::to_string_pretty(&files).map_err(Error::other)?;
-    std::fs::write(dir.join(manifest_name), content).map_err(Error::other)
+    write_generated_file(&dir.join(manifest_name), content)
+}
+
+pub(crate) fn ensure_generated_file_writable(path: &Path, force: bool) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(symlink_write_error(
+            path,
+            "refusing to write generated file through symlink",
+        )),
+        Ok(_) if !force => Err(Error::message(format!(
+            "refusing to overwrite `{}` without `--force`",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::other(error)),
+    }
+}
+
+pub(crate) fn write_generated_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(symlink_write_error(
+                path,
+                "refusing to write generated file through symlink",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::other(error)),
+    }
+
+    std::fs::write(path, contents).map_err(Error::other)
+}
+
+pub(crate) fn generated_file_exists_without_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| !metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 pub(crate) fn safe_manifest_path_with_extension(
@@ -120,4 +158,45 @@ fn safe_manifest_relative_path(path: PathBuf) -> Option<PathBuf> {
     }
 
     Some(path)
+}
+
+fn symlink_write_error(path: &Path, message: &str) -> Error {
+    Error::message(format!("{message}: `{}`", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn ensure_generated_file_writable_refuses_existing_without_force() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("generated.txt");
+        fs::write(&path, "old").unwrap();
+
+        let error = ensure_generated_file_writable(&path, false).unwrap_err();
+
+        assert!(error.to_string().contains("without `--force`"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_writes_refuse_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let outside = dir.path().join("outside.txt");
+        let link = dir.path().join("generated.txt");
+        fs::write(&outside, "outside").unwrap();
+        symlink(&outside, &link).unwrap();
+
+        let error = write_generated_file(&link, "new").unwrap_err();
+
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "outside");
+    }
 }

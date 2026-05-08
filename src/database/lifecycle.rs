@@ -15,6 +15,7 @@ use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::DatabaseConfig;
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::{catch_async_panic, catch_sync_panic, panic_payload_message};
+use crate::support::generated_manifest::{ensure_generated_file_writable, write_generated_file};
 use crate::support::sync::lock_unpoisoned;
 use crate::support::{CommandId, MigrationId, SeederId};
 
@@ -775,7 +776,7 @@ async fn make_migration_command(invocation: CommandInvocation) -> Result<()> {
 
     fs::create_dir_all(&migration_dir).map_err(Error::other)?;
     ensure_writable(&migration_path, invocation.matches().get_flag("force"))?;
-    fs::write(&migration_path, render_migration_template()).map_err(Error::other)?;
+    write_generated_file(&migration_path, render_migration_template())?;
 
     println!("wrote {}", migration_path.display());
     println!("rebuild the app before running db:migrate so the new migration is discovered");
@@ -794,7 +795,7 @@ async fn make_seeder_command(invocation: CommandInvocation) -> Result<()> {
 
     fs::create_dir_all(&seeder_dir).map_err(Error::other)?;
     ensure_writable(&seeder_path, invocation.matches().get_flag("force"))?;
-    fs::write(&seeder_path, render_seeder_template()).map_err(Error::other)?;
+    write_generated_file(&seeder_path, render_seeder_template())?;
 
     println!("wrote {}", seeder_path.display());
     println!("rebuild the app before running db:seed so the new seeder is discovered");
@@ -813,7 +814,7 @@ async fn make_model_command(invocation: CommandInvocation) -> Result<()> {
 
     fs::create_dir_all(&model_dir).map_err(Error::other)?;
     ensure_writable(&model_path, invocation.matches().get_flag("force"))?;
-    fs::write(&model_path, render_model_template(&pascal, &snake)).map_err(Error::other)?;
+    write_generated_file(&model_path, render_model_template(&pascal, &snake))?;
 
     println!("wrote {}", model_path.display());
     Ok(())
@@ -832,7 +833,7 @@ async fn make_job_command(invocation: CommandInvocation) -> Result<()> {
 
     fs::create_dir_all(&job_dir).map_err(Error::other)?;
     ensure_writable(&job_path, invocation.matches().get_flag("force"))?;
-    fs::write(&job_path, render_job_template(&pascal, &snake, &screaming)).map_err(Error::other)?;
+    write_generated_file(&job_path, render_job_template(&pascal, &snake, &screaming))?;
 
     println!("wrote {}", job_path.display());
     Ok(())
@@ -851,11 +852,10 @@ async fn make_command_command(invocation: CommandInvocation) -> Result<()> {
 
     fs::create_dir_all(&command_dir).map_err(Error::other)?;
     ensure_writable(&command_path, invocation.matches().get_flag("force"))?;
-    fs::write(
+    write_generated_file(
         &command_path,
         render_command_template(&pascal, &snake, &screaming),
-    )
-    .map_err(Error::other)?;
+    )?;
 
     println!("wrote {}", command_path.display());
     Ok(())
@@ -1466,13 +1466,7 @@ fn resolve_configured_path(path: &str) -> Result<PathBuf> {
 }
 
 fn ensure_writable(path: &Path, force: bool) -> Result<()> {
-    if path.exists() && !force {
-        return Err(Error::message(format!(
-            "refusing to overwrite `{}` without `--force`",
-            path.display()
-        )));
-    }
-    Ok(())
+    ensure_generated_file_writable(path, force)
 }
 
 fn render_migration_template() -> String {

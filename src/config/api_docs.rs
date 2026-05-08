@@ -10,7 +10,7 @@ use crate::cli::CommandRegistrar;
 use crate::config::api_docs_metadata::{append_module_notes, module_description};
 use crate::foundation::Error;
 use crate::support::generated_manifest::{
-    clean_manifest_files, safe_manifest_path_with_extension, write_manifest,
+    clean_manifest_files, safe_manifest_path_with_extension, write_generated_file, write_manifest,
 };
 use crate::support::CommandId;
 
@@ -105,7 +105,7 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
 
         let lines = content.lines().count();
         let file = "root.md";
-        fs::write(out.join(file), &content).map_err(Error::other)?;
+        write_generated_file(&out.join(file), &content)?;
         output_files.insert(file.to_string());
         index_entries.push((
             "root".into(),
@@ -153,7 +153,7 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
             append_module_notes(group_key, &mut content);
             let lines = content.lines().count();
             let file = format!("modules/{group_key}.md");
-            fs::write(out.join(&file), &content).map_err(Error::other)?;
+            write_generated_file(&out.join(&file), &content)?;
             output_files.insert(file);
             index_entries.push((group_key.to_string(), desc, lines));
         }
@@ -207,7 +207,7 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
     )
     .unwrap();
 
-    fs::write(out.join("index.md"), &index).map_err(Error::other)?;
+    write_generated_file(&out.join("index.md"), &index)?;
     output_files.insert("index.md".to_string());
     write_manifest(&out, API_DOCS_MANIFEST, &output_files)?;
 

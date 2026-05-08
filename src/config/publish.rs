@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::cli::CommandRegistrar;
 use crate::foundation::{Error, Result};
+use crate::support::generated_manifest::{
+    ensure_generated_file_writable, generated_file_exists_without_symlink, write_generated_file,
+};
 use crate::support::CommandId;
 
 const CONFIG_PUBLISH_COMMAND: CommandId = CommandId::new("config:publish");
@@ -53,15 +56,18 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
                 }
 
                 let file_path = path.join("forge.toml");
-                if file_path.exists() && !force {
-                    println!(
-                        "Config file already exists at {}. Use --force to overwrite.",
-                        file_path.display()
-                    );
-                    return Ok(());
+                if let Err(error) = ensure_generated_file_writable(&file_path, force) {
+                    if !force && generated_file_exists_without_symlink(&file_path) {
+                        println!(
+                            "Config file already exists at {}. Use --force to overwrite.",
+                            file_path.display()
+                        );
+                        return Ok(());
+                    }
+                    return Err(error);
                 }
 
-                std::fs::write(&file_path, sample_config()).map_err(Error::other)?;
+                write_generated_file(&file_path, sample_config())?;
                 println!("Configuration published to {}", file_path.display());
 
                 Ok(())
@@ -246,12 +252,15 @@ fn publish_framework_files(
     let mut published = 0;
     for (name, contents) in files {
         let file_path = path.join(name);
-        if file_path.exists() && !force {
-            println!("  skip  {} (exists)", name);
-            continue;
+        if let Err(error) = ensure_generated_file_writable(&file_path, force) {
+            if !force && generated_file_exists_without_symlink(&file_path) {
+                println!("  skip  {} (exists)", name);
+                continue;
+            }
+            return Err(error);
         }
 
-        std::fs::write(&file_path, contents).map_err(Error::other)?;
+        write_generated_file(&file_path, contents)?;
         println!("  create  {}", name);
         published += 1;
     }

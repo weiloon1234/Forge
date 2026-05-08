@@ -23,7 +23,7 @@ use crate::foundation::{Error, Result};
 use crate::http::{HttpRegistrar, RouteManifestEntry, RouteRegistrar};
 use crate::support::generated_manifest::{
     clean_manifest_files as clean_generated_manifest_files, safe_manifest_path_with_extension,
-    write_manifest,
+    write_generated_file, write_manifest,
 };
 use crate::support::CommandId;
 
@@ -652,7 +652,7 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
         if rendered.has_groups {
             grouped_enum_names.insert(app_enum.name);
         }
-        std::fs::write(&file_path, rendered.content).map_err(Error::other)?;
+        write_generated_file(&file_path, rendered.content)?;
         enum_names.insert(app_enum.name);
         names.push(app_enum.name);
     }
@@ -660,8 +660,10 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
     names.sort();
     names.dedup();
 
-    std::fs::write(dir.join("RouteManifest.ts"), render_route_manifest(routes)?)
-        .map_err(Error::other)?;
+    write_generated_file(
+        &dir.join("RouteManifest.ts"),
+        render_route_manifest(routes)?,
+    )?;
 
     let mut barrel = String::from("// Auto-generated barrel. Do not edit.\n");
     for name in &names {
@@ -681,7 +683,7 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
     barrel.push_str(
         "export { RouteManifest, RouteIds, createRouteUrlBuilder, routeUrl, type RouteName, type RouteParams, type RouteParamValue, type RouteUrlOptions } from \"./RouteManifest\";\n",
     );
-    std::fs::write(dir.join("index.ts"), barrel).map_err(Error::other)?;
+    write_generated_file(&dir.join("index.ts"), barrel)?;
     write_export_manifest(dir, &output_files)?;
 
     println!("Exported {} type(s) to {}", names.len(), dir.display());
@@ -1126,6 +1128,28 @@ mod tests {
         .unwrap();
         assert!(manifest.iter().any(|file| file == "index.ts"));
         assert!(manifest.iter().any(|file| file == "RouteManifest.ts"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_replaces_symlinked_planned_file_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let outside = dir.path().join("outside.ts");
+        fs::write(&outside, "export const outside = true;\n").unwrap();
+        symlink(&outside, dir.path().join("index.ts")).unwrap();
+
+        export_all(dir.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap(),
+            "export const outside = true;\n"
+        );
+        assert!(!fs::symlink_metadata(dir.path().join("index.ts"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

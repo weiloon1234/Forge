@@ -47,6 +47,7 @@ trait DatatableQuery: Clone
   fn apply_where(self, condition: Condition) -> Self
   fn apply_having(self, condition: Condition) -> Self
   fn apply_order(self, order: OrderBy) -> Self
+  fn apply_limit(self, limit: u64) -> Self
   fn get<'life0, 'life1, 'async_trait, E>(
   fn paginate<'life0, 'life1, 'async_trait, E>(
 ```
@@ -208,4 +209,9 @@ enum DatatableValue { Null, String, Number, Bool, Date, DateTime }
   fn date(value: Date) -> Self
   fn datetime(value: DateTime) -> Self
 ```
+
+## Notes
+
+- JSON responses clamp `DatatableRequest.per_page` to `datatable.max_per_page` unless the cap is `0`.
+- XLSX downloads and queued exports apply `datatable.max_export_rows` before loading rows into memory; `0` disables the cap.
 

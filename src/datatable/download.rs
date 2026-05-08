@@ -57,9 +57,12 @@ where
 
     let columns = datatable_columns::<D>()?;
     let query = super::query_pipeline::prepare_query::<D>(&ctx, &columns).await?;
+    let config = app.config().datatable()?;
+    let query = apply_export_limit(query, config.max_export_rows);
 
     let db = app.database()?;
     let data = query.get(db.as_ref()).await?;
+    ensure_export_row_count(D::ID, data.len(), config.max_export_rows)?;
 
     let exportable_columns: Vec<&DatatableColumn<D::Row>> =
         columns.iter().filter(|c| c.exportable).collect();
@@ -132,6 +135,26 @@ where
     Ok(buf)
 }
 
+fn apply_export_limit<Row, Query>(query: Query, max_export_rows: u64) -> Query
+where
+    Query: DatatableQuery<Row>,
+{
+    if max_export_rows == 0 {
+        query
+    } else {
+        query.apply_limit(max_export_rows.saturating_add(1))
+    }
+}
+
+fn ensure_export_row_count(datatable_id: &str, rows: usize, max_export_rows: u64) -> Result<()> {
+    if max_export_rows > 0 && rows as u64 > max_export_rows {
+        return Err(Error::message(format!(
+            "datatable `{datatable_id}` export exceeded datatable.max_export_rows ({max_export_rows}); narrow filters or raise the configured cap"
+        )));
+    }
+    Ok(())
+}
+
 fn write_cell(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     row: u32,
@@ -154,4 +177,23 @@ fn write_cell(
         }
     }?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_export_row_count;
+
+    #[test]
+    fn export_row_count_allows_zero_unlimited_cap() {
+        ensure_export_row_count("orders", 1_000_000, 0).unwrap();
+    }
+
+    #[test]
+    fn export_row_count_rejects_rows_above_cap() {
+        let error = ensure_export_row_count("orders", 501, 500).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("datatable `orders` export exceeded datatable.max_export_rows (500)"));
+    }
 }

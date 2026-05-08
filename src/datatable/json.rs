@@ -27,7 +27,11 @@ where
     let columns = datatable_columns::<D>()?;
     let query = super::query_pipeline::prepare_query::<D>(&ctx, &columns).await?;
 
-    let pagination = Pagination::new(request.page, request.per_page);
+    let config = app.config().datatable()?;
+    let pagination = Pagination::new(
+        request.page,
+        effective_per_page(request.per_page, config.max_per_page),
+    );
     let db = app.database()?;
     let paginated = query.paginate(db.as_ref(), pagination).await?;
 
@@ -104,4 +108,24 @@ where
     }
 
     Ok(rows)
+}
+
+pub(crate) fn effective_per_page(requested: u64, max_per_page: u64) -> u64 {
+    if max_per_page == 0 {
+        requested
+    } else {
+        requested.min(max_per_page)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_per_page;
+
+    #[test]
+    fn effective_per_page_clamps_to_configured_cap() {
+        assert_eq!(effective_per_page(1_000, 500), 500);
+        assert_eq!(effective_per_page(50, 500), 50);
+        assert_eq!(effective_per_page(1_000, 0), 1_000);
+    }
 }

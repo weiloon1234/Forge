@@ -29,6 +29,8 @@ pub trait DatatableQuery<Row>: private::Sealed + Clone + Send + Sync + 'static {
 
     fn apply_order(self, order: OrderBy) -> Self;
 
+    fn apply_limit(self, limit: u64) -> Self;
+
     async fn get<E>(&self, executor: &E) -> Result<Collection<Row>>
     where
         E: QueryExecutor;
@@ -55,6 +57,10 @@ where
 
     fn apply_order(self, order: OrderBy) -> Self {
         self.order_by(order)
+    }
+
+    fn apply_limit(self, limit: u64) -> Self {
+        self.limit(limit)
     }
 
     async fn get<E>(&self, executor: &E) -> Result<Collection<M>>
@@ -89,6 +95,10 @@ where
 
     fn apply_order(self, order: OrderBy) -> Self {
         self.order_by(order)
+    }
+
+    fn apply_limit(self, limit: u64) -> Self {
+        self.limit(limit)
     }
 
     async fn get<E>(&self, executor: &E) -> Result<Collection<P>>

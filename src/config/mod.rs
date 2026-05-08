@@ -848,6 +848,22 @@ impl Default for TypeScriptConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+pub struct DatatableConfig {
+    pub max_per_page: u64,
+    pub max_export_rows: u64,
+}
+
+impl Default for DatatableConfig {
+    fn default() -> Self {
+        Self {
+            max_per_page: 500,
+            max_export_rows: 50_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct CacheConfig {
     pub driver: CacheDriver,
     pub error_mode: CacheErrorMode,
@@ -1040,6 +1056,10 @@ impl ConfigRepository {
         self.section("typescript")
     }
 
+    pub fn datatable(&self) -> Result<DatatableConfig> {
+        self.section("datatable")
+    }
+
     pub fn observability(&self) -> Result<ObservabilityConfig> {
         self.section("observability")
     }
@@ -1165,8 +1185,9 @@ mod tests {
 
     use super::{
         AppConfig, AuthConfig, CacheConfig, CacheDriver, CacheErrorMode, ConfigRepository,
-        DatabaseConfig, Environment, HttpConfig, HttpRateLimitByConfig, JobsConfig, LoggingConfig,
-        ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
+        DatabaseConfig, DatatableConfig, Environment, HttpConfig, HttpRateLimitByConfig,
+        JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig, SchedulerConfig,
+        TypeScriptConfig, WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -1735,6 +1756,34 @@ mod tests {
     fn typescript_config_defaults_to_generated_output_dir() {
         let config = TypeScriptConfig::default();
         assert_eq!(config.output_dir, "frontend/shared/types/generated");
+    }
+
+    #[test]
+    fn datatable_config_defaults_bound_expensive_outputs() {
+        let config: DatatableConfig = ConfigRepository::empty().datatable().unwrap();
+        assert_eq!(config.max_per_page, 500);
+        assert_eq!(config.max_export_rows, 50_000);
+    }
+
+    #[test]
+    fn parses_datatable_config_section() {
+        let _guard = env_lock().lock().unwrap();
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-datatable.toml"),
+            r#"
+                [datatable]
+                max_per_page = 250
+                max_export_rows = 10000
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let datatable: DatatableConfig = config.datatable().unwrap();
+
+        assert_eq!(datatable.max_per_page, 250);
+        assert_eq!(datatable.max_export_rows, 10_000);
     }
 
     #[test]

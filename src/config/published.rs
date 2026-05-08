@@ -922,6 +922,25 @@ const TYPESCRIPT_FIELDS: &[PublishedField] = &[field(
     None,
 )];
 
+const DATATABLE_FIELDS: &[PublishedField] = &[
+    field(
+        "max_per_page",
+        "500",
+        "500",
+        false,
+        false,
+        Some("Max JSON rows per page (0 = unlimited)"),
+    ),
+    field(
+        "max_export_rows",
+        "50000",
+        "50000",
+        false,
+        false,
+        Some("Max rows generated into XLSX downloads/jobs (0 = unlimited)"),
+    ),
+];
+
 const EMAIL_FIELDS: &[PublishedField] = &[
     field(
         "default",
@@ -1289,6 +1308,10 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
     section(
         "TypeScript",
         &[table(&["typescript"], None, false, TYPESCRIPT_FIELDS)],
+    ),
+    section(
+        "Datatable",
+        &[table(&["datatable"], None, false, DATATABLE_FIELDS)],
     ),
     section(
         "Email",
@@ -1770,6 +1793,20 @@ mod tests {
         assert!(env.contains("# CACHE__REMEMBER_SINGLEFLIGHT=true"));
         assert!(env.contains("# CACHE__REMEMBER_DISTRIBUTED_LOCK=false"));
         assert!(env.contains("# CACHE__REMEMBER_LOCK_TTL_MS=30000"));
+    }
+
+    #[test]
+    fn published_datatable_config_includes_export_bounds() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[datatable]"));
+        assert!(output.contains("# max_per_page = 500  # Max JSON rows per page (0 = unlimited)"));
+        assert!(output.contains(
+            "# max_export_rows = 50000  # Max rows generated into XLSX downloads/jobs (0 = unlimited)"
+        ));
+        assert!(env.contains("# DATATABLE__MAX_PER_PAGE=500"));
+        assert!(env.contains("# DATATABLE__MAX_EXPORT_ROWS=50000"));
     }
 
     #[test]

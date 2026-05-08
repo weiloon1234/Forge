@@ -43,6 +43,7 @@ struct ConfigRepository
   fn logging(&self) -> Result<LoggingConfig>
   fn i18n(&self) -> Result<I18nConfig>
   fn typescript(&self) -> Result<TypeScriptConfig>
+  fn datatable(&self) -> Result<DatatableConfig>
   fn observability(&self) -> Result<ObservabilityConfig>
   fn storage(&self) -> Result<StorageConfig>
   fn email(&self) -> Result<EmailConfig>
@@ -52,6 +53,7 @@ struct ConfigRepository
 struct CryptConfig
 struct DatabaseConfig
 struct DatabaseModelConfig
+struct DatatableConfig
 struct EmailVerificationConfig
 struct GuardDriverConfig
 struct HashingConfig
@@ -88,6 +90,7 @@ struct WebSocketObservabilityConfig
 - `CacheConfig.error_mode` defaults to `strict`; `remember_singleflight` is enabled by default and distributed remember locks are opt-in.
 - `DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.
 - `DatabaseConfig.redact_sql_literals` is enabled by default so SQL logs and `/_forge/sql` retain query shape without common literal values.
+- `DatatableConfig` caps JSON `per_page` and XLSX export row counts by default; `0` disables each cap.
 - `JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.
 - `JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.
 - `ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.

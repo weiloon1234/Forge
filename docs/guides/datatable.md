@@ -371,4 +371,17 @@ Each datatable gets three output modes with identical scoping/filtering:
 - `Datatable::download(...)`
 - `Datatable::queue_email(...)`
 
+Forge caps expensive datatable outputs by default:
+
+```toml
+[datatable]
+max_per_page = 500       # 0 = no JSON page-size cap
+max_export_rows = 50000  # 0 = no XLSX export row cap
+```
+
+`max_per_page` clamps client-provided `DatatableRequest.per_page`. `max_export_rows`
+is applied before XLSX downloads and queued export jobs load rows into memory; if
+the filtered result is larger, Forge returns a clear error and the operator can
+narrow filters or raise the cap.
+
 That keeps model tables and grouped report tables on the same framework path end-to-end.

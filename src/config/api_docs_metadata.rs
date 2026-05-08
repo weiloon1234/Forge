@@ -61,6 +61,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`CacheConfig.error_mode` defaults to `strict`; `remember_singleflight` is enabled by default and distributed remember locks are opt-in.",
             "`DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.",
             "`DatabaseConfig.redact_sql_literals` is enabled by default so SQL logs and `/_forge/sql` retain query shape without common literal values.",
+            "`DatatableConfig` caps JSON `per_page` and XLSX export row counts by default; `0` disables each cap.",
             "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
             "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
@@ -71,6 +72,10 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.",
             "`remember()` uses local single-flight by default and can coordinate across workers with an opt-in distributed lock.",
             "`cache.error_mode = \"fail_open\"` logs backend I/O failures and continues, while validation, serialization, and callback errors remain strict.",
+        ],
+        "datatable" => &[
+            "JSON responses clamp `DatatableRequest.per_page` to `datatable.max_per_page` unless the cap is `0`.",
+            "XLSX downloads and queued exports apply `datatable.max_export_rows` before loading rows into memory; `0` disables the cap.",
         ],
         "email" => &[
             "Built-in HTTP mailers use `timeout_secs = 30` by default; `0` disables the reqwest timeout for local debugging.",
@@ -174,6 +179,11 @@ mod tests {
         assert!(cache.contains("single-flight"));
         assert!(cache.contains("fail_open"));
         assert!(cache.contains("backend failures"));
+
+        let mut datatable = String::new();
+        append_module_notes("datatable", &mut datatable);
+        assert!(datatable.contains("max_per_page"));
+        assert!(datatable.contains("max_export_rows"));
 
         let mut email = String::new();
         append_module_notes("email", &mut email);

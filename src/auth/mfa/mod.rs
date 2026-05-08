@@ -316,14 +316,17 @@ impl TotpFactor {
         Ok(())
     }
 
-    async fn update_last_used_step(&self, actor: &Actor, last_used_step: i64) -> Result<()> {
-        self.app
+    async fn update_last_used_step(&self, actor: &Actor, last_used_step: i64) -> Result<bool> {
+        let affected = self
+            .app
             .database()?
             .raw_execute(
                 r#"
                 UPDATE auth_mfa_totp_factors
                 SET last_used_step = $3, updated_at = NOW()
                 WHERE guard = $1 AND actor_id = $2
+                  AND confirmed_at IS NOT NULL
+                  AND (last_used_step IS NULL OR last_used_step < $3)
                 "#,
                 &[
                     DbValue::Text(actor.guard.to_string()),
@@ -332,7 +335,7 @@ impl TotpFactor {
                 ],
             )
             .await?;
-        Ok(())
+        Ok(affected > 0)
     }
 
     async fn persist_recovery_codes(&self, actor: &Actor, hashes: &[String]) -> Result<()> {
@@ -358,9 +361,29 @@ impl TotpFactor {
     async fn consume_recovery_code(
         &self,
         actor: &Actor,
+        current_hashes: &[String],
         remaining_hashes: &[String],
-    ) -> Result<()> {
-        self.persist_recovery_codes(actor, remaining_hashes).await
+    ) -> Result<bool> {
+        let current = serde_json::to_value(current_hashes).map_err(Error::other)?;
+        let remaining = serde_json::to_value(remaining_hashes).map_err(Error::other)?;
+        let affected = self
+            .app
+            .database()?
+            .raw_execute(
+                r#"
+                UPDATE auth_mfa_totp_factors
+                SET recovery_codes = $3, updated_at = NOW()
+                WHERE guard = $1 AND actor_id = $2 AND recovery_codes = $4
+                "#,
+                &[
+                    DbValue::Text(actor.guard.to_string()),
+                    DbValue::Text(actor.id.clone()),
+                    DbValue::Json(remaining),
+                    DbValue::Json(current),
+                ],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     async fn dispatch_event<E>(&self, event: E) -> Result<()>
@@ -395,38 +418,44 @@ impl TotpFactor {
             .await
             .map_err(Error::from)?;
 
+        let response = normalize_mfa_response(response);
         let secret = self
             .app
             .crypt()?
             .decrypt_string(&record.secret_ciphertext)?;
         let secret_bytes = decode_base32(&secret)?;
         let current_step = current_totp_step(Utc::now());
-        for step in (current_step - 1)..=(current_step + 1) {
-            if Some(step) <= record.last_used_step {
-                continue;
-            }
-            if totp_code(&secret_bytes, step)? == response {
-                throttle.record_success(&identifier).await?;
-                return Ok(VerifiedFactor::Totp { step });
+        if is_totp_code_candidate(response) {
+            for step in (current_step - 1)..=(current_step + 1) {
+                if Some(step) <= record.last_used_step {
+                    continue;
+                }
+                let expected = totp_code(&secret_bytes, step)?;
+                if crate::support::hmac::constant_time_eq(expected.as_bytes(), response.as_bytes())
+                {
+                    throttle.record_success(&identifier).await?;
+                    return Ok(VerifiedFactor::Totp { step });
+                }
             }
         }
 
-        if let Some((_, remaining_hashes)) = consume_matching_recovery_code(
-            self.app.hash()?.as_ref(),
-            &record.recovery_codes,
-            response,
-        )? {
-            throttle.record_success(&identifier).await?;
-            return Ok(VerifiedFactor::RecoveryCode { remaining_hashes });
+        if is_recovery_code_candidate(response) {
+            if let Some((_, remaining_hashes)) = consume_matching_recovery_code(
+                self.app.hash()?.as_ref(),
+                &record.recovery_codes,
+                response,
+            )? {
+                throttle.record_success(&identifier).await?;
+                return Ok(VerifiedFactor::RecoveryCode {
+                    current_hashes: record.recovery_codes.clone(),
+                    remaining_hashes,
+                });
+            }
         }
 
         throttle.record_failure(&identifier).await?;
         self.dispatch_failed(actor, "invalid_code").await?;
-        Err(Error::http_with_code(
-            401,
-            "Invalid multi-factor authentication code.",
-            "invalid_mfa_code",
-        ))
+        Err(invalid_mfa_code_error())
     }
 }
 
@@ -507,10 +536,22 @@ impl MfaFactor for TotpFactor {
 
         match self.verify_record(actor, &record, response).await? {
             VerifiedFactor::Totp { step } => {
-                self.update_last_used_step(actor, step).await?;
+                if !self.update_last_used_step(actor, step).await? {
+                    self.dispatch_failed(actor, "replayed_code").await?;
+                    return Err(invalid_mfa_code_error());
+                }
             }
-            VerifiedFactor::RecoveryCode { remaining_hashes } => {
-                self.consume_recovery_code(actor, &remaining_hashes).await?;
+            VerifiedFactor::RecoveryCode {
+                current_hashes,
+                remaining_hashes,
+            } => {
+                if !self
+                    .consume_recovery_code(actor, &current_hashes, &remaining_hashes)
+                    .await?
+                {
+                    self.dispatch_failed(actor, "replayed_code").await?;
+                    return Err(invalid_mfa_code_error());
+                }
             }
         }
 
@@ -593,8 +634,40 @@ struct TotpRecord {
 }
 
 enum VerifiedFactor {
-    Totp { step: i64 },
-    RecoveryCode { remaining_hashes: Vec<String> },
+    Totp {
+        step: i64,
+    },
+    RecoveryCode {
+        current_hashes: Vec<String>,
+        remaining_hashes: Vec<String>,
+    },
+}
+
+fn invalid_mfa_code_error() -> Error {
+    Error::http_with_code(
+        401,
+        "Invalid multi-factor authentication code.",
+        "invalid_mfa_code",
+    )
+}
+
+fn normalize_mfa_response(response: &str) -> &str {
+    response.trim()
+}
+
+fn is_totp_code_candidate(response: &str) -> bool {
+    response.len() == TOTP_DIGITS as usize && response.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_recovery_code_candidate(response: &str) -> bool {
+    const PART_LEN: usize = 5;
+    let bytes = response.as_bytes();
+    bytes.len() == PART_LEN * 2 + 1
+        && bytes[PART_LEN] == b'-'
+        && bytes[..PART_LEN]
+            .iter()
+            .chain(bytes[PART_LEN + 1..].iter())
+            .all(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn current_totp_step(now: chrono::DateTime<Utc>) -> i64 {
@@ -724,6 +797,23 @@ mod tests {
         let code = totp_code(&secret, 1_000).unwrap();
         assert_eq!(code.len(), 6);
         assert!(code.chars().all(|ch| ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn mfa_response_candidates_are_shape_limited() {
+        assert!(is_totp_code_candidate("123456"));
+        assert!(!is_totp_code_candidate("12345"));
+        assert!(!is_totp_code_candidate("1234567"));
+        assert!(!is_totp_code_candidate("１２３４５６"));
+        assert!(!is_totp_code_candidate("12345a"));
+
+        assert!(is_recovery_code_candidate("ABCDE-12345"));
+        assert!(is_recovery_code_candidate("abcde-12345"));
+        assert!(!is_recovery_code_candidate("ABCDE12345"));
+        assert!(!is_recovery_code_candidate("ABCDE-1234"));
+        assert!(!is_recovery_code_candidate("ABCDE-12345-extra"));
+        assert!(!is_recovery_code_candidate("ABCDE_12345"));
+        assert_eq!(normalize_mfa_response(" 123456\n"), "123456");
     }
 
     #[test]

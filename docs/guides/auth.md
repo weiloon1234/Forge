@@ -592,8 +592,10 @@ recovery_codes = 8
 admin = ["developer", "super_admin"]
 ```
 
-Recovery codes are one-time use, and repeated MFA failures reuse the built-in lockout backend under
-a separate internal key.
+TOTP codes must be six ASCII digits. Recovery codes use Forge's generated `xxxxx-yyyyy` shape,
+are one-time use, and are consumed with an owner-checked database update so concurrent retries
+cannot spend the same code twice. Repeated MFA failures reuse the built-in lockout backend under a
+separate internal key.
 
 ---
 

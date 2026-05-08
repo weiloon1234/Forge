@@ -1,9 +1,16 @@
 use std::collections::HashSet;
 
+const ALWAYS_DENIED_TAGS: &[&str] = &[
+    "applet", "base", "embed", "frame", "frameset", "iframe", "link", "math", "meta", "object",
+    "script", "style", "svg", "template",
+];
+
 /// Sanitize HTML by whitelisting allowed tags and stripping everything else.
 ///
 /// Uses the `ammonia` crate for robust HTML parsing that handles malformed HTML,
 /// nested tag attacks (`<scr<script>ipt>`), and browser parsing quirks.
+/// Active document tags such as `script`, `style`, `iframe`, `object`, `svg`,
+/// and `math` are always denied even if included in `allowed_tags`.
 ///
 /// ```rust
 /// use forge::support::sanitize_html;
@@ -15,7 +22,7 @@ use std::collections::HashSet;
 /// assert_eq!(safe, "<p>Hello <b>world</b></p>");
 /// ```
 pub fn sanitize_html(input: &str, allowed_tags: &[&str]) -> String {
-    let tags: HashSet<&str> = allowed_tags.iter().copied().collect();
+    let tags = safe_allowed_tags(allowed_tags);
     ammonia::Builder::default()
         .tags(tags)
         .clean(input)
@@ -28,6 +35,20 @@ pub fn strip_tags(input: &str) -> String {
         .tags(HashSet::new())
         .clean(input)
         .to_string()
+}
+
+fn safe_allowed_tags<'a>(allowed_tags: &'a [&'a str]) -> HashSet<&'a str> {
+    allowed_tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty() && !is_always_denied_tag(tag))
+        .collect()
+}
+
+fn is_always_denied_tag(tag: &str) -> bool {
+    ALWAYS_DENIED_TAGS
+        .iter()
+        .any(|denied| tag.eq_ignore_ascii_case(denied))
 }
 
 #[cfg(test)]
@@ -93,5 +114,21 @@ mod tests {
         let input = "<B>bold</B>";
         let result = sanitize_html(input, &["b"]);
         assert!(result.contains("bold"));
+    }
+
+    #[test]
+    fn active_tags_are_denied_even_when_allowed() {
+        let input = r#"<p>ok</p><script>alert(1)</script><iframe src="https://example.com"></iframe><svg onload="alert(1)"></svg>"#;
+        let result = sanitize_html(input, &["p", "script", "iframe", "svg"]);
+
+        assert_eq!(result, "<p>ok</p>");
+    }
+
+    #[test]
+    fn allowed_tags_are_trimmed_and_empty_entries_ignored() {
+        let input = "<B>bold</B><i>italic</i>";
+        let result = sanitize_html(input, &[" b ", ""]);
+
+        assert_eq!(result, "<b>bold</b>italic");
     }
 }

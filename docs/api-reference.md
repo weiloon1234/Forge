@@ -1738,7 +1738,7 @@ fn files(&self, name: &str) -> &[UploadedFile]
 fn text(&self, name: &str) -> Option<&str>
 ```
 
-Multipart extraction honors `[storage]` upload caps and returns Forge JSON `413` errors for oversized uploads or too many uploaded files. Forge worker maintenance prunes stale `forge-upload-*` temp files according to storage retention settings.
+Multipart extraction honors `[storage]` upload caps and returns Forge JSON `413` errors for oversized uploads or too many uploaded files. Forge worker maintenance prunes stale `forge-upload-*` temp files according to storage retention settings. Storage paths are logical relative keys; Forge rejects absolute paths, relative segments, empty segments, backslashes, drive prefixes, and control characters before disk access.
 
 Attachment image processing also honors `[storage]` decode safety limits for input bytes, width, height, and total pixels. Forge worker maintenance audits old objects under `storage.attachment_orphan_prefix`; deletion is off by default and requires `storage.attachment_orphan_delete_enabled = true`.
 

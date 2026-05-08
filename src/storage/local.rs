@@ -7,6 +7,7 @@ use crate::support::DateTime;
 
 use super::adapter::{StorageAdapter, StorageVisibility};
 use super::config::ResolvedLocalConfig;
+use super::path::{normalize_path, normalize_prefix};
 use super::stored_file::{StorageObject, StoredFile};
 
 pub struct LocalStorageAdapter {
@@ -38,6 +39,63 @@ impl LocalStorageAdapter {
         let relative = full_path.strip_prefix(&self.root).map_err(Error::other)?;
         Ok(relative.to_string_lossy().replace('\\', "/"))
     }
+
+    async fn prepare_write_path(&self, path: &str) -> Result<(String, PathBuf)> {
+        let path = normalize_path(path)?;
+        let full = self.full_path(&path);
+
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(Error::other)?;
+        }
+        self.reject_symlink_components(&path, true).await?;
+
+        Ok((path, full))
+    }
+
+    async fn resolve_read_path(&self, path: &str) -> Result<(String, PathBuf)> {
+        let path = normalize_path(path)?;
+        self.reject_symlink_components(&path, true).await?;
+        let full = self.full_path(&path);
+        Ok((path, full))
+    }
+
+    async fn resolve_prefix_path(&self, prefix: &str) -> Result<(String, PathBuf)> {
+        let prefix = normalize_prefix(prefix)?;
+        self.reject_symlink_components(prefix.trim_end_matches('/'), true)
+            .await?;
+        let full = self.full_path(&prefix);
+        Ok((prefix, full))
+    }
+
+    async fn reject_symlink_components(&self, path: &str, include_leaf: bool) -> Result<()> {
+        let segments: Vec<&str> = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        let mut current = self.root.clone();
+        for (index, segment) in segments.iter().enumerate() {
+            let is_leaf = index + 1 == segments.len();
+            if is_leaf && !include_leaf {
+                break;
+            }
+
+            current.push(segment);
+            match tokio::fs::symlink_metadata(&current).await {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(Error::message(format!(
+                        "storage path `{path}` resolves through a symlink"
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Error::other(error)),
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -49,20 +107,14 @@ impl StorageAdapter for LocalStorageAdapter {
         content_type: Option<&str>,
         _visibility: StorageVisibility,
     ) -> Result<StoredFile> {
-        let full = self.full_path(path);
-
-        if let Some(parent) = full.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(Error::other)?;
-        }
+        let (path, full) = self.prepare_write_path(path).await?;
 
         tokio::fs::write(&full, bytes).await.map_err(Error::other)?;
 
         Ok(StoredFile {
             disk: String::new(),
-            path: path.to_string(),
-            name: Self::file_name(path),
+            path: path.clone(),
+            name: Self::file_name(&path),
             size: bytes.len() as u64,
             content_type: content_type.map(|s| s.to_string()),
             url: None,
@@ -76,13 +128,7 @@ impl StorageAdapter for LocalStorageAdapter {
         content_type: Option<&str>,
         _visibility: StorageVisibility,
     ) -> Result<StoredFile> {
-        let full = self.full_path(path);
-
-        if let Some(parent) = full.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(Error::other)?;
-        }
+        let (path, full) = self.prepare_write_path(path).await?;
 
         let metadata = tokio::fs::copy(temp_path, &full)
             .await
@@ -90,8 +136,8 @@ impl StorageAdapter for LocalStorageAdapter {
 
         Ok(StoredFile {
             disk: String::new(),
-            path: path.to_string(),
-            name: Self::file_name(path),
+            path: path.clone(),
+            name: Self::file_name(&path),
             size: metadata,
             content_type: content_type.map(|s| s.to_string()),
             url: None,
@@ -99,21 +145,21 @@ impl StorageAdapter for LocalStorageAdapter {
     }
 
     async fn get(&self, path: &str) -> Result<Vec<u8>> {
-        let full = self.full_path(path);
+        let (path, full) = self.resolve_read_path(path).await?;
         tokio::fs::read(&full)
             .await
             .map_err(|e| Error::message(format!("Failed to read file '{path}': {e}")))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let full = self.full_path(path);
+        let (path, full) = self.resolve_read_path(path).await?;
         tokio::fs::remove_file(&full)
             .await
             .map_err(|e| Error::message(format!("Failed to delete file '{path}': {e}")))
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
-        let full = self.full_path(path);
+        let (_path, full) = self.resolve_read_path(path).await?;
         match tokio::fs::metadata(&full).await {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -122,14 +168,8 @@ impl StorageAdapter for LocalStorageAdapter {
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<()> {
-        let src = self.full_path(from);
-        let dst = self.full_path(to);
-
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(Error::other)?;
-        }
+        let (from, src) = self.resolve_read_path(from).await?;
+        let (to, dst) = self.prepare_write_path(to).await?;
 
         tokio::fs::copy(&src, &dst)
             .await
@@ -139,14 +179,8 @@ impl StorageAdapter for LocalStorageAdapter {
     }
 
     async fn move_to(&self, from: &str, to: &str) -> Result<()> {
-        let src = self.full_path(from);
-        let dst = self.full_path(to);
-
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(Error::other)?;
-        }
+        let (from, src) = self.resolve_read_path(from).await?;
+        let (to, dst) = self.prepare_write_path(to).await?;
 
         if let Err(e) = tokio::fs::rename(&src, &dst).await {
             if e.raw_os_error() == Some(18)
@@ -167,6 +201,7 @@ impl StorageAdapter for LocalStorageAdapter {
     }
 
     async fn url(&self, path: &str) -> Result<String> {
+        let path = normalize_path(path)?;
         match &self.url {
             Some(base) => Ok(format!("{base}/{path}")),
             None => Err(Error::message(
@@ -175,7 +210,8 @@ impl StorageAdapter for LocalStorageAdapter {
         }
     }
 
-    async fn temporary_url(&self, _path: &str, _expires_at: DateTime) -> Result<String> {
+    async fn temporary_url(&self, path: &str, _expires_at: DateTime) -> Result<String> {
+        normalize_path(path)?;
         Err(Error::message(
             "Temporary URLs are not supported for local disk",
         ))
@@ -186,7 +222,7 @@ impl StorageAdapter for LocalStorageAdapter {
             return Ok(Vec::new());
         }
 
-        let start = self.full_path(prefix);
+        let (_prefix, start) = self.resolve_prefix_path(prefix).await?;
         if tokio::fs::metadata(&start)
             .await
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
@@ -198,11 +234,15 @@ impl StorageAdapter for LocalStorageAdapter {
         let mut objects = Vec::new();
 
         while let Some(path) = pending.pop() {
-            let metadata = match tokio::fs::metadata(&path).await {
+            let metadata = match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(Error::other(error)),
             };
+
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
 
             if metadata.is_file() {
                 let modified_at = metadata.modified().map_err(Error::other)?;
@@ -458,6 +498,92 @@ mod tests {
         let objects = adapter.list_prefix("missing/", 10).await.unwrap();
 
         assert!(objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_traversal_paths_without_escaping_root() {
+        let workspace = TempDir::new().unwrap();
+        let root = workspace.path().join("storage");
+        std::fs::create_dir_all(&root).unwrap();
+        let adapter = LocalStorageAdapter { root, url: None };
+        let outside = workspace.path().join("outside.txt");
+
+        let error = adapter
+            .put_bytes("../outside.txt", b"nope", None, StorageVisibility::Private)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid storage path"));
+        assert!(!outside.exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_absolute_paths() {
+        let dir = TempDir::new().unwrap();
+        let adapter = make_adapter(&dir);
+
+        let error = adapter.get("/etc/passwd").await.unwrap_err();
+
+        assert!(error.to_string().contains("invalid storage path"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_prefix_skips_symlinked_directories() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+
+        let adapter = make_adapter(&dir);
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            dir.path().join("attachments").join("outside"),
+        )
+        .unwrap();
+        adapter
+            .put_bytes(
+                "attachments/inside.txt",
+                b"inside",
+                None,
+                StorageVisibility::Private,
+            )
+            .await
+            .unwrap();
+
+        let objects = adapter.list_prefix("attachments/", 10).await.unwrap();
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].path, "attachments/inside.txt");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_rejects_symlinked_leaf() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("target.txt");
+        std::fs::write(&outside_file, b"original").unwrap();
+        let adapter = make_adapter(&dir);
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::os::unix::fs::symlink(
+            &outside_file,
+            dir.path().join("attachments").join("target.txt"),
+        )
+        .unwrap();
+
+        let error = adapter
+            .put_bytes(
+                "attachments/target.txt",
+                b"changed",
+                None,
+                StorageVisibility::Private,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"original");
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use crate::support::DateTime;
 
 use super::adapter::{StorageAdapter, StorageVisibility};
 use super::config::ResolvedS3Config;
+use super::path::{normalize_path, normalize_prefix};
 use super::stored_file::{StorageObject, StoredFile};
 
 pub struct S3StorageAdapter {
@@ -65,7 +66,8 @@ impl StorageAdapter for S3StorageAdapter {
         content_type: Option<&str>,
         _visibility: StorageVisibility,
     ) -> Result<StoredFile> {
-        let object_path = ObjectPath::from(path);
+        let path = normalize_path(path)?;
+        let object_path = ObjectPath::from(path.as_str());
         self.inner
             .put(&object_path, bytes.to_vec().into())
             .await
@@ -73,8 +75,8 @@ impl StorageAdapter for S3StorageAdapter {
 
         Ok(StoredFile {
             disk: String::new(),
-            path: path.to_string(),
-            name: Self::file_name(path),
+            path: path.clone(),
+            name: Self::file_name(&path),
             size: bytes.len() as u64,
             content_type: content_type.map(|s| s.to_string()),
             url: None,
@@ -88,24 +90,29 @@ impl StorageAdapter for S3StorageAdapter {
         content_type: Option<&str>,
         visibility: StorageVisibility,
     ) -> Result<StoredFile> {
+        let path = normalize_path(path)?;
         let bytes = tokio::fs::read(temp_path).await.map_err(Error::other)?;
-        self.put_bytes(path, &bytes, content_type, visibility).await
+        self.put_bytes(&path, &bytes, content_type, visibility)
+            .await
     }
 
     async fn get(&self, path: &str) -> Result<Vec<u8>> {
-        let object_path = ObjectPath::from(path);
+        let path = normalize_path(path)?;
+        let object_path = ObjectPath::from(path.as_str());
         let result = self.inner.get(&object_path).await.map_err(Error::other)?;
         let bytes = result.bytes().await.map_err(Error::other)?;
         Ok(bytes.to_vec())
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let object_path = ObjectPath::from(path);
+        let path = normalize_path(path)?;
+        let object_path = ObjectPath::from(path.as_str());
         self.inner.delete(&object_path).await.map_err(Error::other)
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
-        let object_path = ObjectPath::from(path);
+        let path = normalize_path(path)?;
+        let object_path = ObjectPath::from(path.as_str());
         match self.inner.head(&object_path).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -114,8 +121,10 @@ impl StorageAdapter for S3StorageAdapter {
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<()> {
-        let from_path = ObjectPath::from(from);
-        let to_path = ObjectPath::from(to);
+        let from = normalize_path(from)?;
+        let to = normalize_path(to)?;
+        let from_path = ObjectPath::from(from.as_str());
+        let to_path = ObjectPath::from(to.as_str());
         self.inner
             .copy(&from_path, &to_path)
             .await
@@ -123,8 +132,10 @@ impl StorageAdapter for S3StorageAdapter {
     }
 
     async fn move_to(&self, from: &str, to: &str) -> Result<()> {
-        let from_path = ObjectPath::from(from);
-        let to_path = ObjectPath::from(to);
+        let from = normalize_path(from)?;
+        let to = normalize_path(to)?;
+        let from_path = ObjectPath::from(from.as_str());
+        let to_path = ObjectPath::from(to.as_str());
         self.inner
             .rename(&from_path, &to_path)
             .await
@@ -132,6 +143,7 @@ impl StorageAdapter for S3StorageAdapter {
     }
 
     async fn url(&self, path: &str) -> Result<String> {
+        let path = normalize_path(path)?;
         match &self.url_prefix {
             Some(prefix) => Ok(format!("{prefix}/{path}")),
             None => Ok(format!(
@@ -145,6 +157,8 @@ impl StorageAdapter for S3StorageAdapter {
         use object_store::signer::Signer;
         use std::time::Duration;
 
+        let path = normalize_path(path)?;
+
         let now_ms = DateTime::now().timestamp_millis();
         let expires_ms = expires_at.timestamp_millis();
         let secs = (expires_ms - now_ms) / 1000;
@@ -152,7 +166,7 @@ impl StorageAdapter for S3StorageAdapter {
             return Err(Error::message("expiration must be in the future"));
         }
 
-        let object_path = ObjectPath::from(path);
+        let object_path = ObjectPath::from(path.as_str());
         let url = self
             .inner
             .signed_url(
@@ -171,7 +185,8 @@ impl StorageAdapter for S3StorageAdapter {
             return Ok(Vec::new());
         }
 
-        let prefix = ObjectPath::from(prefix);
+        let prefix = normalize_prefix(prefix)?;
+        let prefix = ObjectPath::from(prefix.as_str());
         let mut stream = self.inner.list(Some(&prefix));
         let mut objects = Vec::new();
 

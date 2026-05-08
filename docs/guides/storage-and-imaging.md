@@ -62,6 +62,8 @@ Upload caps are storage-level guardrails for `UploadedFile`, `MultipartForm`, an
 
 Forge streams multipart files to OS temp files named `forge-upload-*`. The worker prunes stale temp files using the retention settings above, so consumers do not need to add a scheduler job. Stored attachments/files are not pruned by this temp cleanup.
 
+Storage paths are logical relative keys, not filesystem paths. Forge rejects absolute paths, `..` or `.` segments, empty path segments, backslashes, drive prefixes, and control characters before calling a disk adapter. Local disks also reject symlinked path components so app storage cannot escape the configured disk root.
+
 Attachment image processing has generous decode guardrails by default. `image_max_input_bytes` rejects large image uploads before decode, and the width/height/pixel caps reject suspicious image dimensions before transforms. Set an individual value to `0` only when the app has its own stricter validation or explicitly needs to disable that one safety check.
 
 Forge can audit attachment storage objects under `attachment_orphan_prefix` on list-capable disks (`local` and `s3`). The worker compares listed objects against `attachments.disk/path` and logs candidates older than `attachment_orphan_retention_seconds`. Deletion is off by default; enable `attachment_orphan_delete_enabled` only when the app owns that prefix in the bucket/disk. Consumers do not need to add a scheduler job.

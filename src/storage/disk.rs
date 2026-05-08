@@ -6,6 +6,7 @@ use crate::support::DateTime;
 
 use super::adapter::{StorageAdapter, StorageVisibility};
 use super::callback;
+use super::path::{normalize_path, normalize_prefix};
 use super::stored_file::{StorageObject, StoredFile};
 
 #[derive(Clone)]
@@ -46,9 +47,10 @@ impl StorageDisk {
     }
 
     pub async fn put(&self, path: &str, contents: impl AsRef<[u8]>) -> Result<StoredFile> {
+        let path = normalize_path(path)?;
         let bytes = contents.as_ref();
         let mut file = callback::run_storage_operation(&self.name, "put", || {
-            self.adapter.put_bytes(path, bytes, None, self.visibility)
+            self.adapter.put_bytes(&path, bytes, None, self.visibility)
         })
         .await?;
         file.disk = self.name.clone();
@@ -56,9 +58,10 @@ impl StorageDisk {
     }
 
     pub async fn put_bytes(&self, path: &str, bytes: impl AsRef<[u8]>) -> Result<StoredFile> {
+        let path = normalize_path(path)?;
         let bytes = bytes.as_ref();
         let mut file = callback::run_storage_operation(&self.name, "put_bytes", || {
-            self.adapter.put_bytes(path, bytes, None, self.visibility)
+            self.adapter.put_bytes(&path, bytes, None, self.visibility)
         })
         .await?;
         file.disk = self.name.clone();
@@ -71,9 +74,10 @@ impl StorageDisk {
         temp_path: &Path,
         content_type: Option<&str>,
     ) -> Result<StoredFile> {
+        let path = normalize_path(path)?;
         let mut file = callback::run_storage_operation(&self.name, "put_file", || {
             self.adapter
-                .put_file(path, temp_path, content_type, self.visibility)
+                .put_file(&path, temp_path, content_type, self.visibility)
         })
         .await?;
         file.disk = self.name.clone();
@@ -81,40 +85,50 @@ impl StorageDisk {
     }
 
     pub async fn get(&self, path: &str) -> Result<Vec<u8>> {
-        callback::run_storage_operation(&self.name, "get", || self.adapter.get(path)).await
+        let path = normalize_path(path)?;
+        callback::run_storage_operation(&self.name, "get", || self.adapter.get(&path)).await
     }
 
     pub async fn delete(&self, path: &str) -> Result<()> {
-        callback::run_storage_operation(&self.name, "delete", || self.adapter.delete(path)).await
+        let path = normalize_path(path)?;
+        callback::run_storage_operation(&self.name, "delete", || self.adapter.delete(&path)).await
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool> {
-        callback::run_storage_operation(&self.name, "exists", || self.adapter.exists(path)).await
+        let path = normalize_path(path)?;
+        callback::run_storage_operation(&self.name, "exists", || self.adapter.exists(&path)).await
     }
 
     pub async fn copy(&self, from: &str, to: &str) -> Result<()> {
-        callback::run_storage_operation(&self.name, "copy", || self.adapter.copy(from, to)).await
+        let from = normalize_path(from)?;
+        let to = normalize_path(to)?;
+        callback::run_storage_operation(&self.name, "copy", || self.adapter.copy(&from, &to)).await
     }
 
     pub async fn move_to(&self, from: &str, to: &str) -> Result<()> {
-        callback::run_storage_operation(&self.name, "move_to", || self.adapter.move_to(from, to))
+        let from = normalize_path(from)?;
+        let to = normalize_path(to)?;
+        callback::run_storage_operation(&self.name, "move_to", || self.adapter.move_to(&from, &to))
             .await
     }
 
     pub async fn url(&self, path: &str) -> Result<String> {
-        callback::run_storage_operation(&self.name, "url", || self.adapter.url(path)).await
+        let path = normalize_path(path)?;
+        callback::run_storage_operation(&self.name, "url", || self.adapter.url(&path)).await
     }
 
     pub async fn temporary_url(&self, path: &str, expires_at: DateTime) -> Result<String> {
+        let path = normalize_path(path)?;
         callback::run_storage_operation(&self.name, "temporary_url", || {
-            self.adapter.temporary_url(path, expires_at)
+            self.adapter.temporary_url(&path, expires_at)
         })
         .await
     }
 
     pub async fn list_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<StorageObject>> {
+        let prefix = normalize_prefix(prefix)?;
         callback::run_storage_operation(&self.name, "list_prefix", || {
-            self.adapter.list_prefix(prefix, limit)
+            self.adapter.list_prefix(&prefix, limit)
         })
         .await
     }
@@ -343,5 +357,19 @@ mod tests {
         assert!(error
             .to_string()
             .contains("storage adapter does not support prefix listing"));
+    }
+
+    #[tokio::test]
+    async fn invalid_paths_are_rejected_before_adapter_calls() {
+        let disk = disk(PanickingAdapter);
+
+        let error = disk.put_bytes("../secret.txt", b"hello").await.unwrap_err();
+        assert!(error.to_string().contains("invalid storage path"));
+
+        let error = disk.copy("file.txt", "/tmp/outside.txt").await.unwrap_err();
+        assert!(error.to_string().contains("invalid storage path"));
+
+        let error = disk.list_prefix("../", 10).await.unwrap_err();
+        assert!(error.to_string().contains("invalid storage prefix"));
     }
 }

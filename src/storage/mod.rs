@@ -4,6 +4,7 @@ pub mod config;
 pub mod disk;
 pub mod local;
 pub mod multipart;
+pub(crate) mod path;
 pub mod s3;
 pub mod stored_file;
 pub mod upload;

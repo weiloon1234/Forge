@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::database::DbValue;
 use crate::foundation::{AppContext, Error, Result};
-use crate::storage::StorageObject;
+use crate::storage::{path::normalize_prefix, StorageObject};
 use crate::support::{CommandId, DateTime};
 
 const ATTACHMENT_ORPHANS_COMMAND: CommandId = CommandId::new("attachment:orphans");
@@ -138,6 +138,11 @@ pub(crate) async fn audit_attachment_orphans(
             "attachment orphan audit requires a configured database",
         ));
     }
+
+    let options = AttachmentOrphanOptions {
+        prefix: normalize_prefix(&options.prefix)?,
+        ..options
+    };
 
     let disk_names = match options.disk.as_deref() {
         Some(name) => vec![name.to_string()],

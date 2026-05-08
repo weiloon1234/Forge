@@ -1652,6 +1652,10 @@ Multi-driver email with templates and queueing.
 
 Built-in HTTP mailers (`MailgunEmailDriver`, `PostmarkEmailDriver`,
 `ResendEmailDriver`, and `SesEmailDriver`) use `timeout_secs = 30` by default.
+`EmailConfig.max_attachment_bytes` and `max_total_attachment_bytes` bound
+resolved attachment payloads before provider delivery; `0` disables each cap.
+The built-in SES driver uses the SES SendEmail API and rejects attachments
+clearly instead of silently dropping them.
 Provider error bodies are truncated and obvious secret fields are redacted before
 delivery errors are returned or logged.
 

@@ -78,6 +78,14 @@ are sanitized before provider delivery. Custom headers must use valid HTTP-style
 header token names, and custom attachment content types must be non-empty and
 free of control characters.
 
+Attachment payloads are bounded by `[email] max_attachment_bytes` and
+`max_total_attachment_bytes` before provider delivery. Both default to
+`26214400` bytes; set either value to `0` only when the app has its own stricter
+delivery controls. Filesystem attachments are checked with metadata before Forge
+reads them into memory when possible. The built-in SES driver uses Amazon SES
+`SendEmail`, which does not support attachments, so Forge rejects those messages
+clearly instead of silently dropping files.
+
 ### Sending vs Queueing
 
 ```rust
@@ -118,6 +126,8 @@ marketing.send(msg).await?;
 default = "smtp"
 queue = "default"
 template_path = "templates/emails"
+max_attachment_bytes = 26214400
+max_total_attachment_bytes = 26214400
 
 [email.from]
 address = "noreply@example.com"

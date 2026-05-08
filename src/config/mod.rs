@@ -1580,6 +1580,46 @@ mod tests {
     }
 
     #[test]
+    fn email_config_defaults_bound_attachment_payloads() {
+        let email = ConfigRepository::empty().email().unwrap();
+
+        assert_eq!(email.default, "smtp");
+        assert_eq!(email.queue, "default");
+        assert_eq!(email.template_path, "templates/emails");
+        assert_eq!(email.max_attachment_bytes, 25 * 1024 * 1024);
+        assert_eq!(email.max_total_attachment_bytes, 25 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parses_email_attachment_limits() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-email.toml"),
+            r#"
+                [email]
+                default = "log"
+                queue = "mail"
+                template_path = "resources/mail"
+                max_attachment_bytes = 1024
+                max_total_attachment_bytes = 2048
+
+                [email.mailers.log]
+                driver = "log"
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let email = config.email().unwrap();
+
+        assert_eq!(email.default, "log");
+        assert_eq!(email.queue, "mail");
+        assert_eq!(email.template_path, "resources/mail");
+        assert_eq!(email.max_attachment_bytes, 1_024);
+        assert_eq!(email.max_total_attachment_bytes, 2_048);
+    }
+
+    #[test]
     fn http_config_defaults_are_compatible_and_discoverable() {
         let http: HttpConfig = ConfigRepository::empty().http().unwrap();
 

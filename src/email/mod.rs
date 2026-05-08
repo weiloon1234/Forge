@@ -85,6 +85,7 @@ impl EmailDriverRegistryBuilder {
 pub struct EmailManager {
     default: String,
     from_config: EmailFromConfig,
+    attachment_limits: config::EmailAttachmentLimits,
     drivers: Arc<HashMap<String, Arc<dyn EmailDriver>>>,
     app: AppContext,
 }
@@ -108,9 +109,11 @@ impl EmailManager {
         let email_config = config.email()?;
 
         if email_config.mailers.is_empty() {
+            let attachment_limits = config::EmailAttachmentLimits::from(&email_config);
             return Ok(Self {
                 default: email_config.default,
                 from_config: email_config.from,
+                attachment_limits,
                 drivers: Arc::new(HashMap::new()),
                 app,
             });
@@ -167,9 +170,11 @@ impl EmailManager {
             )));
         }
 
+        let attachment_limits = config::EmailAttachmentLimits::from(&email_config);
         Ok(Self {
             default: email_config.default,
             from_config: email_config.from,
+            attachment_limits,
             drivers: Arc::new(drivers),
             app,
         })
@@ -192,6 +197,10 @@ impl EmailManager {
 
     pub fn from_address(&self) -> &EmailFromConfig {
         &self.from_config
+    }
+
+    pub(crate) fn attachment_limits(&self) -> config::EmailAttachmentLimits {
+        self.attachment_limits
     }
 
     pub fn configured_mailers(&self) -> Vec<String> {
@@ -293,6 +302,8 @@ mod tests {
         let raw = r#"
             default = "log"
             queue = "emails"
+            max_attachment_bytes = 100
+            max_total_attachment_bytes = 200
             from.address = "noreply@example.com"
             from.name = "Forge App"
             [mailers.log]
@@ -306,6 +317,8 @@ mod tests {
         let config: config::EmailConfig = toml::from_str(raw).unwrap();
         assert_eq!(config.default, "log");
         assert_eq!(config.queue, "emails");
+        assert_eq!(config.max_attachment_bytes, 100);
+        assert_eq!(config.max_total_attachment_bytes, 200);
         assert_eq!(config.from.address, "noreply@example.com");
         assert_eq!(config.from.name, "Forge App");
         assert_eq!(config.mailers.len(), 2);

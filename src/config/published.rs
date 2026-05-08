@@ -1009,6 +1009,22 @@ const EMAIL_FIELDS: &[PublishedField] = &[
         false,
         None,
     ),
+    field(
+        "max_attachment_bytes",
+        "26214400",
+        "26214400",
+        false,
+        false,
+        Some("Max bytes for one resolved email attachment (0 = unlimited)"),
+    ),
+    field(
+        "max_total_attachment_bytes",
+        "26214400",
+        "26214400",
+        false,
+        false,
+        Some("Max combined bytes for resolved email attachments (0 = unlimited)"),
+    ),
 ];
 
 const EMAIL_FROM_FIELDS: &[PublishedField] = &[
@@ -1800,6 +1816,10 @@ mod tests {
         assert!(output.contains("# [email.mailers.mailgun]"));
         assert!(output.contains("# [email.mailers.ses]"));
         assert!(output.contains("# timeout_secs = 30"));
+        assert!(output.contains("# max_attachment_bytes = 26214400"));
+        assert!(output.contains("# max_total_attachment_bytes = 26214400"));
+        assert!(env.contains("# EMAIL__MAX_ATTACHMENT_BYTES=26214400"));
+        assert!(env.contains("# EMAIL__MAX_TOTAL_ATTACHMENT_BYTES=26214400"));
         assert!(env.contains("# EMAIL__MAILERS__RESEND__TIMEOUT_SECS=30"));
         assert!(env.contains("# EMAIL__MAILERS__POSTMARK__TIMEOUT_SECS=30"));
         assert!(env.contains("# EMAIL__MAILERS__MAILGUN__TIMEOUT_SECS=30"));

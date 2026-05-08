@@ -10,6 +10,8 @@ pub struct EmailConfig {
     pub default: String,
     pub queue: String,
     pub template_path: String,
+    pub max_attachment_bytes: u64,
+    pub max_total_attachment_bytes: u64,
     #[serde(default)]
     pub from: EmailFromConfig,
     #[serde(default)]
@@ -22,8 +24,25 @@ impl Default for EmailConfig {
             default: "smtp".to_string(),
             queue: "default".to_string(),
             template_path: "templates/emails".to_string(),
+            max_attachment_bytes: 25 * 1024 * 1024,
+            max_total_attachment_bytes: 25 * 1024 * 1024,
             from: EmailFromConfig::default(),
             mailers: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EmailAttachmentLimits {
+    pub max_attachment_bytes: u64,
+    pub max_total_attachment_bytes: u64,
+}
+
+impl From<&EmailConfig> for EmailAttachmentLimits {
+    fn from(config: &EmailConfig) -> Self {
+        Self {
+            max_attachment_bytes: config.max_attachment_bytes,
+            max_total_attachment_bytes: config.max_total_attachment_bytes,
         }
     }
 }
@@ -260,6 +279,8 @@ mod tests {
         let config = EmailConfig::default();
         assert_eq!(config.default, "smtp");
         assert_eq!(config.queue, "default");
+        assert_eq!(config.max_attachment_bytes, 25 * 1024 * 1024);
+        assert_eq!(config.max_total_attachment_bytes, 25 * 1024 * 1024);
         assert_eq!(config.from.address, "");
         assert_eq!(config.from.name, "");
         assert!(config.mailers.is_empty());
@@ -270,6 +291,8 @@ mod tests {
         let toml_str = r#"
 default = "log"
 queue = "high_priority"
+max_attachment_bytes = 1024
+max_total_attachment_bytes = 2048
 from.address = "test@example.com"
 from.name = "Test Sender"
 [mailers.smtp]
@@ -280,6 +303,8 @@ target = "custom.log"
         let config: EmailConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.default, "log");
         assert_eq!(config.queue, "high_priority");
+        assert_eq!(config.max_attachment_bytes, 1_024);
+        assert_eq!(config.max_total_attachment_bytes, 2_048);
         assert_eq!(config.from.address, "test@example.com");
         assert_eq!(config.from.name, "Test Sender");
         assert_eq!(config.mailers.len(), 2);

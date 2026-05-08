@@ -30,6 +30,12 @@ impl SesEmailDriver {
 #[async_trait]
 impl EmailDriver for SesEmailDriver {
     async fn send(&self, message: &OutboundEmail) -> Result<()> {
+        if !message.attachments.is_empty() {
+            return Err(Error::message(
+                "SES mailer does not support attachments through the SendEmail driver; use SMTP, Mailgun, Postmark, Resend, or a custom raw SES driver",
+            ));
+        }
+
         let endpoint = format!("https://email.{}.amazonaws.com/", self.config.region);
 
         // Build the SendEmail action parameters
@@ -184,6 +190,10 @@ fn url_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::email::attachment::ResolvedAttachment;
+    use crate::email::driver::OutboundEmail;
+    use crate::email::EmailAddress;
+    use std::collections::BTreeMap;
 
     #[test]
     fn sha256_hex_produces_correct_hash() {
@@ -210,5 +220,37 @@ mod tests {
         let key1 = derive_signing_key("secret", "20260101", "us-east-1", "ses");
         let key2 = derive_signing_key("secret", "20260101", "us-east-1", "ses");
         assert_eq!(key1, key2);
+    }
+
+    #[tokio::test]
+    async fn ses_rejects_attachments_instead_of_dropping_them() {
+        let driver = SesEmailDriver::from_config(&ResolvedSesConfig {
+            key: "key".to_string(),
+            secret: "secret".to_string(),
+            region: "us-east-1".to_string(),
+            timeout_secs: 1,
+        });
+        let message = OutboundEmail {
+            from: EmailAddress::new("sender@example.com"),
+            to: vec![EmailAddress::new("recipient@example.com")],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            reply_to: Vec::new(),
+            subject: "Hello".to_string(),
+            text_body: Some("Body".to_string()),
+            html_body: None,
+            headers: BTreeMap::new(),
+            attachments: vec![ResolvedAttachment {
+                content: b"pdf".to_vec(),
+                name: "report.pdf".to_string(),
+                content_type: "application/pdf".to_string(),
+            }],
+        };
+
+        let error = driver.send(&message).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("SES mailer does not support attachments"));
     }
 }

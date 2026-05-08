@@ -399,6 +399,9 @@ async fn reset_form(State(app): State<AppContext>, request: Request) -> Result<i
 
 Signed URL verification rejects duplicate `expires` or `signature` parameters and rejects query
 parameters appended after `signature`, so only the originally signed URL shape is accepted.
+`app.signing_key` must be a base64 key that decodes to at least 32 bytes. Generate one with
+`key:generate`; `doctor --deploy` reports missing keys as warnings and invalid or weak configured
+keys as failures.
 
 ---
 

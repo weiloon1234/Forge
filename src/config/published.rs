@@ -112,7 +112,7 @@ const APP_FIELDS: &[PublishedField] = &[
         "",
         false,
         false,
-        Some("Base64 key - generate with `key:generate`"),
+        Some("Base64 key, at least 32 decoded bytes - generate with `key:generate`"),
     ),
     field(
         "background_shutdown_timeout_ms",

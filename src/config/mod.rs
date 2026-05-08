@@ -17,6 +17,8 @@ use crate::foundation::{Error, Result};
 use crate::logging::{LogFormat, LogLevel};
 use crate::support::{GuardId, QueueId, Timezone};
 
+const MIN_SIGNING_KEY_BYTES: usize = 32;
+
 #[derive(Clone, Debug)]
 pub struct ConfigRepository {
     root: Arc<Value>,
@@ -118,7 +120,8 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Decode the base64-encoded signing key into raw bytes.
     ///
-    /// Returns an error if the key is not configured or contains invalid base64.
+    /// Returns an error if the key is not configured, contains invalid base64,
+    /// or decodes to fewer than 32 bytes.
     pub fn signing_key_bytes(&self) -> crate::foundation::Result<Vec<u8>> {
         if self.signing_key.is_empty() {
             return Err(crate::foundation::Error::message(
@@ -126,9 +129,16 @@ impl AppConfig {
             ));
         }
         use base64::{engine::general_purpose::STANDARD, Engine};
-        STANDARD
-            .decode(&self.signing_key)
-            .map_err(|e| crate::foundation::Error::message(format!("invalid app.signing_key: {e}")))
+        let bytes = STANDARD.decode(&self.signing_key).map_err(|e| {
+            crate::foundation::Error::message(format!("invalid app.signing_key: {e}"))
+        })?;
+        if bytes.len() < MIN_SIGNING_KEY_BYTES {
+            return Err(crate::foundation::Error::message(format!(
+                "app.signing_key must decode to at least {MIN_SIGNING_KEY_BYTES} bytes, got {}; generate one with `key:generate`",
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
     }
 }
 
@@ -1298,6 +1308,44 @@ mod tests {
 
         assert_eq!(app.timezone.to_string(), "Asia/Kuala_Lumpur");
         assert_eq!(app.background_shutdown_timeout_ms, 15_000);
+    }
+
+    #[test]
+    fn signing_key_bytes_requires_valid_strong_base64_key() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let empty = AppConfig::default();
+        assert!(empty
+            .signing_key_bytes()
+            .unwrap_err()
+            .to_string()
+            .contains("not configured"));
+
+        let invalid = AppConfig {
+            signing_key: "not-base64!!!".to_string(),
+            ..Default::default()
+        };
+        assert!(invalid
+            .signing_key_bytes()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid app.signing_key"));
+
+        let weak = AppConfig {
+            signing_key: STANDARD.encode([0u8; 16]),
+            ..Default::default()
+        };
+        assert!(weak
+            .signing_key_bytes()
+            .unwrap_err()
+            .to_string()
+            .contains("at least 32 bytes"));
+
+        let strong = AppConfig {
+            signing_key: STANDARD.encode([7u8; 32]),
+            ..Default::default()
+        };
+        assert_eq!(strong.signing_key_bytes().unwrap(), vec![7u8; 32]);
     }
 
     #[test]

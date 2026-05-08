@@ -523,7 +523,7 @@ impl ServiceProvider for AppServiceProvider {
 | **Setup** | |
 | `config:publish` | Publish sample configuration, including auth lockout, MFA, and audit sections |
 | `env:publish` | Generate `.env.example` with all supported env overrides, including lockout, MFA, and audit |
-| `key:generate` | Generate signing and encryption keys |
+| `key:generate` | Generate 32-byte signing and encryption keys |
 | `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |
 | `about` | Display framework version and environment info |

@@ -74,6 +74,19 @@ impl DoctorCheck {
         }
     }
 
+    fn warning_with_details(
+        name: &'static str,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        Self {
+            name,
+            status: DoctorStatus::Warning,
+            message: message.into(),
+            details: Some(details),
+        }
+    }
+
     fn failed(name: &'static str, message: impl Into<String>) -> Self {
         Self {
             name,
@@ -177,16 +190,40 @@ async fn run_doctor(app: &AppContext, deploy: bool) -> DoctorReport {
 
 fn check_app_config(app: &AppContext) -> DoctorCheck {
     match app.config().app() {
-        Ok(config) => DoctorCheck::ok_with_details(
-            "config",
-            format!("app `{}` loaded for `{}`", config.name, config.environment),
-            json!({
-                "name": config.name,
+        Ok(config) => {
+            let signing_key = signing_key_state(&config);
+            let message = format!("app `{}` loaded for `{}`", config.name, config.environment);
+            let details = json!({
+                "name": config.name.clone(),
                 "environment": config.environment.to_string(),
                 "timezone": config.timezone.to_string(),
-            }),
-        ),
+                "signing_key": signing_key,
+            });
+
+            if config.signing_key.is_empty() {
+                return DoctorCheck::warning_with_details(
+                    "config",
+                    format!("{message}; signing key is not configured"),
+                    details,
+                );
+            }
+            if let Err(error) = config.signing_key_bytes() {
+                return DoctorCheck::failed_with_details("config", error.to_string(), details);
+            }
+
+            DoctorCheck::ok_with_details("config", message, details)
+        }
         Err(error) => DoctorCheck::failed("config", error.to_string()),
+    }
+}
+
+fn signing_key_state(config: &crate::config::AppConfig) -> &'static str {
+    if config.signing_key.is_empty() {
+        "missing"
+    } else if config.signing_key_bytes().is_ok() {
+        "configured"
+    } else {
+        "invalid"
     }
 }
 
@@ -384,6 +421,10 @@ mod tests {
         assert!(report
             .checks
             .iter()
+            .any(|check| check.name == "config" && check.status == DoctorStatus::Warning));
+        assert!(report
+            .checks
+            .iter()
             .any(|check| check.name == "database" && check.status == DoctorStatus::Warning));
         assert!(report
             .checks
@@ -422,6 +463,35 @@ mod tests {
 
         assert_eq!(cache.status, DoctorStatus::Ok);
         assert!(cache.message.contains("cache roundtrip succeeded"));
+    }
+
+    #[tokio::test]
+    async fn doctor_fails_invalid_signing_key_configuration() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-app.toml"),
+            r#"
+                [app]
+                signing_key = "AA=="
+            "#,
+        )
+        .unwrap();
+        let kernel = App::builder()
+            .load_config_dir(directory.path())
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        let report = super::run_doctor(kernel.app(), true).await;
+        let config = report
+            .checks
+            .iter()
+            .find(|check| check.name == "config")
+            .expect("config check should be present");
+
+        assert_eq!(config.status, DoctorStatus::Failed);
+        assert!(config.message.contains("at least 32 bytes"));
+        assert_eq!(config.details.as_ref().unwrap()["signing_key"], "invalid");
     }
 
     #[test]

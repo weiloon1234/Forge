@@ -274,7 +274,7 @@ These are available automatically — no registration needed:
 |---------|-------------|
 | `config:publish` | Generate sample config file, including auth credential lifecycle, lockout, and MFA sections |
 | `env:publish` | Generate `.env.example`, including auth credential lifecycle, lockout, and MFA env overrides |
-| `key:generate` | Generate signing + encryption keys |
+| `key:generate` | Generate 32-byte signing + encryption keys |
 | `doctor` | Run runtime health checks; accepts `--deploy` and `--json` for deploy tooling |
 | `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |

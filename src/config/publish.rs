@@ -180,8 +180,10 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
 
                 let signing = if app_config.signing_key.is_empty() {
                     "not configured"
-                } else {
+                } else if app_config.signing_key_bytes().is_ok() {
                     "configured"
+                } else {
+                    "invalid"
                 };
                 println!("  Signing key:  {}", signing);
 

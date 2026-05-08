@@ -417,6 +417,14 @@ pub struct WebSocketConfig {
     /// Maximum queued outbound frames per connection before Forge drops the
     /// connection to protect process memory.
     pub outbound_buffer_size: usize,
+    /// Allow browser WebSocket clients to pass bearer auth in a query
+    /// parameter when they cannot set Authorization headers.
+    pub query_token_enabled: bool,
+    /// Query parameter name used for bearer auth when query tokens are
+    /// enabled.
+    pub query_token_name: String,
+    /// Maximum decoded query-token bytes. `0` disables this cap.
+    pub query_token_max_length: usize,
     /// Optional exact Origin allow-list for browser WebSocket handshakes.
     /// Empty means any origin is accepted.
     pub allowed_origins: Vec<String>,
@@ -449,6 +457,9 @@ impl Default for WebSocketConfig {
             max_event_length: 128,
             max_ack_id_length: 128,
             outbound_buffer_size: 1024,
+            query_token_enabled: true,
+            query_token_name: "token".to_string(),
+            query_token_max_length: 4096,
             allowed_origins: Vec::new(),
             history_buffer_size: 50,
             history_ttl_seconds: 604_800,
@@ -1420,6 +1431,10 @@ mod tests {
                 max_room_length = 80
                 max_event_length = 48
                 max_ack_id_length = 32
+                outbound_buffer_size = 2048
+                query_token_enabled = false
+                query_token_name = "ws_token"
+                query_token_max_length = 512
 
                 [jobs]
                 queue = "critical"
@@ -1473,6 +1488,10 @@ mod tests {
         assert_eq!(websocket.max_room_length, 80);
         assert_eq!(websocket.max_event_length, 48);
         assert_eq!(websocket.max_ack_id_length, 32);
+        assert_eq!(websocket.outbound_buffer_size, 2_048);
+        assert!(!websocket.query_token_enabled);
+        assert_eq!(websocket.query_token_name, "ws_token");
+        assert_eq!(websocket.query_token_max_length, 512);
         assert_eq!(jobs.queue, QueueId::new("critical"));
         assert_eq!(jobs.max_retries, 9);
         assert_eq!(jobs.lease_ttl_ms, 45_000);
@@ -1572,6 +1591,9 @@ mod tests {
         assert_eq!(websocket.max_event_length, 128);
         assert_eq!(websocket.max_ack_id_length, 128);
         assert_eq!(websocket.outbound_buffer_size, 1_024);
+        assert!(websocket.query_token_enabled);
+        assert_eq!(websocket.query_token_name, "token");
+        assert_eq!(websocket.query_token_max_length, 4_096);
     }
 
     #[test]

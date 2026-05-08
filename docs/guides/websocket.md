@@ -373,12 +373,22 @@ max_room_length = 256                 # client-supplied room id bytes
 max_event_length = 128                # client-supplied event id bytes
 max_ack_id_length = 128               # client-supplied ack id bytes
 outbound_buffer_size = 1024           # queued outbound frames before disconnect
+query_token_enabled = true            # allow ?token=... browser bearer auth
+query_token_name = "token"            # query parameter name for bearer auth
+query_token_max_length = 4096         # decoded query-token bytes; 0 = unlimited
 allowed_origins = []                  # exact Origin allow-list; empty allows any
 history_buffer_size = 50              # recent messages retained per channel
 history_ttl_seconds = 604800          # auto-reap idle history after 7 days
 ```
 
 If `allowed_origins` is non-empty, browser handshakes must include an `Origin` header that exactly matches one configured value. Use this with session-cookie authentication to prevent cross-site WebSocket handshakes.
+
+Forge accepts bearer tokens in the query string by default because browser
+WebSocket clients cannot set custom `Authorization` headers. The decoded token
+is bounded by `query_token_max_length`, duplicate token params are rejected, and
+the parameter name is configurable. Keep these WebSocket tokens short-lived:
+Forge avoids recording query strings in its own request diagnostics, but reverse
+proxies and hosting platforms may log full URLs.
 
 WebSocket client IP metadata follows the HTTP trusted-proxy config. Forwarded
 IP headers are honored only when `[http.trusted_proxy]` is enabled and the TCP

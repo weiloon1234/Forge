@@ -66,6 +66,7 @@ impl WebSocketKernel {
 
     async fn build_router(&self) -> Result<(axum::Router, Option<WebSocketPubSubTask>)> {
         let ws_config = self.app.config().websocket()?;
+        validate_query_token_config(&ws_config)?;
         let registry = self
             .app
             .container()
@@ -518,12 +519,19 @@ async fn websocket_handler(
             .into_response();
     }
 
-    // Support token via query param (?token=xxx) for browser WebSocket connections
-    // which cannot set custom headers.
+    // Support token via query param for browser WebSocket connections which
+    // cannot set custom headers. Keep this bounded because URLs can be logged
+    // outside Forge by proxies or load balancers.
     let mut headers = headers;
-    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+    if state.ws_config.query_token_enabled
+        && !headers.contains_key(axum::http::header::AUTHORIZATION)
+    {
         if let Some(query) = uri.query() {
-            match bearer_token_from_query(query) {
+            match bearer_token_from_query(
+                query,
+                &state.ws_config.query_token_name,
+                state.ws_config.query_token_max_length,
+            ) {
                 Ok(Some(token)) => {
                     let value = match format!("Bearer {token}").parse() {
                         Ok(value) => value,
@@ -576,10 +584,42 @@ fn websocket_rejection(status: StatusCode, message: impl Into<String>) -> Respon
         .into_response()
 }
 
-fn bearer_token_from_query(query: &str) -> Result<Option<String>> {
+fn validate_query_token_config(config: &WebSocketConfig) -> Result<()> {
+    if !config.query_token_enabled {
+        return Ok(());
+    }
+
+    let name = config.query_token_name.trim();
+    if name.is_empty() {
+        return Err(Error::message(
+            "websocket.query_token_name cannot be empty when query tokens are enabled",
+        ));
+    }
+    if name.len() > 64 {
+        return Err(Error::message(
+            "websocket.query_token_name cannot exceed 64 bytes",
+        ));
+    }
+    if name
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '&' | '=' | '?' | '#'))
+    {
+        return Err(Error::message(
+            "websocket.query_token_name contains invalid query parameter characters",
+        ));
+    }
+
+    Ok(())
+}
+
+fn bearer_token_from_query(
+    query: &str,
+    token_name: &str,
+    max_length: usize,
+) -> Result<Option<String>> {
     let mut token = None;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        if key != "token" {
+        if key != token_name {
             continue;
         }
         if token.is_some() {
@@ -594,6 +634,11 @@ fn bearer_token_from_query(query: &str) -> Result<Option<String>> {
             return Err(Error::message(
                 "websocket token query parameter cannot contain control characters",
             ));
+        }
+        if max_length > 0 && value.len() > max_length {
+            return Err(Error::message(format!(
+                "websocket token query parameter exceeds maximum length of {max_length} bytes"
+            )));
         }
         token = Some(value.into_owned());
     }
@@ -1933,21 +1978,67 @@ mod tests {
     #[test]
     fn websocket_query_token_is_decoded_and_validated() {
         assert_eq!(
-            bearer_token_from_query("token=abc%20123&other=value")
+            bearer_token_from_query("token=abc%20123&other=value", "token", 4096)
                 .unwrap()
                 .as_deref(),
             Some("abc 123")
         );
-        assert!(bearer_token_from_query("other=value").unwrap().is_none());
+        assert!(bearer_token_from_query("other=value", "token", 4096)
+            .unwrap()
+            .is_none());
         assert_eq!(
-            bearer_token_from_query("token=one&token=two")
+            bearer_token_from_query("token=one&token=two", "token", 4096)
                 .unwrap_err()
                 .to_string(),
             "duplicate websocket token query parameter"
         );
         assert_eq!(
-            bearer_token_from_query("token=").unwrap_err().to_string(),
+            bearer_token_from_query("token=", "token", 4096)
+                .unwrap_err()
+                .to_string(),
             "websocket token query parameter cannot be empty"
+        );
+        assert_eq!(
+            bearer_token_from_query("auth=abc&token=ignored", "auth", 4096)
+                .unwrap()
+                .as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            bearer_token_from_query("token=abcdef", "token", 3)
+                .unwrap_err()
+                .to_string(),
+            "websocket token query parameter exceeds maximum length of 3 bytes"
+        );
+    }
+
+    #[test]
+    fn websocket_query_token_config_is_validated() {
+        assert!(validate_query_token_config(&WebSocketConfig::default()).is_ok());
+        assert!(validate_query_token_config(&WebSocketConfig {
+            query_token_enabled: false,
+            query_token_name: String::new(),
+            ..WebSocketConfig::default()
+        })
+        .is_ok());
+
+        assert_eq!(
+            validate_query_token_config(&WebSocketConfig {
+                query_token_name: String::new(),
+                ..WebSocketConfig::default()
+            })
+            .unwrap_err()
+            .to_string(),
+            "websocket.query_token_name cannot be empty when query tokens are enabled"
+        );
+        assert_eq!(
+            validate_query_token_config(&WebSocketConfig {
+                query_token_name: "bad name".to_string(),
+                ..WebSocketConfig::default()
+            })
+            .unwrap_err()
+            .to_string(),
+            "websocket.query_token_name contains invalid query parameter characters"
         );
     }
 

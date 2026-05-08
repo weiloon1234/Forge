@@ -725,6 +725,30 @@ const WEBSOCKET_FIELDS: &[PublishedField] = &[
         Some("Queued outbound frames per connection before disconnect"),
     ),
     field(
+        "query_token_enabled",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Allow browser clients to pass bearer auth as a query token"),
+    ),
+    field(
+        "query_token_name",
+        "\"token\"",
+        "token",
+        false,
+        false,
+        Some("Query parameter name used when query token auth is enabled"),
+    ),
+    field(
+        "query_token_max_length",
+        "4096",
+        "4096",
+        false,
+        false,
+        Some("Max decoded query-token bytes (0 = unlimited)"),
+    ),
+    field(
         "allowed_origins",
         "[]",
         "",
@@ -1755,8 +1779,15 @@ mod tests {
         ));
         assert!(output.contains("# max_room_length = 256"));
         assert!(output.contains("# max_ack_id_length = 128"));
+        assert!(output.contains(
+            "# query_token_enabled = true  # Allow browser clients to pass bearer auth as a query token"
+        ));
+        assert!(output.contains("# query_token_name = \"token\""));
+        assert!(output.contains("# query_token_max_length = 4096"));
         assert!(env.contains("# WEBSOCKET__MAX_MESSAGE_SIZE_BYTES=1048576"));
         assert!(env.contains("# WEBSOCKET__MAX_SUBSCRIPTIONS_PER_CONNECTION=100"));
+        assert!(env.contains("# WEBSOCKET__QUERY_TOKEN_ENABLED=true"));
+        assert!(env.contains("# WEBSOCKET__QUERY_TOKEN_MAX_LENGTH=4096"));
     }
 
     #[test]

@@ -41,6 +41,6 @@ Load only the file you need — don't read them all at once.
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
 | [typescript](modules/typescript.md) |  | 14L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
-| [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 66L |
+| [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 67L |
 
-**Total: 35 modules, 3422 lines across all files.**
+**Total: 35 modules, 3423 lines across all files.**

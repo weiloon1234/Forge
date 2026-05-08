@@ -67,7 +67,7 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
             "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
             "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.",
-            "`WebSocketConfig` bounds inbound message/frame sizes and client-supplied channel, room, event, ack, and subscription cardinality.",
+            "`WebSocketConfig` bounds inbound message/frame sizes, query auth token length, and client-supplied channel, room, event, ack, and subscription cardinality.",
         ],
         "cache" => &[
             "Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.",
@@ -117,7 +117,8 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
         ],
         "websocket" => &[
             "WebSocket handshakes use HTTP trusted-proxy config for client IP metadata; forwarded IP headers are ignored unless the TCP peer is trusted.",
-            "Inbound messages, frames, subscriptions, and client-supplied identifiers are bounded by `WebSocketConfig`.",
+            "Inbound messages, frames, query auth tokens, subscriptions, and client-supplied identifiers are bounded by `WebSocketConfig`.",
+            "`websocket.query_token_enabled` stays on by default for browser compatibility; keep issued WebSocket tokens short-lived because query strings can be logged outside Forge.",
         ],
         _ => &[],
     }

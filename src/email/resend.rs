@@ -14,7 +14,7 @@ pub struct ResendEmailDriver {
 impl ResendEmailDriver {
     pub fn from_config(config: &ResolvedResendConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::client("Resend", config.timeout_secs),
             api_key: config.api_key.clone(),
         }
     }
@@ -121,11 +121,7 @@ impl EmailDriver for ResendEmailDriver {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::message(format!(
-                "Resend API error ({}): {body}",
-                status
-            )));
+            return Err(super::http::provider_error("Resend", status, response).await);
         }
 
         Ok(())

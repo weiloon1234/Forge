@@ -14,7 +14,7 @@ pub struct PostmarkEmailDriver {
 impl PostmarkEmailDriver {
     pub fn from_config(config: &ResolvedPostmarkConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::client("Postmark", config.timeout_secs),
             server_token: config.server_token.clone(),
         }
     }
@@ -123,11 +123,7 @@ impl EmailDriver for PostmarkEmailDriver {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::message(format!(
-                "Postmark API error ({}): {body}",
-                status
-            )));
+            return Err(super::http::provider_error("Postmark", status, response).await);
         }
 
         Ok(())

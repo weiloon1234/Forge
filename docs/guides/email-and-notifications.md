@@ -126,27 +126,37 @@ timeout_secs = 30
 # Postmark
 [email.mailers.postmark]
 server_token = "your-token"
+timeout_secs = 30
 
 # Resend
 [email.mailers.resend]
 api_key = "re_xxx"
+timeout_secs = 30
 
 # Mailgun
 [email.mailers.mailgun]
 domain = "mg.example.com"
 api_key = "key-xxx"
 region = "us"               # "us" or "eu"
+timeout_secs = 30
 
 # AWS SES
 [email.mailers.ses]
 key = "AKIA..."
 secret = "xxx"
 region = "us-east-1"
+timeout_secs = 30
 
 # Log driver (development — prints to stdout instead of sending)
 [email.mailers.log]
 target = "email.outbound"
 ```
+
+Built-in HTTP mailers (`postmark`, `resend`, `mailgun`, and `ses`) apply
+`timeout_secs = 30` by default. Set it to `0` only for local debugging where you
+want reqwest's no-timeout behavior. Provider error bodies are truncated and
+obvious secret fields are redacted before Forge returns or logs the delivery
+error.
 
 ### Available Drivers
 

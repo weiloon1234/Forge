@@ -72,6 +72,10 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`remember()` uses local single-flight by default and can coordinate across workers with an opt-in distributed lock.",
             "`cache.error_mode = \"fail_open\"` logs backend I/O failures and continues, while validation, serialization, and callback errors remain strict.",
         ],
+        "email" => &[
+            "Built-in HTTP mailers use `timeout_secs = 30` by default; `0` disables the reqwest timeout for local debugging.",
+            "Provider error bodies are truncated and obvious secret fields are redacted before they are returned or logged.",
+        ],
         "http" => &[
             "`HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.",
             "`HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` remains compatible and trusts all headers.",
@@ -170,6 +174,11 @@ mod tests {
         assert!(cache.contains("single-flight"));
         assert!(cache.contains("fail_open"));
         assert!(cache.contains("backend failures"));
+
+        let mut email = String::new();
+        append_module_notes("email", &mut email);
+        assert!(email.contains("timeout_secs"));
+        assert!(email.contains("redacted"));
 
         let mut websocket = String::new();
         append_module_notes("websocket", &mut websocket);

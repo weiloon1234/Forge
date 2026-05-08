@@ -21,7 +21,7 @@ pub struct SesEmailDriver {
 impl SesEmailDriver {
     pub fn from_config(config: &ResolvedSesConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::client("SES", config.timeout_secs),
             config: config.clone(),
         }
     }
@@ -138,11 +138,7 @@ impl EmailDriver for SesEmailDriver {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::message(format!(
-                "SES API error ({}): {body}",
-                status
-            )));
+            return Err(super::http::provider_error("SES", status, response).await);
         }
 
         Ok(())

@@ -3,6 +3,7 @@ pub mod attachment;
 pub(crate) mod callback;
 pub mod config;
 pub mod driver;
+mod http;
 pub mod job;
 pub mod log;
 pub mod mailer;

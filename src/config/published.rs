@@ -1327,12 +1327,14 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                     "# key = \"\"",
                     "# secret = \"\"",
                     "# region = \"us-east-1\"",
+                    "# timeout_secs = 30",
                 ],
                 &[
                     "# EMAIL__MAILERS__SES__DRIVER=ses",
                     "# EMAIL__MAILERS__SES__KEY=",
                     "# EMAIL__MAILERS__SES__SECRET=",
                     "# EMAIL__MAILERS__SES__REGION=us-east-1",
+                    "# EMAIL__MAILERS__SES__TIMEOUT_SECS=30",
                 ],
             ),
             example(
@@ -1342,10 +1344,12 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                     "# [email.mailers.postmark]",
                     "# driver = \"postmark\"",
                     "# server_token = \"\"",
+                    "# timeout_secs = 30",
                 ],
                 &[
                     "# EMAIL__MAILERS__POSTMARK__DRIVER=postmark",
                     "# EMAIL__MAILERS__POSTMARK__SERVER_TOKEN=",
+                    "# EMAIL__MAILERS__POSTMARK__TIMEOUT_SECS=30",
                 ],
             ),
             example(
@@ -1355,10 +1359,12 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                     "# [email.mailers.resend]",
                     "# driver = \"resend\"",
                     "# api_key = \"\"",
+                    "# timeout_secs = 30",
                 ],
                 &[
                     "# EMAIL__MAILERS__RESEND__DRIVER=resend",
                     "# EMAIL__MAILERS__RESEND__API_KEY=",
+                    "# EMAIL__MAILERS__RESEND__TIMEOUT_SECS=30",
                 ],
             ),
             example(
@@ -1370,12 +1376,14 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
                     "# domain = \"\"",
                     "# api_key = \"\"",
                     "# region = \"us\"  # \"us\" or \"eu\"",
+                    "# timeout_secs = 30",
                 ],
                 &[
                     "# EMAIL__MAILERS__MAILGUN__DRIVER=mailgun",
                     "# EMAIL__MAILERS__MAILGUN__DOMAIN=",
                     "# EMAIL__MAILERS__MAILGUN__API_KEY=",
                     "# EMAIL__MAILERS__MAILGUN__REGION=us  # \"us\" or \"eu\"",
+                    "# EMAIL__MAILERS__MAILGUN__TIMEOUT_SECS=30",
                 ],
             ),
             example(
@@ -1706,6 +1714,22 @@ mod tests {
         assert!(output.contains("# max_ack_id_length = 128"));
         assert!(env.contains("# WEBSOCKET__MAX_MESSAGE_SIZE_BYTES=1048576"));
         assert!(env.contains("# WEBSOCKET__MAX_SUBSCRIPTIONS_PER_CONNECTION=100"));
+    }
+
+    #[test]
+    fn published_email_config_includes_http_provider_timeouts() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("# [email.mailers.resend]"));
+        assert!(output.contains("# [email.mailers.postmark]"));
+        assert!(output.contains("# [email.mailers.mailgun]"));
+        assert!(output.contains("# [email.mailers.ses]"));
+        assert!(output.contains("# timeout_secs = 30"));
+        assert!(env.contains("# EMAIL__MAILERS__RESEND__TIMEOUT_SECS=30"));
+        assert!(env.contains("# EMAIL__MAILERS__POSTMARK__TIMEOUT_SECS=30"));
+        assert!(env.contains("# EMAIL__MAILERS__MAILGUN__TIMEOUT_SECS=30"));
+        assert!(env.contains("# EMAIL__MAILERS__SES__TIMEOUT_SECS=30"));
     }
 
     #[test]

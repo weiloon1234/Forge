@@ -1650,6 +1650,11 @@ Multi-driver email with templates and queueing.
 | `EmailAttachment` | `Path { path, name, content_type }`, `Storage { disk, path, name, content_type }` |
 | `SmtpEncryption` | `StartTls`, `Tls`, `None` |
 
+Built-in HTTP mailers (`MailgunEmailDriver`, `PostmarkEmailDriver`,
+`ResendEmailDriver`, and `SesEmailDriver`) use `timeout_secs = 30` by default.
+Provider error bodies are truncated and obvious secret fields are redacted before
+delivery errors are returned or logged.
+
 ### Traits
 
 ```rust

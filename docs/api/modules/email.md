@@ -157,3 +157,8 @@ struct TemplateRenderer
   fn exists(&self, template_name: &str) -> bool
 ```
 
+## Notes
+
+- Built-in HTTP mailers use `timeout_secs = 30` by default; `0` disables the reqwest timeout for local debugging.
+- Provider error bodies are truncated and obvious secret fields are redacted before they are returned or logged.
+

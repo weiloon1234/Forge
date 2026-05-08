@@ -120,6 +120,7 @@ impl ResolvedLogConfig {
 #[derive(Clone, Debug)]
 pub struct ResolvedResendConfig {
     pub api_key: String,
+    pub timeout_secs: u64,
 }
 
 impl ResolvedResendConfig {
@@ -129,13 +130,18 @@ impl ResolvedResendConfig {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::message("missing required field 'api_key' for resend mailer"))?
             .to_string();
-        Ok(Self { api_key })
+        let timeout_secs = timeout_secs_from_table(table);
+        Ok(Self {
+            api_key,
+            timeout_secs,
+        })
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct ResolvedPostmarkConfig {
     pub server_token: String,
+    pub timeout_secs: u64,
 }
 
 impl ResolvedPostmarkConfig {
@@ -147,7 +153,11 @@ impl ResolvedPostmarkConfig {
                 Error::message("missing required field 'server_token' for postmark mailer")
             })?
             .to_string();
-        Ok(Self { server_token })
+        let timeout_secs = timeout_secs_from_table(table);
+        Ok(Self {
+            server_token,
+            timeout_secs,
+        })
     }
 }
 
@@ -156,6 +166,7 @@ pub struct ResolvedMailgunConfig {
     pub domain: String,
     pub api_key: String,
     pub region: MailgunRegion,
+    pub timeout_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,6 +197,7 @@ impl ResolvedMailgunConfig {
             domain,
             api_key,
             region,
+            timeout_secs: timeout_secs_from_table(table),
         })
     }
 
@@ -202,6 +214,7 @@ pub struct ResolvedSesConfig {
     pub key: String,
     pub secret: String,
     pub region: String,
+    pub timeout_secs: u64,
 }
 
 impl ResolvedSesConfig {
@@ -225,8 +238,17 @@ impl ResolvedSesConfig {
             key,
             secret,
             region,
+            timeout_secs: timeout_secs_from_table(table),
         })
     }
+}
+
+fn timeout_secs_from_table(table: &toml::Table) -> u64 {
+    table
+        .get("timeout_secs")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(30)
+        .max(0) as u64
 }
 
 #[cfg(test)]
@@ -380,6 +402,84 @@ target = "custom.log"
                 encryption_str
             );
         }
+    }
+
+    #[test]
+    fn resolved_http_mailer_configs_default_timeout() {
+        let mut resend = toml::Table::new();
+        resend.insert(
+            "api_key".to_string(),
+            toml::Value::String("resend-key".to_string()),
+        );
+        assert_eq!(
+            ResolvedResendConfig::from_table(&resend)
+                .unwrap()
+                .timeout_secs,
+            30
+        );
+
+        let mut postmark = toml::Table::new();
+        postmark.insert(
+            "server_token".to_string(),
+            toml::Value::String("postmark-token".to_string()),
+        );
+        assert_eq!(
+            ResolvedPostmarkConfig::from_table(&postmark)
+                .unwrap()
+                .timeout_secs,
+            30
+        );
+
+        let mut mailgun = toml::Table::new();
+        mailgun.insert(
+            "domain".to_string(),
+            toml::Value::String("mg.example.com".to_string()),
+        );
+        mailgun.insert(
+            "api_key".to_string(),
+            toml::Value::String("mailgun-key".to_string()),
+        );
+        assert_eq!(
+            ResolvedMailgunConfig::from_table(&mailgun)
+                .unwrap()
+                .timeout_secs,
+            30
+        );
+
+        let mut ses = toml::Table::new();
+        ses.insert(
+            "key".to_string(),
+            toml::Value::String("ses-key".to_string()),
+        );
+        ses.insert(
+            "secret".to_string(),
+            toml::Value::String("ses-secret".to_string()),
+        );
+        ses.insert(
+            "region".to_string(),
+            toml::Value::String("us-east-1".to_string()),
+        );
+        assert_eq!(
+            ResolvedSesConfig::from_table(&ses).unwrap().timeout_secs,
+            30
+        );
+    }
+
+    #[test]
+    fn resolved_http_mailer_configs_parse_timeout() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "api_key".to_string(),
+            toml::Value::String("resend-key".to_string()),
+        );
+        table.insert("timeout_secs".to_string(), toml::Value::Integer(45));
+
+        assert_eq!(
+            ResolvedResendConfig::from_table(&table)
+                .unwrap()
+                .timeout_secs,
+            45
+        );
     }
 
     #[test]

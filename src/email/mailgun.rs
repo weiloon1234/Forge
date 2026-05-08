@@ -14,7 +14,7 @@ pub struct MailgunEmailDriver {
 impl MailgunEmailDriver {
     pub fn from_config(config: &ResolvedMailgunConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http::client("Mailgun", config.timeout_secs),
             config: config.clone(),
         }
     }
@@ -87,11 +87,7 @@ impl EmailDriver for MailgunEmailDriver {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::message(format!(
-                "Mailgun API error ({}): {body}",
-                status
-            )));
+            return Err(super::http::provider_error("Mailgun", status, response).await);
         }
 
         Ok(())
@@ -116,6 +112,7 @@ mod tests {
             domain: "mg.example.com".to_string(),
             api_key: "key-xxx".to_string(),
             region: MailgunRegion::Us,
+            timeout_secs: 30,
         };
         assert_eq!(
             config.base_url(),
@@ -129,6 +126,7 @@ mod tests {
             domain: "mg.example.com".to_string(),
             api_key: "key-xxx".to_string(),
             region: MailgunRegion::Eu,
+            timeout_secs: 30,
         };
         assert_eq!(
             config.base_url(),

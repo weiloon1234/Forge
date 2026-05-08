@@ -534,6 +534,11 @@ impl AttachmentUploadBuilder {
         });
 
         let dir = format!("attachments/{}/{}", attachable_type, self.collection);
+        let original_name = self
+            .file
+            .original_name
+            .as_deref()
+            .map(UploadedFile::normalize_name);
 
         let processed_image = if self.should_process_image() {
             let bytes = tokio::fs::read(&self.file.temp_path)
@@ -586,7 +591,7 @@ impl AttachmentUploadBuilder {
                 DbValue::Text(disk_name.clone()),
                 DbValue::Text(path.clone()),
                 DbValue::Text(name.clone()),
-                opt_text(&self.file.original_name),
+                opt_text(&original_name),
                 opt_text(&content_type),
                 DbValue::Int64(size),
             ],
@@ -619,7 +624,7 @@ impl AttachmentUploadBuilder {
             disk: disk_name,
             path,
             name,
-            original_name: self.file.original_name,
+            original_name,
             mime_type: content_type,
             size,
             sort_order: 0,

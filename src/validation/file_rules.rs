@@ -1,15 +1,14 @@
-use std::path::Path;
+use tokio::io::AsyncReadExt as _;
 
 use crate::foundation::{Error, Result};
 use crate::storage::UploadedFile;
 
+const MIME_SNIFF_BYTES: usize = 8192;
+
 /// Check if a file is an image by reading magic bytes.
 pub async fn is_image(file: &UploadedFile) -> Result<bool> {
-    let bytes = tokio::fs::read(&file.temp_path)
-        .await
-        .map_err(|e| Error::message(format!("failed to read uploaded file: {e}")))?;
-    let is_img: bool = infer::is_image(&bytes);
-    Ok(is_img)
+    let sample = read_file_sample(file, MIME_SNIFF_BYTES).await?;
+    Ok(infer::is_image(&sample))
 }
 
 /// Check if file size is within limit (in KB).
@@ -33,35 +32,72 @@ pub async fn get_image_dimensions(file: &UploadedFile) -> Result<(u32, u32)> {
 }
 
 /// Check if MIME type is in allowed list.
-/// Checks magic bytes first (most reliable), then falls back to content-type header.
+/// Checks magic bytes first, then falls back only for safe text-like MIME types.
 pub async fn check_allowed_mimes(file: &UploadedFile, allowed: &[String]) -> Result<bool> {
-    // Try magic bytes first (most reliable)
-    let bytes = tokio::fs::read(&file.temp_path)
-        .await
-        .map_err(|e| Error::message(format!("failed to read uploaded file: {e}")))?;
-    if let Some(kind) = infer::get(&bytes) {
-        let mime = kind.mime_type();
-        return Ok(allowed.iter().any(|a| a == mime));
+    let sample = read_file_sample(file, MIME_SNIFF_BYTES).await?;
+    if let Some(kind) = infer::get(&sample) {
+        return Ok(mime_allowed(kind.mime_type(), allowed));
     }
-    // Fallback to content-type header
-    if let Some(ref ct) = file.content_type {
-        return Ok(allowed.iter().any(|a| a == ct));
+
+    if let Some(ref content_type) = file.content_type {
+        let content_type = content_type.trim().to_ascii_lowercase();
+        let base = content_type.split(';').next().unwrap_or("").trim();
+        if is_safe_text_mime(base) && looks_like_text(&sample) {
+            return Ok(mime_allowed(base, allowed));
+        }
     }
+
     Ok(false)
 }
 
 /// Check if file extension is in allowed list.
 pub fn check_allowed_extensions(file: &UploadedFile, allowed: &[String]) -> bool {
-    if let Some(ref name) = file.original_name {
-        let ext = Path::new(name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase());
-        if let Some(ext) = ext {
-            return allowed.iter().any(|a| a.to_lowercase() == ext);
-        }
-    }
-    false
+    file.original_extension().is_some_and(|ext| {
+        allowed
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&ext))
+    })
+}
+
+async fn read_file_sample(file: &UploadedFile, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut handle = tokio::fs::File::open(&file.temp_path)
+        .await
+        .map_err(|e| Error::message(format!("failed to read uploaded file: {e}")))?;
+    let mut sample = vec![0; max_bytes];
+    let read = handle
+        .read(&mut sample)
+        .await
+        .map_err(|e| Error::message(format!("failed to read uploaded file: {e}")))?;
+    sample.truncate(read);
+    Ok(sample)
+}
+
+fn mime_allowed(mime: &str, allowed: &[String]) -> bool {
+    allowed
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(mime))
+}
+
+fn is_safe_text_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "text/plain"
+            | "text/csv"
+            | "text/tab-separated-values"
+            | "application/json"
+            | "application/xml"
+            | "application/csv"
+            | "application/x-ndjson"
+    )
+}
+
+fn looks_like_text(sample: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(sample) else {
+        return false;
+    };
+
+    text.chars()
+        .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
 }
 
 #[cfg(test)]
@@ -84,6 +120,14 @@ mod tests {
     }
 
     fn make_file_with_content(content: &[u8], name: &str) -> UploadedFile {
+        make_file_with_content_type(content, name, Some("application/octet-stream"))
+    }
+
+    fn make_file_with_content_type(
+        content: &[u8],
+        name: &str,
+        content_type: Option<&str>,
+    ) -> UploadedFile {
         let temp_dir = std::env::temp_dir().join("forge-test-file-rules");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let temp_path = temp_dir.join(format!("test-{}", uuid::Uuid::now_v7()));
@@ -92,7 +136,7 @@ mod tests {
         UploadedFile {
             field_name: "file".to_string(),
             original_name: Some(name.to_string()),
-            content_type: Some("application/octet-stream".to_string()),
+            content_type: content_type.map(str::to_string),
             size: content.len() as u64,
             temp_path,
         }
@@ -139,6 +183,14 @@ mod tests {
         assert!(check_allowed_extensions(&file, &allowed));
     }
 
+    #[test]
+    fn check_allowed_extensions_uses_sanitized_name() {
+        let mut file = make_file_with_size(100);
+        file.original_name = Some(r#"C:\fake\photo.PNG"#.to_string());
+        let allowed: Vec<String> = vec!["png".into()];
+        assert!(check_allowed_extensions(&file, &allowed));
+    }
+
     #[tokio::test]
     async fn is_image_detects_png() {
         // PNG magic bytes
@@ -151,5 +203,42 @@ mod tests {
     async fn is_image_rejects_non_image() {
         let file = make_file_with_content(b"hello world", "test.txt");
         assert!(!is_image(&file).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_allowed_mimes_accepts_magic_byte_binary_types() {
+        let png_header = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+        let png = make_file_with_content_type(&png_header, "photo.png", Some("text/plain"));
+        let allowed_png: Vec<String> = vec!["image/png".into()];
+        assert!(check_allowed_mimes(&png, &allowed_png).await.unwrap());
+
+        let pdf = make_file_with_content_type(b"%PDF-1.7\n%forge\n", "doc.pdf", None);
+        let allowed_pdf: Vec<String> = vec!["application/pdf".into()];
+        assert!(check_allowed_mimes(&pdf, &allowed_pdf).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_allowed_mimes_rejects_spoofed_binary_content_type() {
+        let file = make_file_with_content_type(b"hello world", "fake.png", Some("image/png"));
+        let allowed: Vec<String> = vec!["image/png".into()];
+
+        assert!(!check_allowed_mimes(&file, &allowed).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_allowed_mimes_keeps_text_plain_compatibility_fallback() {
+        let file = make_file_with_content_type(b"hello world\n", "notes.txt", Some("text/plain"));
+        let allowed: Vec<String> = vec!["text/plain".into()];
+
+        assert!(check_allowed_mimes(&file, &allowed).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_allowed_mimes_rejects_binary_bytes_pretending_to_be_text() {
+        let file =
+            make_file_with_content_type(b"hello\0world\xff", "notes.txt", Some("text/plain"));
+        let allowed: Vec<String> = vec!["text/plain".into()];
+
+        assert!(!check_allowed_mimes(&file, &allowed).await.unwrap());
     }
 }

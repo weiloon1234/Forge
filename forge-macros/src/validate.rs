@@ -963,6 +963,7 @@ fn generate_from_multipart_impl(
     let mut var_decls = Vec::new();
     let mut match_arms = Vec::new();
     let mut field_assignments = Vec::new();
+    let mut cleanup_uploads = Vec::new();
 
     for fi in all_fields {
         let ident = &fi.ident;
@@ -973,6 +974,9 @@ fn generate_from_multipart_impl(
             // Vec<UploadedFile>: accumulate from multipart
             var_decls.push(quote! {
                 let mut #var_name: Vec<::forge::storage::UploadedFile> = Vec::new();
+            });
+            cleanup_uploads.push(quote! {
+                ::forge::storage::upload::cleanup_uploaded_files(#var_name.iter()).await;
             });
 
             match_arms.push(quote! {
@@ -990,12 +994,17 @@ fn generate_from_multipart_impl(
             });
 
             field_assignments.push(quote! {
-                #ident: #var_name
+                #ident: #var_name.clone()
             });
         } else if fi.is_uploaded_file {
             // UploadedFile or Option<UploadedFile>
             var_decls.push(quote! {
                 let mut #var_name: Option<::forge::storage::UploadedFile> = None;
+            });
+            cleanup_uploads.push(quote! {
+                if let Some(__file) = #var_name.as_ref() {
+                    ::forge::storage::upload::remove_uploaded_temp_file(__file).await;
+                }
             });
 
             match_arms.push(quote! {
@@ -1015,12 +1024,12 @@ fn generate_from_multipart_impl(
             if fi.is_option {
                 // Option<UploadedFile>: just take the Option
                 field_assignments.push(quote! {
-                    #ident: #var_name
+                    #ident: #var_name.clone()
                 });
             } else {
                 // UploadedFile (non-Option): error if missing
                 field_assignments.push(quote! {
-                    #ident: #var_name.ok_or_else(|| ::forge::foundation::Error::message(
+                    #ident: #var_name.clone().ok_or_else(|| ::forge::foundation::Error::message(
                         format!("field '{}' is required", #name)
                     ))?
                 });
@@ -1101,6 +1110,35 @@ fn generate_from_multipart_impl(
         }
     }
 
+    let parse_error_handling = if cleanup_uploads.is_empty() {
+        quote! {
+            __parse_result?;
+        }
+    } else {
+        quote! {
+            if let Err(__error) = __parse_result {
+                #(#cleanup_uploads)*
+                return Err(__error);
+            }
+        }
+    };
+
+    let build_result_handling = if cleanup_uploads.is_empty() {
+        quote! {
+            __build_result
+        }
+    } else {
+        quote! {
+            match __build_result {
+                Ok(__value) => Ok(__value),
+                Err(__error) => {
+                    #(#cleanup_uploads)*
+                    Err(__error)
+                }
+            }
+        }
+    };
+
     Ok(quote! {
         #[::forge::__reexports::async_trait]
         impl ::forge::validation::FromMultipart for #struct_ident {
@@ -1110,19 +1148,28 @@ fn generate_from_multipart_impl(
                 #(#var_decls)*
                 let mut __upload_counters = ::forge::storage::UploadCounters::default();
 
-                while let Some(__field) = __multipart.next_field().await
-                    .map_err(|e| ::forge::foundation::Error::message(format!("multipart error: {e}")))?
-                {
-                    let __field_name = __field.name().unwrap_or("").to_string();
-                    match __field_name.as_str() {
-                        #(#match_arms)*
-                        _ => {}
+                let __parse_result: ::forge::foundation::Result<()> = async {
+                    while let Some(__field) = __multipart.next_field().await
+                        .map_err(|e| ::forge::foundation::Error::message(format!("multipart error: {e}")))?
+                    {
+                        let __field_name = __field.name().unwrap_or("").to_string();
+                        match __field_name.as_str() {
+                            #(#match_arms)*
+                            _ => {}
+                        }
                     }
-                }
+                    Ok(())
+                }.await;
 
-                Ok(Self {
-                    #(#field_assignments),*
-                })
+                #parse_error_handling
+
+                let __build_result: ::forge::foundation::Result<Self> = (|| {
+                    Ok(Self {
+                        #(#field_assignments),*
+                    })
+                })();
+
+                #build_result_handling
             }
         }
     })

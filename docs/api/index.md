@@ -35,7 +35,7 @@ Load only the file you need — don't read them all at once.
 | [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 40L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 54L |
 | [settings](modules/settings.md) |  | 37L |
-| [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 127L |
+| [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 130L |
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 207L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 38L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
@@ -43,4 +43,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 35 modules, 3360 lines across all files.**
+**Total: 35 modules, 3363 lines across all files.**

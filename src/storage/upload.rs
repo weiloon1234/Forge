@@ -16,6 +16,8 @@ use super::StorageConfig;
 use super::StorageManager;
 
 const UPLOAD_TEMP_PREFIX: &str = "forge-upload-";
+const FALLBACK_UPLOAD_FILENAME: &str = "upload";
+const MAX_UPLOAD_FILENAME_BYTES: usize = 255;
 
 /// Represents a file received from an HTTP request (multipart upload).
 ///
@@ -95,6 +97,33 @@ impl<'de> Deserialize<'de> for UploadedFile {
 }
 
 impl UploadedFile {
+    /// Returns a display-safe filename for upload metadata.
+    ///
+    /// This strips path components for both Unix and Windows separators,
+    /// removes control characters, trims unsafe wrapper whitespace/quotes,
+    /// caps length, and falls back to `upload` when no safe name remains.
+    pub fn sanitize_name(name: &str) -> String {
+        let segment = name
+            .rsplit(['/', '\\'])
+            .find(|segment| !segment.is_empty())
+            .unwrap_or(name);
+        let cleaned: String = segment
+            .chars()
+            .filter(|ch| !ch.is_control() && *ch != '/' && *ch != '\\')
+            .collect();
+        let trimmed = cleaned
+            .trim_matches(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\'')
+            .trim();
+
+        let name = if trimmed.is_empty() {
+            FALLBACK_UPLOAD_FILENAME
+        } else {
+            trimmed
+        };
+
+        truncate_filename(name)
+    }
+
     /// Generates a UUIDv7-based filename, preserving a safe normalized extension.
     pub fn generate_storage_name(&self) -> String {
         let uuid = uuid::Uuid::now_v7().to_string();
@@ -120,20 +149,14 @@ impl UploadedFile {
     pub fn original_extension(&self) -> Option<String> {
         self.original_name
             .as_ref()
-            .and_then(|n| Path::new(n).extension())
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_lowercase())
-            .filter(|ext| !ext.contains('/') && !ext.contains('\\') && ext.len() <= 32)
+            .map(|name| Self::sanitize_name(name))
+            .and_then(|name| safe_extension_from_sanitized_name(&name))
     }
 
     /// Normalizes a user-provided filename by stripping any path components,
     /// keeping only the final file name segment.
     pub fn normalize_name(name: &str) -> String {
-        Path::new(name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(name)
-            .to_string()
+        Self::sanitize_name(name)
     }
 
     /// Builds a storage path from a directory and filename.
@@ -217,11 +240,32 @@ pub async fn uploaded_file_from_multipart_field(
     }
     counters.uploaded_files = next_count;
 
-    let original_name = field.file_name().map(str::to_string);
-    let content_type = field.content_type().map(str::to_string);
+    let original_name = field.file_name().map(UploadedFile::sanitize_name);
+    let content_type = field.content_type().and_then(normalize_content_type);
     let temp_id = uuid::Uuid::now_v7().to_string();
     let temp_path = std::env::temp_dir().join(format!("{UPLOAD_TEMP_PREFIX}{temp_id}"));
 
+    uploaded_file_from_multipart_field_at_path(
+        field_name,
+        original_name,
+        content_type,
+        field,
+        limits,
+        counters,
+        temp_path,
+    )
+    .await
+}
+
+async fn uploaded_file_from_multipart_field_at_path(
+    field_name: String,
+    original_name: Option<String>,
+    content_type: Option<String>,
+    field: Field<'_>,
+    limits: UploadLimits,
+    counters: &mut UploadCounters,
+    temp_path: PathBuf,
+) -> Result<Option<UploadedFile>> {
     let result = stream_field_to_temp_file(field, &temp_path, limits, counters).await;
     match result {
         Ok(size) => Ok(Some(UploadedFile {
@@ -284,6 +328,27 @@ pub async fn prune_stale_upload_temp_files(retention_seconds: u64, batch_size: u
     prune_stale_upload_temp_files_in_dir(&std::env::temp_dir(), retention_seconds, batch_size).await
 }
 
+pub async fn remove_uploaded_temp_file(file: &UploadedFile) -> bool {
+    if !is_forge_upload_temp_path(&file.temp_path) {
+        return false;
+    }
+
+    match tokio::fs::remove_file(&file.temp_path).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => false,
+    }
+}
+
+pub async fn cleanup_uploaded_files<'a, I>(files: I)
+where
+    I: IntoIterator<Item = &'a UploadedFile>,
+{
+    for file in files {
+        let _ = remove_uploaded_temp_file(file).await;
+    }
+}
+
 async fn prune_stale_upload_temp_files_in_dir(
     dir: &Path,
     retention_seconds: u64,
@@ -344,6 +409,69 @@ fn upload_too_many_files_error() -> Error {
     Error::http_with_code(413, "Too many uploaded files", "too_many_uploaded_files")
 }
 
+fn normalize_content_type(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value)
+}
+
+fn safe_extension_from_sanitized_name(name: &str) -> Option<String> {
+    let (_, ext) = name.rsplit_once('.')?;
+    if ext.is_empty() || ext.len() > 32 {
+        return None;
+    }
+    if !ext
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return None;
+    }
+    Some(ext.to_ascii_lowercase())
+}
+
+fn truncate_filename(name: &str) -> String {
+    if name.len() <= MAX_UPLOAD_FILENAME_BYTES {
+        return name.to_string();
+    }
+
+    let extension = safe_extension_from_sanitized_name(name);
+    let suffix = extension
+        .as_ref()
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+    let base_limit = MAX_UPLOAD_FILENAME_BYTES.saturating_sub(suffix.len());
+    let base = name
+        .rsplit_once('.')
+        .map(|(base, _)| base)
+        .filter(|_| extension.is_some())
+        .unwrap_or(name);
+    let mut truncated = truncate_to_byte_len(base, base_limit);
+    if truncated.is_empty() {
+        truncated = FALLBACK_UPLOAD_FILENAME.to_string();
+    }
+    truncated.push_str(&suffix);
+    truncated
+}
+
+fn truncate_to_byte_len(value: &str, limit: usize) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        if output.len() + ch.len_utf8() > limit {
+            break;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn is_forge_upload_temp_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(UPLOAD_TEMP_PREFIX))
+}
+
 pub(crate) fn invalid_multipart_response(status: u16, error: impl std::fmt::Display) -> Response {
     Error::http_with_code(
         status,
@@ -400,6 +528,7 @@ where
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
+    use axum::extract::FromRequest as _;
     use axum::http::{header, Request, StatusCode};
     use axum::routing::post;
     use serde_json::Value;
@@ -521,11 +650,42 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_name_handles_paths_controls_quotes_and_fallback() {
+        assert_eq!(UploadedFile::sanitize_name("/etc/passwd"), "passwd");
+        assert_eq!(
+            UploadedFile::sanitize_name(r#"C:\Users\admin\avatar.JPG"#),
+            "avatar.JPG"
+        );
+        assert_eq!(
+            UploadedFile::sanitize_name(" \" report\u{0000}\u{001f}.pdf \" "),
+            "report.pdf"
+        );
+        assert_eq!(
+            UploadedFile::sanitize_name("////"),
+            FALLBACK_UPLOAD_FILENAME
+        );
+        assert_eq!(UploadedFile::sanitize_name("照片.png"), "照片.png");
+    }
+
+    #[test]
+    fn sanitize_name_caps_long_names_and_preserves_extension() {
+        let input = format!("{}.png", "a".repeat(400));
+        let name = UploadedFile::sanitize_name(&input);
+
+        assert!(name.len() <= MAX_UPLOAD_FILENAME_BYTES);
+        assert!(name.ends_with(".png"));
+    }
+
+    #[test]
     fn normalize_name_strips_path_components() {
         // Unix-style paths are stripped by std::path::Path::file_name
         assert_eq!(UploadedFile::normalize_name("/etc/passwd"), "passwd");
         assert_eq!(
             UploadedFile::normalize_name("subdir/photo.jpg"),
+            "photo.jpg"
+        );
+        assert_eq!(
+            UploadedFile::normalize_name(r#"C:\tmp\photo.jpg"#),
             "photo.jpg"
         );
         assert_eq!(UploadedFile::normalize_name("simple.txt"), "simple.txt");
@@ -585,6 +745,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multipart_limit_error_removes_known_temp_file() {
+        let request = multipart_request(concat!(
+            "--forge-test\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "abcdef\r\n",
+            "--forge-test--\r\n"
+        ));
+        let mut multipart = axum::extract::Multipart::from_request(request, &())
+            .await
+            .unwrap();
+        let field = multipart.next_field().await.unwrap().unwrap();
+        let temp_path =
+            std::env::temp_dir().join(format!("{UPLOAD_TEMP_PREFIX}test-{}", uuid::Uuid::now_v7()));
+        let mut counters = UploadCounters::default();
+
+        let error = uploaded_file_from_multipart_field_at_path(
+            "file".to_string(),
+            Some("a.txt".to_string()),
+            Some("text/plain".to_string()),
+            field,
+            UploadLimits {
+                max_upload_file_size_bytes: 3,
+                ..UploadLimits::default()
+            },
+            &mut counters,
+            temp_path.clone(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "Uploaded file is too large");
+        assert!(!temp_path.exists());
+    }
+
+    #[tokio::test]
     async fn uploaded_file_returns_json_error_when_missing() {
         let app = app_with_storage_config("[storage]\n");
         let router = axum::Router::new()
@@ -606,6 +802,28 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["message"], "No file uploaded");
         assert_eq!(json["error_code"], "missing_uploaded_file");
+    }
+
+    #[tokio::test]
+    async fn uploaded_file_sanitizes_multipart_filename_on_extraction() {
+        let app = app_with_storage_config("[storage]\n");
+        let router = axum::Router::new()
+            .route("/", post(accept_upload))
+            .with_state(app);
+        let body = concat!(
+            "--forge-test\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"C:\\\\tmp\\\\photo.JPG\"\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "hello\r\n",
+            "--forge-test--\r\n"
+        );
+
+        let response = router.oneshot(multipart_request(body)).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "photo.JPG");
     }
 
     #[tokio::test]

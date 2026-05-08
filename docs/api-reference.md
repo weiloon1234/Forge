@@ -1723,11 +1723,20 @@ fn configured_disks(&self) -> Vec<String>
 fn from_multipart_field(field_name, field, counters) -> Result<Option<UploadedFile>>
 fn generate_storage_name(&self) -> String
 fn original_extension(&self) -> Option<String>
+fn sanitize_name(name: &str) -> String
 fn normalize_name(name: &str) -> String
 fn store(&self, app: &AppContext, dir: &str) -> Result<StoredFile>
 fn store_on(&self, app: &AppContext, disk_name: &str, dir: &str) -> Result<StoredFile>
 fn store_as(&self, app: &AppContext, dir: &str, name: &str) -> Result<StoredFile>
 fn store_as_on(&self, app: &AppContext, disk_name: &str, dir: &str, name: &str) -> Result<StoredFile>
+```
+
+### Upload helpers
+
+```rust
+async fn cleanup_uploaded_files(files: impl IntoIterator<Item = &UploadedFile>)
+async fn remove_uploaded_temp_file(file: &UploadedFile) -> bool
+async fn prune_stale_upload_temp_files(retention_seconds: u64, batch_size: u64) -> Result<u64>
 ```
 
 ### MultipartForm — methods
@@ -1738,7 +1747,7 @@ fn files(&self, name: &str) -> &[UploadedFile]
 fn text(&self, name: &str) -> Option<&str>
 ```
 
-Multipart extraction honors `[storage]` upload caps and returns Forge JSON `413` errors for oversized uploads or too many uploaded files. Forge worker maintenance prunes stale `forge-upload-*` temp files according to storage retention settings. Storage paths are logical relative keys; Forge rejects absolute paths, relative segments, empty segments, backslashes, drive prefixes, and control characters before disk access.
+Multipart extraction honors `[storage]` upload caps and returns Forge JSON `413` errors for oversized uploads or too many uploaded files. Forge sanitizes uploaded filenames before metadata/storage-name use and removes Forge-owned temp files on extraction failure. Forge worker maintenance prunes stale successful `forge-upload-*` temp files according to storage retention settings. Storage paths are logical relative keys; Forge rejects absolute paths, relative segments, empty segments, backslashes, drive prefixes, and control characters before disk access.
 
 Attachment image processing also honors `[storage]` decode safety limits for input bytes, width, height, and total pixels. Forge worker maintenance audits old objects under `storage.attachment_orphan_prefix`; deletion is off by default and requires `storage.attachment_orphan_delete_enabled = true`.
 

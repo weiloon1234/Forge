@@ -7,7 +7,8 @@ use axum::response::{IntoResponse, Response};
 use crate::foundation::{AppContext, Error, Result};
 
 use super::upload::{
-    invalid_multipart_response, uploaded_file_from_multipart_field, UploadCounters, UploadLimits,
+    invalid_multipart_response, remove_uploaded_temp_file, uploaded_file_from_multipart_field,
+    UploadCounters, UploadLimits,
 };
 
 pub type UploadedFile = super::upload::UploadedFile;
@@ -80,35 +81,52 @@ where
         let mut texts: HashMap<String, String> = HashMap::new();
         let mut counters = UploadCounters::default();
 
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|error| invalid_multipart_response(400, error))?
-        {
+        while let Some(field) = match multipart.next_field().await {
+            Ok(field) => field,
+            Err(error) => {
+                cleanup_form_files(&files).await;
+                return Err(invalid_multipart_response(400, error));
+            }
+        } {
             let field_name = field.name().unwrap_or("").to_string();
 
             if field.file_name().is_some() {
-                let file = uploaded_file_from_multipart_field(
+                let file = match uploaded_file_from_multipart_field(
                     field_name.clone(),
                     field,
                     limits,
                     &mut counters,
                 )
                 .await
-                .map_err(IntoResponse::into_response)?
-                .expect("file_name checked before upload extraction");
+                {
+                    Ok(Some(file)) => file,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        cleanup_form_files(&files).await;
+                        return Err(error.into_response());
+                    }
+                };
                 files.entry(field_name).or_default().push(file);
             } else {
                 // Text field — collect the full value.
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|error| invalid_multipart_response(400, error))?;
+                let text = match field.text().await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        cleanup_form_files(&files).await;
+                        return Err(invalid_multipart_response(400, error));
+                    }
+                };
                 texts.insert(field_name, text);
             }
         }
 
         Ok(MultipartForm { files, texts })
+    }
+}
+
+async fn cleanup_form_files(files: &HashMap<String, Vec<UploadedFile>>) {
+    for file in files.values().flat_map(|items| items.iter()) {
+        let _ = remove_uploaded_temp_file(file).await;
     }
 }
 
@@ -284,5 +302,42 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["message"], "Uploaded file is too large");
         assert_eq!(json["error_code"], "uploaded_file_too_large");
+    }
+
+    #[tokio::test]
+    async fn cleanup_form_files_removes_only_forge_upload_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let forge_temp = dir
+            .path()
+            .join(format!("forge-upload-{}", uuid::Uuid::now_v7()));
+        let other_temp = dir.path().join("other-upload");
+        std::fs::write(&forge_temp, b"temp").unwrap();
+        std::fs::write(&other_temp, b"keep").unwrap();
+
+        let mut files = HashMap::new();
+        files.insert(
+            "file".to_string(),
+            vec![
+                UploadedFile {
+                    field_name: "file".to_string(),
+                    original_name: Some("a.txt".to_string()),
+                    content_type: Some("text/plain".to_string()),
+                    size: 4,
+                    temp_path: forge_temp.clone(),
+                },
+                UploadedFile {
+                    field_name: "file".to_string(),
+                    original_name: Some("b.txt".to_string()),
+                    content_type: Some("text/plain".to_string()),
+                    size: 4,
+                    temp_path: other_temp.clone(),
+                },
+            ],
+        );
+
+        cleanup_form_files(&files).await;
+
+        assert!(!forge_temp.exists());
+        assert!(other_temp.exists());
     }
 }

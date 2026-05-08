@@ -60,7 +60,11 @@ visibility = "public"
 
 Upload caps are storage-level guardrails for `UploadedFile`, `MultipartForm`, and derive-generated multipart DTOs. Route-level validators and file rules still own product-specific limits such as avatar size, gallery count, and allowed MIME types.
 
-Forge streams multipart files to OS temp files named `forge-upload-*`. The worker prunes stale temp files using the retention settings above, so consumers do not need to add a scheduler job. Stored attachments/files are not pruned by this temp cleanup.
+Forge streams multipart files to OS temp files named `forge-upload-*`. Failed multipart extraction removes temp files that Forge already created; successful request temp files are pruned by worker maintenance using the retention settings above, so consumers do not need to add a scheduler job. Stored attachments/files are not pruned by this temp cleanup.
+
+Uploaded filenames are metadata, not trusted paths. Forge strips Unix/Windows path components, removes control characters, trims unsafe wrapper whitespace/quotes, caps display filename length, and falls back to `upload` when no safe name remains. Generated storage names stay UUID-based and only preserve a sanitized extension.
+
+File validation helpers prefer magic-byte MIME detection and do not trust arbitrary client `Content-Type` headers for binary formats like images or PDFs. Text-like uploads keep a compatibility fallback for safe MIME types such as `text/plain`, after checking that sampled bytes look like text.
 
 Storage paths are logical relative keys, not filesystem paths. Forge rejects absolute paths, `..` or `.` segments, empty path segments, backslashes, drive prefixes, and control characters before calling a disk adapter. Local disks also reject symlinked path components so app storage cannot escape the configured disk root.
 

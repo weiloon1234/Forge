@@ -111,6 +111,7 @@ struct UploadCounters
 struct UploadLimits
   fn from_config(config: &StorageConfig) -> Self
 struct UploadedFile
+  fn sanitize_name(name: &str) -> String
   fn generate_storage_name(&self) -> String
   async fn from_multipart_field( field_name: String, field: Field<'_>, counters: &mut UploadCounters, ) -> Result<Option<Self>>
   fn original_extension(&self) -> Option<String>
@@ -119,8 +120,10 @@ struct UploadedFile
   async fn store_on( &self, app: &AppContext, disk_name: &str, dir: &str, ) -> Result<StoredFile>
   async fn store_as( &self, app: &AppContext, dir: &str, name: &str, ) -> Result<StoredFile>
   async fn store_as_on( &self, app: &AppContext, disk_name: &str, dir: &str, name: &str, ) -> Result<StoredFile>
+async fn cleanup_uploaded_files<'a, I>(files: I)
 fn current_upload_limits() -> UploadLimits
 async fn prune_stale_upload_temp_files( retention_seconds: u64, batch_size: u64, ) -> Result<u64>
+async fn remove_uploaded_temp_file(file: &UploadedFile) -> bool
 async fn scope_upload_limits<F>( limits: UploadLimits, future: F, ) -> F::Output
 async fn uploaded_file_from_multipart_field( field_name: String, field: Field<'_>, limits: UploadLimits, counters: &mut UploadCounters, ) -> Result<Option<UploadedFile>>
 ```

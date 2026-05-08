@@ -24,3 +24,9 @@ trait CacheStore
   fn flush<'life0, 'async_trait>(
 ```
 
+## Notes
+
+- Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.
+- `remember()` uses local single-flight by default and can coordinate across workers with an opt-in distributed lock.
+- `cache.error_mode = "fail_open"` logs backend I/O failures and continues, while validation, serialization, and callback errors remain strict.
+

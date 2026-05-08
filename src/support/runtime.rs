@@ -455,9 +455,66 @@ return 0
             }
             Self::Memory(runtime) => {
                 let mut unique_keys = runtime.unique_keys.lock().await;
+                if let Some((_, expires_at)) = unique_keys.get(key) {
+                    if std::time::Instant::now() >= *expires_at {
+                        unique_keys.remove(key);
+                        return Ok(false);
+                    }
+                }
                 if let Some((val, _)) = unique_keys.get(key) {
                     if val == expected {
                         unique_keys.remove(key);
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// Extend a key expiration only if its current value matches the expected value.
+    ///
+    /// Returns `true` if the key was still owned by `expected` and its TTL was extended.
+    pub async fn expire_if_value(&self, key: &str, expected: &str, ttl_secs: u64) -> Result<bool> {
+        match self {
+            Self::Redis(runtime) => {
+                let full_key = runtime.namespaced_key(key);
+                let mut conn = runtime
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(Error::other)?;
+                let extended: i64 = ::redis::cmd("EVAL")
+                    .arg(
+                        r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"#,
+                    )
+                    .arg(1)
+                    .arg(&full_key)
+                    .arg(expected)
+                    .arg(ttl_secs as i64)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(extended == 1)
+            }
+            Self::Memory(runtime) => {
+                let now = std::time::Instant::now();
+                let ttl = std::time::Duration::from_secs(ttl_secs);
+                let mut unique_keys = runtime.unique_keys.lock().await;
+                if let Some((_, expires_at)) = unique_keys.get(key) {
+                    if now >= *expires_at {
+                        unique_keys.remove(key);
+                        return Ok(false);
+                    }
+                }
+                if let Some((value, expires_at)) = unique_keys.get_mut(key) {
+                    if value == expected {
+                        *expires_at = now + ttl;
                         return Ok(true);
                     }
                 }

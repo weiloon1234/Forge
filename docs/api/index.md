@@ -12,9 +12,9 @@ Load only the file you need — don't read them all at once.
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 74L |
 | [audit](modules/audit.md) | Built-in audit logging with automatic model mutation tracking | 34L |
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 210L |
-| [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 26L |
+| [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 32L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
-| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 92L |
+| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 94L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
 | [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 727L |
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 211L |
@@ -32,15 +32,15 @@ Load only the file you need — don't read them all at once.
 | [openapi](modules/openapi.md) | OpenAPI 3.1.0 spec generation (ApiSchema, RouteDoc) | 38L |
 | [plugin](modules/plugin.md) | Compile-time plugin system with dependency validation | 98L |
 | [public](modules/public.md) |  | 67L |
-| [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 40L |
+| [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 41L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 54L |
 | [settings](modules/settings.md) |  | 37L |
 | [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 130L |
-| [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 207L |
+| [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 210L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 38L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
 | [typescript](modules/typescript.md) |  | 14L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 61L |
 
-**Total: 35 modules, 3380 lines across all files.**
+**Total: 35 modules, 3392 lines across all files.**

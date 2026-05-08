@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use crate::foundation::{Error, Result};
@@ -819,27 +819,48 @@ impl Default for TypeScriptConfig {
 #[serde(default)]
 pub struct CacheConfig {
     pub driver: CacheDriver,
+    pub error_mode: CacheErrorMode,
     pub prefix: String,
     pub ttl_seconds: u64,
     pub max_entries: usize,
+    pub key_max_length: usize,
+    pub remember_singleflight: bool,
+    pub remember_distributed_lock: bool,
+    pub remember_lock_ttl_ms: u64,
+    pub remember_lock_wait_timeout_ms: u64,
+    pub remember_lock_poll_ms: u64,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             driver: CacheDriver::Redis,
+            error_mode: CacheErrorMode::Strict,
             prefix: "cache:".to_string(),
             ttl_seconds: 3600,
             max_entries: 10000,
+            key_max_length: 512,
+            remember_singleflight: true,
+            remember_distributed_lock: false,
+            remember_lock_ttl_ms: 30_000,
+            remember_lock_wait_timeout_ms: 5_000,
+            remember_lock_poll_ms: 100,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheDriver {
     Redis,
     Memory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheErrorMode {
+    Strict,
+    FailOpen,
 }
 
 impl Default for ConfigRepository {
@@ -1112,9 +1133,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, AuthConfig, ConfigRepository, DatabaseConfig, Environment, HttpConfig,
-        HttpRateLimitByConfig, JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig,
-        SchedulerConfig, TypeScriptConfig, WebSocketConfig,
+        AppConfig, AuthConfig, CacheConfig, CacheDriver, CacheErrorMode, ConfigRepository,
+        DatabaseConfig, Environment, HttpConfig, HttpRateLimitByConfig, JobsConfig, LoggingConfig,
+        ObservabilityConfig, RedisConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -1362,6 +1383,23 @@ mod tests {
     }
 
     #[test]
+    fn cache_config_defaults_are_production_safe() {
+        let cache: CacheConfig = ConfigRepository::empty().cache().unwrap();
+
+        assert_eq!(cache.driver, CacheDriver::Redis);
+        assert_eq!(cache.error_mode, CacheErrorMode::Strict);
+        assert_eq!(cache.prefix, "cache:");
+        assert_eq!(cache.ttl_seconds, 3_600);
+        assert_eq!(cache.max_entries, 10_000);
+        assert_eq!(cache.key_max_length, 512);
+        assert!(cache.remember_singleflight);
+        assert!(!cache.remember_distributed_lock);
+        assert_eq!(cache.remember_lock_ttl_ms, 30_000);
+        assert_eq!(cache.remember_lock_wait_timeout_ms, 5_000);
+        assert_eq!(cache.remember_lock_poll_ms, 100);
+    }
+
+    #[test]
     fn http_config_defaults_are_compatible_and_discoverable() {
         let http: HttpConfig = ConfigRepository::empty().http().unwrap();
 
@@ -1583,6 +1621,44 @@ mod tests {
         assert_eq!(auth.email_verification.expiry_minutes, 720);
         assert_eq!(auth.email_verification.prune_interval_ms, 90_000);
         assert_eq!(auth.email_verification.prune_batch_size, 30);
+    }
+
+    #[test]
+    fn parses_cache_config_section() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-cache.toml"),
+            r#"
+                [cache]
+                driver = "memory"
+                error_mode = "fail_open"
+                prefix = "app-cache:"
+                ttl_seconds = 120
+                max_entries = 250
+                key_max_length = 128
+                remember_singleflight = false
+                remember_distributed_lock = true
+                remember_lock_ttl_ms = 45000
+                remember_lock_wait_timeout_ms = 2500
+                remember_lock_poll_ms = 50
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let cache = config.cache().unwrap();
+
+        assert_eq!(cache.driver, CacheDriver::Memory);
+        assert_eq!(cache.error_mode, CacheErrorMode::FailOpen);
+        assert_eq!(cache.prefix, "app-cache:");
+        assert_eq!(cache.ttl_seconds, 120);
+        assert_eq!(cache.max_entries, 250);
+        assert_eq!(cache.key_max_length, 128);
+        assert!(!cache.remember_singleflight);
+        assert!(cache.remember_distributed_lock);
+        assert_eq!(cache.remember_lock_ttl_ms, 45_000);
+        assert_eq!(cache.remember_lock_wait_timeout_ms, 2_500);
+        assert_eq!(cache.remember_lock_poll_ms, 50);
     }
 
     #[test]

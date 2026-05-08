@@ -12,6 +12,7 @@ struct RedisChannel
   fn as_str(&self) -> &str
 struct RedisConnection
   async fn get<T>(&mut self, key: &RedisKey) -> Result<T>
+  async fn get_optional<T>(&mut self, key: &RedisKey) -> Result<Option<T>>
   async fn set<V>(&mut self, key: &RedisKey, value: V) -> Result<()>
   async fn set_ex<V>( &mut self, key: &RedisKey, value: V, seconds: u64, ) -> Result<()>
   async fn del(&mut self, key: &RedisKey) -> Result<usize>

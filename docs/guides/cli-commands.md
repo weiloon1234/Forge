@@ -301,9 +301,9 @@ These are available automatically — no registration needed:
 
 `doctor --deploy --json` is designed for runtime-only servers where the deploy package contains
 only the compiled binary and built assets. It uses the server's existing `.env`, checks config,
-database, runtime backend, readiness probes, and migration drift, then exits non-zero only when a
-check fails. Warnings, such as an intentionally unconfigured database, are reported but do not
-block the command.
+database, runtime backend, cache roundtrip, readiness probes, and migration drift, then exits
+non-zero only when a check fails. Warnings, such as an intentionally unconfigured database or a
+Redis cache driver without Redis configured, are reported but do not block the command.
 
 `config:publish` writes the current framework-owned auth sections, including token pruning,
 per-guard token TTL examples, `[auth.password_resets]`, `[auth.email_verification]`,

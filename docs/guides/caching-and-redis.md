@@ -29,9 +29,16 @@ let user = cache.remember("user:123", Duration::from_secs(3600), || async {
 # config/cache.toml
 [cache]
 driver = "redis"       # "redis" or "memory"
+error_mode = "strict"  # "strict" or "fail_open"
 prefix = "cache:"      # key prefix
 ttl_seconds = 3600     # default TTL (used by framework, not enforced on put())
 max_entries = 10000    # memory driver only — evicts oldest when full
+key_max_length = 512   # 0 disables the cache key length cap
+remember_singleflight = true
+remember_distributed_lock = false
+remember_lock_ttl_ms = 30000
+remember_lock_wait_timeout_ms = 5000
+remember_lock_poll_ms = 100
 ```
 
 ### Methods
@@ -58,6 +65,20 @@ cache.flush().await?;
 ```
 
 All values are serialized as JSON. Any type implementing `Serialize + DeserializeOwned` works.
+
+Cache keys must be non-empty and cannot contain control characters. Forge keeps
+common application key characters such as `:`, `/`, `.`, `_`, and `-` valid.
+
+`error_mode = "strict"` is the default: Redis/cache backend failures are returned
+to the caller. `error_mode = "fail_open"` logs backend I/O failures and lets
+`get`, `put`, `forget`, and `remember` continue for non-critical cache usage.
+Validation errors, JSON serialization/deserialization errors, and `remember`
+callback errors still return normally in both modes.
+
+`remember()` uses local single-flight by default, so concurrent requests in the
+same process only run one cold callback per key. Set
+`remember_distributed_lock = true` when multiple worker/server processes should
+coordinate cold-cache recomputation through Forge's runtime backend.
 
 ### Cache-Aside Pattern
 
@@ -191,6 +212,37 @@ conn.publish(&foreign_channel, "ping").await?;
 url = "redis://127.0.0.1/"
 # namespace = "my-app"    # auto-derived from app.name:app.environment if not set
 ```
+
+---
+
+## Distributed Locks
+
+Use `app.lock()` for short cross-process critical sections:
+
+```rust
+if let Some(lock) = app.lock()?.acquire("reports:daily", Duration::from_secs(30)).await? {
+    // do the protected work
+    lock.release().await?;
+}
+```
+
+Lock release is owner-checked, so an expired/stolen lock is not deleted by a
+stale guard. Long-running work can keep ownership alive with a heartbeat:
+
+```rust
+let lock = app
+    .lock()?
+    .block("reports:daily", Duration::from_secs(30), Duration::from_secs(10))
+    .await?;
+let heartbeat = lock.start_heartbeat(Duration::from_secs(30), Duration::from_secs(10));
+
+// long-running protected work
+
+drop(heartbeat);
+lock.release().await?;
+```
+
+`extend(ttl)` returns `false` when the guard no longer owns the lock.
 
 ---
 

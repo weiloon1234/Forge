@@ -1010,7 +1010,7 @@ impl AppBuilder {
         let distributed_lock = Arc::new(crate::support::lock::DistributedLock::new(
             app.resolve::<RuntimeBackend>()?,
         ));
-        app.container().singleton_arc(distributed_lock)?;
+        app.container().singleton_arc(distributed_lock.clone())?;
 
         // Auto-register guard authenticators from config before freezing
         let token_manager = Arc::new(crate::auth::token::TokenManager::new(
@@ -1131,7 +1131,7 @@ impl AppBuilder {
 
         // Cache manager (needs redis before it's moved into container)
         let cache_config = app.config().cache()?;
-        let cache_store: Arc<dyn crate::cache::CacheStore> = match cache_config.driver {
+        let cache_store: Arc<dyn crate::cache::CacheStore> = match cache_config.driver.clone() {
             crate::config::CacheDriver::Memory => Arc::new(crate::cache::MemoryCacheStore::new(
                 cache_config.max_entries,
             )),
@@ -1140,7 +1140,11 @@ impl AppBuilder {
                 cache_config.prefix.clone(),
             )),
         };
-        let cache_manager = Arc::new(crate::cache::CacheManager::new(cache_store));
+        let cache_manager = Arc::new(crate::cache::CacheManager::with_config(
+            cache_store,
+            cache_config,
+            Some(distributed_lock.clone()),
+        ));
         let audit_manager = Arc::new(AuditManager::new());
 
         let password_reset_manager =

@@ -170,6 +170,7 @@ async fn run_doctor(app: &AppContext, deploy: bool) -> DoctorReport {
     report.push(check_database(app).await);
     report.push(check_migrations(app).await);
     report.push(check_runtime_backend(app).await);
+    report.push(check_cache(app).await);
     report.push(check_readiness(app).await);
     report
 }
@@ -260,6 +261,65 @@ async fn check_runtime_backend(app: &AppContext) -> DoctorCheck {
     }
 }
 
+async fn check_cache(app: &AppContext) -> DoctorCheck {
+    let config = match app.config().cache() {
+        Ok(config) => config,
+        Err(error) => return DoctorCheck::failed("cache", error.to_string()),
+    };
+    if matches!(&config.driver, crate::config::CacheDriver::Redis) {
+        match app.config().redis() {
+            Ok(redis) if redis.url.trim().is_empty() => {
+                return DoctorCheck::warning(
+                    "cache",
+                    "cache driver is redis but redis is not configured",
+                );
+            }
+            Ok(_) => {}
+            Err(error) => return DoctorCheck::failed("cache", error.to_string()),
+        }
+    }
+
+    let cache = match app.cache() {
+        Ok(cache) => cache,
+        Err(error) => return DoctorCheck::failed("cache", error.to_string()),
+    };
+    let key = format!("forge:doctor:{}", uuid::Uuid::now_v7());
+    let value = "ok".to_string();
+    let details = json!({
+        "driver": config.driver,
+        "error_mode": config.error_mode,
+    });
+
+    match cache
+        .put(&key, &value, std::time::Duration::from_secs(30))
+        .await
+    {
+        Ok(()) => {}
+        Err(error) => {
+            return DoctorCheck::failed_with_details("cache", error.to_string(), details);
+        }
+    }
+    match cache.get::<String>(&key).await {
+        Ok(Some(found)) if found == value => {}
+        Ok(_) => {
+            let _ = cache.forget(&key).await;
+            return DoctorCheck::failed_with_details(
+                "cache",
+                "cache roundtrip did not return stored value",
+                details,
+            );
+        }
+        Err(error) => {
+            let _ = cache.forget(&key).await;
+            return DoctorCheck::failed_with_details("cache", error.to_string(), details);
+        }
+    }
+    match cache.forget(&key).await {
+        Ok(_) => DoctorCheck::ok_with_details("cache", "cache roundtrip succeeded", details),
+        Err(error) => DoctorCheck::failed_with_details("cache", error.to_string(), details),
+    }
+}
+
 async fn check_readiness(app: &AppContext) -> DoctorCheck {
     let diagnostics = match app.diagnostics() {
         Ok(diagnostics) => diagnostics,
@@ -293,8 +353,11 @@ fn print_text_report(report: &DoctorReport) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{DoctorReport, DoctorStatus};
     use crate::foundation::App;
+    use tempfile::tempdir;
 
     #[test]
     fn report_status_tracks_worst_check_status() {
@@ -326,7 +389,39 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "migrations" && check.status == DoctorStatus::Warning));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "cache" && check.status == DoctorStatus::Warning));
         assert!(!report.failed());
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_cache_roundtrip_status() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-cache.toml"),
+            r#"
+                [cache]
+                driver = "memory"
+            "#,
+        )
+        .unwrap();
+        let kernel = App::builder()
+            .load_config_dir(directory.path())
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        let report = super::run_doctor(kernel.app(), true).await;
+        let cache = report
+            .checks
+            .iter()
+            .find(|check| check.name == "cache")
+            .expect("cache check should be present");
+
+        assert_eq!(cache.status, DoctorStatus::Ok);
+        assert!(cache.message.contains("cache roundtrip succeeded"));
     }
 
     #[test]

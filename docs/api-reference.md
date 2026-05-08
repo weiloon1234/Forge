@@ -346,7 +346,7 @@ TOML-based configuration with environment overlay.
 | `ObservabilityConfig` | route/capture switches, sample retention, tracing, OTLP |
 | `HashingConfig` | `driver`, memory/time costs, parallelism |
 | `CryptConfig` | `key` |
-| `CacheConfig` | `driver`, `prefix`, `ttl`, `max_entries` |
+| `CacheConfig` | `driver`, `error_mode`, key bounds, TTL, memory size, `remember()` stampede controls |
 
 ### Enums
 
@@ -575,7 +575,11 @@ async fn acquire(&self, key: &str, ttl: Duration) -> Result<Option<LockGuard>>
 async fn block(&self, key: &str, ttl: Duration, timeout: Duration) -> Result<LockGuard>
 
 // LockGuard
+async fn extend(&self, ttl: Duration) -> Result<bool>
+fn start_heartbeat(&self, ttl: Duration, interval: Duration) -> LockHeartbeat
 async fn release(self) -> Result<bool>
+
+struct LockHeartbeat
 ```
 
 ### Utility Functions
@@ -2077,6 +2081,10 @@ async fn forget(&self, key: &str) -> Result<bool>
 async fn flush(&self) -> Result<()>
 ```
 
+Cache keys are validated before store access. `remember()` uses local
+single-flight by default and can opt into a distributed runtime lock via cache
+config.
+
 ---
 
 ## redis/
@@ -2116,6 +2124,7 @@ fn connection(&self) -> Result<RedisConnection>
 
 ```rust
 async fn get<T: FromRedisValue>(&mut self, key: &RedisKey) -> Result<T>
+async fn get_optional<T: FromRedisValue>(&mut self, key: &RedisKey) -> Result<Option<T>>
 async fn set<V: ToRedisArgs>(&mut self, key: &RedisKey, value: V) -> Result<()>
 async fn set_ex<V: ToRedisArgs>(&mut self, key: &RedisKey, value: V, seconds: u64) -> Result<()>
 async fn del(&mut self, key: &RedisKey) -> Result<usize>

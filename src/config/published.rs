@@ -785,9 +785,51 @@ const CACHE_FIELDS: &[PublishedField] = &[
         false,
         Some("\"redis\" or \"memory\""),
     ),
+    field(
+        "error_mode",
+        "\"strict\"",
+        "strict",
+        false,
+        false,
+        Some("\"strict\" or \"fail_open\"; strict surfaces backend failures"),
+    ),
     field("prefix", "\"cache:\"", "cache:", false, false, None),
     field("ttl_seconds", "3600", "3600", false, false, None),
     field("max_entries", "10000", "10000", false, false, None),
+    field(
+        "key_max_length",
+        "512",
+        "512",
+        false,
+        false,
+        Some("0 = disable cache key length cap"),
+    ),
+    field(
+        "remember_singleflight",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Coalesce concurrent remember() calls inside one process"),
+    ),
+    field(
+        "remember_distributed_lock",
+        "false",
+        "false",
+        false,
+        false,
+        Some("Opt-in cross-worker remember() stampede protection"),
+    ),
+    field("remember_lock_ttl_ms", "30000", "30000", false, false, None),
+    field(
+        "remember_lock_wait_timeout_ms",
+        "5000",
+        "5000",
+        false,
+        false,
+        None,
+    ),
+    field("remember_lock_poll_ms", "100", "100", false, false, None),
 ];
 
 const HASHING_FIELDS: &[PublishedField] = &[
@@ -1610,6 +1652,24 @@ mod tests {
         assert!(env.contains("# AUTH__SESSIONS__COOKIE_SAME_SITE=lax"));
         assert!(env.contains("# AUTH__PASSWORD_RESETS__EXPIRY_MINUTES=60"));
         assert!(env.contains("# AUTH__EMAIL_VERIFICATION__EXPIRY_MINUTES=1440"));
+    }
+
+    #[test]
+    fn published_cache_config_includes_operational_hardening_defaults() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[cache]"));
+        assert!(output.contains("# error_mode = \"strict\"  # \"strict\" or \"fail_open\""));
+        assert!(output.contains("# key_max_length = 512"));
+        assert!(output.contains("# remember_singleflight = true"));
+        assert!(output.contains("# remember_distributed_lock = false"));
+        assert!(output.contains("# remember_lock_ttl_ms = 30000"));
+        assert!(env.contains("# CACHE__ERROR_MODE=strict"));
+        assert!(env.contains("# CACHE__KEY_MAX_LENGTH=512"));
+        assert!(env.contains("# CACHE__REMEMBER_SINGLEFLIGHT=true"));
+        assert!(env.contains("# CACHE__REMEMBER_DISTRIBUTED_LOCK=false"));
+        assert!(env.contains("# CACHE__REMEMBER_LOCK_TTL_MS=30000"));
     }
 
     #[test]

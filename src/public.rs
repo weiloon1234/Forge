@@ -126,7 +126,7 @@ pub use crate::storage::{
     StorageDisk, StorageManager, StorageObject, StorageVisibility, StoredFile, UploadCounters,
     UploadLimits, UploadedFile,
 };
-pub use crate::support::lock::{DistributedLock, LockGuard};
+pub use crate::support::lock::{DistributedLock, LockGuard, LockHeartbeat};
 pub use crate::support::{
     sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock,
     Collection, CommandId, CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId,

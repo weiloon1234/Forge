@@ -203,5 +203,8 @@ struct DistributedLock
   async fn block( &self, key: &str, ttl: Duration, wait_timeout: Duration, ) -> Result<LockGuard>
 struct LockGuard
   async fn release(self) -> Result<bool>
+  async fn extend(&self, ttl: Duration) -> Result<bool>
+  fn start_heartbeat( &self, ttl: Duration, interval: Duration, ) -> LockHeartbeat
+struct LockHeartbeat
 ```
 

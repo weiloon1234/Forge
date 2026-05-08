@@ -58,11 +58,17 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
         "config" => &[
             "`AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.",
             "`HttpConfig` is optional and additive: global body cap, request timeout, CORS, CSRF, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.",
+            "`CacheConfig.error_mode` defaults to `strict`; `remember_singleflight` is enabled by default and distributed remember locks are opt-in.",
             "`DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.",
             "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
             "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
             "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.",
+        ],
+        "cache" => &[
+            "Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.",
+            "`remember()` uses local single-flight by default and can coordinate across workers with an opt-in distributed lock.",
+            "`cache.error_mode = \"fail_open\"` logs backend I/O failures and continues, while validation, serialization, and callback errors remain strict.",
         ],
         "http" => &[
             "`HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.",
@@ -115,6 +121,7 @@ mod tests {
         assert!(config.contains("background_shutdown_timeout_ms"));
         assert!(config.contains("JobsConfig"));
         assert!(config.contains("HttpConfig"));
+        assert!(config.contains("CacheConfig.error_mode"));
         assert!(config.contains("history_retention_days"));
         assert!(config.contains("ObservabilityConfig.enabled"));
         assert!(config.contains("SchedulerConfig"));
@@ -148,5 +155,11 @@ mod tests {
         assert!(http.contains("CSRF"));
         assert!(http.contains("413"));
         assert!(http.contains("actor_or_ip"));
+
+        let mut cache = String::new();
+        append_module_notes("cache", &mut cache);
+        assert!(cache.contains("single-flight"));
+        assert!(cache.contains("fail_open"));
+        assert!(cache.contains("backend failures"));
     }
 }

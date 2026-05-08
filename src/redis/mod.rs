@@ -184,6 +184,17 @@ impl RedisConnection {
             .map_err(Error::other)
     }
 
+    pub async fn get_optional<T>(&mut self, key: &RedisKey) -> Result<Option<T>>
+    where
+        T: FromRedisValue,
+    {
+        ::redis::cmd("GET")
+            .arg(key.as_str())
+            .query_async(&mut self.connection)
+            .await
+            .map_err(Error::other)
+    }
+
     pub async fn set<V>(&mut self, key: &RedisKey, value: V) -> Result<()>
     where
         V: ToRedisArgs,

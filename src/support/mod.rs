@@ -5,6 +5,7 @@ mod collection;
 mod crypt;
 mod datetime;
 pub(crate) mod filename;
+pub(crate) mod generated_manifest;
 mod hash;
 pub(crate) mod hmac;
 mod identifiers;

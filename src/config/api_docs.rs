@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,9 +9,13 @@ use regex::Regex;
 use crate::cli::CommandRegistrar;
 use crate::config::api_docs_metadata::{append_module_notes, module_description};
 use crate::foundation::Error;
+use crate::support::generated_manifest::{
+    clean_manifest_files, safe_manifest_path_with_extension, write_manifest,
+};
 use crate::support::CommandId;
 
 const DOCS_API_COMMAND: CommandId = CommandId::new("docs:api");
+const API_DOCS_MANIFEST: &str = ".forge-api-docs-manifest.json";
 
 pub(crate) fn docs_api_cli_registrar() -> CommandRegistrar {
     Arc::new(|registry| {
@@ -70,12 +74,12 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
     // Prepare output directories
     let out = PathBuf::from(output_dir);
     let modules_dir = out.join("modules");
-    if out.exists() {
-        fs::remove_dir_all(&out).map_err(Error::other)?;
-    }
     fs::create_dir_all(&modules_dir).map_err(Error::other)?;
+    let planned_files = planned_api_doc_files(&groups);
+    clean_api_docs_manifest_files(&out, &planned_files)?;
 
     let mut index_entries: Vec<(String, String, usize)> = Vec::new();
+    let mut output_files = BTreeSet::new();
 
     // Write root.md
     if let Some(root_paths) = groups.get("") {
@@ -100,7 +104,9 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
         }
 
         let lines = content.lines().count();
-        fs::write(out.join("root.md"), &content).map_err(Error::other)?;
+        let file = "root.md";
+        fs::write(out.join(file), &content).map_err(Error::other)?;
+        output_files.insert(file.to_string());
         index_entries.push((
             "root".into(),
             "Crate root: derive macros, re-exports".into(),
@@ -146,8 +152,9 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
         if has_content {
             append_module_notes(group_key, &mut content);
             let lines = content.lines().count();
-            fs::write(modules_dir.join(format!("{group_key}.md")), &content)
-                .map_err(Error::other)?;
+            let file = format!("modules/{group_key}.md");
+            fs::write(out.join(&file), &content).map_err(Error::other)?;
+            output_files.insert(file);
             index_entries.push((group_key.to_string(), desc, lines));
         }
     }
@@ -201,6 +208,8 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
     .unwrap();
 
     fs::write(out.join("index.md"), &index).map_err(Error::other)?;
+    output_files.insert("index.md".to_string());
+    write_manifest(&out, API_DOCS_MANIFEST, &output_files)?;
 
     println!(
         "API docs generated: {} modules, {total_lines} lines → {}",
@@ -209,6 +218,51 @@ fn generate_api_docs(output_dir: &str) -> Result<(), Error> {
     );
 
     Ok(())
+}
+
+fn planned_api_doc_files(groups: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
+    let mut files = BTreeSet::from(["index.md".to_string(), "root.md".to_string()]);
+    for group_key in groups.keys().filter(|group_key| !group_key.is_empty()) {
+        files.insert(format!("modules/{group_key}.md"));
+    }
+    files
+}
+
+fn clean_api_docs_manifest_files(
+    dir: &Path,
+    planned_files: &BTreeSet<String>,
+) -> Result<(), Error> {
+    clean_manifest_files(
+        dir,
+        API_DOCS_MANIFEST,
+        planned_files,
+        "forge.docs_api",
+        safe_api_docs_manifest_path,
+    )
+}
+
+fn safe_api_docs_manifest_path(file: &str) -> Option<PathBuf> {
+    let path = safe_manifest_path_with_extension(file, "md", true)?;
+    let mut components = path.components();
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (Some(std::path::Component::Normal(name)), None, None, None)
+            if name == "index.md" || name == "root.md" =>
+        {
+            Some(path)
+        }
+        (
+            Some(std::path::Component::Normal(dir)),
+            Some(std::path::Component::Normal(_file)),
+            None,
+            None,
+        ) if dir == "modules" => Some(path),
+        _ => None,
+    }
 }
 
 // ── Internals ────────────────────────────────────────────────────────
@@ -852,4 +906,64 @@ fn decode_and_strip_tags(html: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&nbsp;", " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn api_docs_cleanup_removes_only_manifest_owned_docs() {
+        let dir = tempdir().unwrap();
+        let modules_dir = dir.path().join("modules");
+        fs::create_dir_all(&modules_dir).unwrap();
+
+        fs::write(dir.path().join("index.md"), "planned").unwrap();
+        fs::write(dir.path().join("manual.md"), "manual").unwrap();
+        fs::write(modules_dir.join("old.md"), "old").unwrap();
+        fs::write(modules_dir.join("manual.md"), "manual").unwrap();
+        fs::write(
+            dir.path().join(API_DOCS_MANIFEST),
+            serde_json::to_string(&vec![
+                "modules/old.md",
+                "manual.md",
+                "../outside.md",
+                "modules/../../unsafe.md",
+                "modules/not-markdown.txt",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let planned = BTreeSet::from(["index.md".to_string(), "modules/current.md".to_string()]);
+        clean_api_docs_manifest_files(dir.path(), &planned).unwrap();
+
+        assert!(!dir.path().join("index.md").exists());
+        assert!(!modules_dir.join("old.md").exists());
+        assert!(dir.path().join("manual.md").exists());
+        assert!(modules_dir.join("manual.md").exists());
+    }
+
+    #[test]
+    fn api_docs_manifest_path_is_limited_to_known_output_shape() {
+        assert_eq!(
+            safe_api_docs_manifest_path("index.md"),
+            Some(PathBuf::from("index.md"))
+        );
+        assert_eq!(
+            safe_api_docs_manifest_path("modules/http.md"),
+            Some(PathBuf::from("modules/http.md"))
+        );
+        assert!(safe_api_docs_manifest_path("manual.md").is_none());
+        assert!(safe_api_docs_manifest_path("modules/nested/http.md").is_none());
+        assert!(safe_api_docs_manifest_path("../index.md").is_none());
+        assert!(safe_api_docs_manifest_path("modules\\http.md").is_none());
+        assert!(safe_api_docs_manifest_path("modules/http.txt").is_none());
+    }
 }

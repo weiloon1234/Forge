@@ -319,6 +319,11 @@ part of the generated config files either.
 `--json`, `--disk <name>`, `--limit <n>`, `--older-than-seconds <n>`, and `--delete`. Deletion is
 guarded by `storage.attachment_orphan_delete_enabled = true`; the default is audit/log only.
 
+`docs:api` writes generated Markdown under the selected output directory and tracks those files in
+`.forge-api-docs-manifest.json`. Regeneration only removes files owned by that manifest plus the
+current planned generated files (`index.md`, `root.md`, and `modules/*.md`), so colocated notes or
+manual docs are preserved.
+
 ---
 
 ## Command ID Naming Convention

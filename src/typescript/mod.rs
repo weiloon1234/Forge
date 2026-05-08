@@ -21,6 +21,10 @@ use crate::app_enum::{EnumKey, EnumKeyKind, EnumMeta};
 use crate::cli::CommandRegistrar;
 use crate::foundation::{Error, Result};
 use crate::http::{HttpRegistrar, RouteManifestEntry, RouteRegistrar};
+use crate::support::generated_manifest::{
+    clean_manifest_files as clean_generated_manifest_files, safe_manifest_path_with_extension,
+    write_manifest,
+};
 use crate::support::CommandId;
 
 const TYPES_EXPORT_COMMAND: CommandId = CommandId::new("types:export");
@@ -699,64 +703,17 @@ fn planned_output_files(ts_types: &[&TsType], app_enums: &[&TsAppEnum]) -> BTree
 }
 
 fn clean_manifest_files(dir: &Path, output_files: &BTreeSet<String>) -> Result<()> {
-    let mut files = read_export_manifest(dir);
-    files.extend(output_files.iter().cloned());
-
-    for file in files {
-        let Some(path) = generated_file_path(dir, &file) else {
-            tracing::warn!(
-                target: "forge.typescript",
-                file = %file,
-                "skipping unsafe generated TypeScript manifest path"
-            );
-            continue;
-        };
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::other(error)),
-        }
-    }
-
-    Ok(())
-}
-
-fn read_export_manifest(dir: &Path) -> BTreeSet<String> {
-    let path = dir.join(TYPES_EXPORT_MANIFEST);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return BTreeSet::new();
-    };
-    match serde_json::from_str::<Vec<String>>(&content) {
-        Ok(files) => files.into_iter().collect(),
-        Err(error) => {
-            tracing::warn!(
-                target: "forge.typescript",
-                path = %path.display(),
-                error = %error,
-                "ignoring invalid generated TypeScript manifest"
-            );
-            BTreeSet::new()
-        }
-    }
+    clean_generated_manifest_files(
+        dir,
+        TYPES_EXPORT_MANIFEST,
+        output_files,
+        "forge.typescript",
+        |file| safe_manifest_path_with_extension(file, "ts", false),
+    )
 }
 
 fn write_export_manifest(dir: &Path, output_files: &BTreeSet<String>) -> Result<()> {
-    let files: Vec<&str> = output_files.iter().map(String::as_str).collect();
-    let content = serde_json::to_string_pretty(&files).map_err(Error::other)?;
-    std::fs::write(dir.join(TYPES_EXPORT_MANIFEST), content).map_err(Error::other)
-}
-
-fn generated_file_path(dir: &Path, file: &str) -> Option<PathBuf> {
-    let path = Path::new(file);
-    if path.is_absolute()
-        || file.contains('/')
-        || file.contains('\\')
-        || file.chars().any(|ch| ch.is_control())
-        || path.extension().and_then(|ext| ext.to_str()) != Some("ts")
-    {
-        return None;
-    }
-    Some(dir.join(path))
+    write_manifest(dir, TYPES_EXPORT_MANIFEST, output_files)
 }
 
 fn collect_route_manifest(routes: &[RouteRegistrar]) -> Result<Vec<RouteManifestEntry>> {

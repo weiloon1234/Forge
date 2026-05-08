@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -240,6 +240,7 @@ impl PluginScaffold {
 
         let mut files = BTreeSet::new();
         for file in &self.files {
+            validate_relative_output_path(&file.path, "plugin scaffold")?;
             if !files.insert(file.path.clone()) {
                 return Err(Error::message(format!(
                     "plugin scaffold `{}` has duplicate file `{}`",
@@ -568,6 +569,7 @@ impl PluginRegistrar {
             .map(|asset| asset.id.clone())
             .collect::<BTreeSet<_>>();
         for asset in assets {
+            validate_relative_output_path(asset.target_path(), "plugin asset")?;
             if !ids.insert(asset.id.clone()) {
                 return Err(Error::message(format!(
                     "plugin asset `{}` already registered",
@@ -769,8 +771,12 @@ impl PluginRegistry {
         let mut written = Vec::new();
         for plugin in plugins {
             for asset in plugin.assets() {
-                let path = options.target_dir.join(asset.target_path());
-                write_output_file(&path, asset.contents(), options.force)?;
+                let path = write_output_file(
+                    &options.target_dir,
+                    asset.target_path(),
+                    asset.contents(),
+                    options.force,
+                )?;
                 written.push(path);
             }
         }
@@ -796,8 +802,12 @@ impl PluginRegistry {
         let rendered = scaffold.render(&options.values)?;
         let mut written = Vec::new();
         for (relative_path, contents) in rendered {
-            let path = options.target_dir.join(relative_path);
-            write_output_file(&path, &contents, options.force)?;
+            let path = write_output_file(
+                &options.target_dir,
+                &relative_path,
+                &contents,
+                options.force,
+            )?;
             written.push(path);
         }
         Ok(written)
@@ -1342,7 +1352,16 @@ fn default_target_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn write_output_file(path: &Path, contents: &[u8], force: bool) -> Result<()> {
+fn write_output_file(
+    target_dir: &Path,
+    relative_path: &Path,
+    contents: &[u8],
+    force: bool,
+) -> Result<PathBuf> {
+    validate_relative_output_path(relative_path, "plugin output")?;
+    reject_existing_output_symlinks(target_dir, relative_path)?;
+
+    let path = target_dir.join(relative_path);
     if path.exists() && !force {
         return Err(Error::message(format!(
             "refusing to overwrite existing file `{}` without `--force`",
@@ -1352,7 +1371,85 @@ fn write_output_file(path: &Path, contents: &[u8], force: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(Error::other)?;
     }
-    fs::write(path, contents).map_err(Error::other)
+    fs::write(&path, contents).map_err(Error::other)?;
+    Ok(path)
+}
+
+fn validate_relative_output_path(path: &Path, label: &str) -> Result<()> {
+    let display = path.display();
+    if path.as_os_str().is_empty() {
+        return Err(Error::message(format!("{label} path cannot be empty")));
+    }
+    if path.is_absolute() {
+        return Err(Error::message(format!(
+            "{label} path `{display}` must be relative"
+        )));
+    }
+
+    let raw = path
+        .to_str()
+        .ok_or_else(|| Error::message(format!("{label} path `{display}` must be valid UTF-8")))?;
+    if raw.contains('\\') {
+        return Err(Error::message(format!(
+            "{label} path `{display}` cannot contain backslash separators"
+        )));
+    }
+
+    let mut has_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                has_component = true;
+                let value = value.to_str().ok_or_else(|| {
+                    Error::message(format!(
+                        "{label} path `{display}` contains a non-UTF-8 component"
+                    ))
+                })?;
+                if value.chars().any(|ch| ch.is_control()) {
+                    return Err(Error::message(format!(
+                        "{label} path `{display}` cannot contain control characters"
+                    )));
+                }
+            }
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(Error::message(format!(
+                    "{label} path `{display}` must stay inside the target directory"
+                )));
+            }
+        }
+    }
+
+    if !has_component {
+        return Err(Error::message(format!("{label} path cannot be empty")));
+    }
+
+    Ok(())
+}
+
+fn reject_existing_output_symlinks(target_dir: &Path, relative_path: &Path) -> Result<()> {
+    let mut current = target_dir.to_path_buf();
+    for component in relative_path.components() {
+        let Component::Normal(value) = component else {
+            continue;
+        };
+        current.push(value);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::message(format!(
+                    "refusing to write plugin output through symlink `{}`",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(Error::other(error)),
+        }
+    }
+
+    Ok(())
 }
 
 fn render_template(template: &str, values: &BTreeMap<String, String>) -> Result<String> {
@@ -1677,6 +1774,62 @@ mod tests {
     }
 
     #[test]
+    fn rejects_plugin_asset_paths_outside_target_dir() {
+        let directory = tempdir().unwrap();
+        let outside = directory.path().join("outside.toml");
+        let registry = PluginRegistry::new(
+            vec![PluginManifest::new(
+                PluginId::new("forge.example"),
+                Version::parse("1.0.0").unwrap(),
+                VersionReq::parse("^0.1").unwrap(),
+            )
+            .with_assets_and_scaffolds(
+                vec![PluginAsset::text(
+                    PluginAssetId::new("escape"),
+                    PluginAssetKind::Config,
+                    "../outside.toml",
+                    "enabled = true\n",
+                )],
+                Vec::new(),
+            )],
+            HashMap::new(),
+        );
+
+        let error = registry
+            .install_assets(
+                &PluginInstallOptions::new()
+                    .plugin(PluginId::new("forge.example"))
+                    .target_dir(directory.path().join("app")),
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("must stay inside"),
+            "unexpected error: {error}"
+        );
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn rejects_plugin_asset_backslash_paths() {
+        let mut registrar = PluginRegistrar::new();
+        let error = registrar
+            .register_assets(vec![PluginAsset::text(
+                PluginAssetId::new("windows-path"),
+                PluginAssetKind::Config,
+                "config\\plugin.toml",
+                "enabled = true\n",
+            )])
+            .err()
+            .unwrap();
+
+        assert!(
+            error.to_string().contains("backslash"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn renders_scaffolds_with_validation() {
         let directory = tempdir().unwrap();
         let registry = PluginRegistry::new(
@@ -1727,6 +1880,103 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("unknown scaffold variable"));
+    }
+
+    #[test]
+    fn rejects_rendered_scaffold_paths_outside_target_dir() {
+        let directory = tempdir().unwrap();
+        let registry = PluginRegistry::new(
+            vec![PluginManifest::new(
+                PluginId::new("forge.example"),
+                Version::parse("1.0.0").unwrap(),
+                VersionReq::parse("^0.1").unwrap(),
+            )
+            .with_assets_and_scaffolds(
+                Vec::new(),
+                vec![PluginScaffold::new(PluginScaffoldId::new("portal"))
+                    .variable(PluginScaffoldVar::new("name"))
+                    .file("src/app/{{name}}.rs", "pub const NAME: &str = \"x\";\n")],
+            )],
+            HashMap::new(),
+        );
+
+        let error = registry
+            .render_scaffold(
+                &PluginScaffoldOptions::new(
+                    PluginId::new("forge.example"),
+                    PluginScaffoldId::new("portal"),
+                )
+                .set_var("name", "../../outside")
+                .target_dir(directory.path()),
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("must stay inside"),
+            "unexpected error: {error}"
+        );
+        assert!(!directory.path().join("outside.rs").exists());
+    }
+
+    #[test]
+    fn rejects_static_scaffold_paths_outside_target_dir_at_registration() {
+        let mut registrar = PluginRegistrar::new();
+        let error = registrar
+            .register_scaffolds(vec![
+                PluginScaffold::new(PluginScaffoldId::new("escape")).file("../outside.rs", "")
+            ])
+            .err()
+            .unwrap();
+
+        assert!(
+            error.to_string().contains("must stay inside"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_write_plugin_output_through_symlink() {
+        let directory = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("config")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            directory.path().join("config").join("linked"),
+        )
+        .unwrap();
+
+        let registry = PluginRegistry::new(
+            vec![PluginManifest::new(
+                PluginId::new("forge.example"),
+                Version::parse("1.0.0").unwrap(),
+                VersionReq::parse("^0.1").unwrap(),
+            )
+            .with_assets_and_scaffolds(
+                vec![PluginAsset::text(
+                    PluginAssetId::new("asset"),
+                    PluginAssetKind::Config,
+                    "config/linked/plugin.toml",
+                    "enabled = true\n",
+                )],
+                Vec::new(),
+            )],
+            HashMap::new(),
+        );
+
+        let error = registry
+            .install_assets(
+                &PluginInstallOptions::new()
+                    .plugin(PluginId::new("forge.example"))
+                    .target_dir(directory.path()),
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("through symlink"),
+            "unexpected error: {error}"
+        );
+        assert!(!outside.path().join("plugin.toml").exists());
     }
 
     struct ProviderPlugin {

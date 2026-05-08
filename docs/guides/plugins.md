@@ -373,6 +373,10 @@ cargo run -- plugin:scaffold --plugin admin --template admin-page --set model=pr
 cargo run -- admin:create
 ```
 
+Plugin asset and scaffold paths are always resolved inside the selected target directory. Forge
+rejects absolute paths, `..` traversal, Windows-style separators, control characters, and symlinked
+output paths before writing files.
+
 ```
 GET /admin/dashboard     → Admin dashboard (requires admin guard)
 GET /admin/users         → User listing

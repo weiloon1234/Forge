@@ -294,8 +294,8 @@ These are available automatically — no registration needed:
 | `token:prune` | Manually prune expired/revoked personal access tokens |
 | `attachment:orphans` | Audit or delete old attachment storage objects missing from the attachments table |
 | `plugin:list` | List plugins |
-| `plugin:install-assets` | Install plugin assets |
-| `plugin:scaffold` | Run plugin scaffold |
+| `plugin:install-assets` | Install plugin assets inside the selected target directory |
+| `plugin:scaffold` | Run plugin scaffold inside the selected target directory |
 | `docs:api` | Generate API surface docs |
 | `about` | Show framework version and environment |
 

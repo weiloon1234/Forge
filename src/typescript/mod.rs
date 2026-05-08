@@ -13,7 +13,7 @@
 //! ] as const;
 //! ```
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,6 +24,7 @@ use crate::http::{HttpRegistrar, RouteManifestEntry, RouteRegistrar};
 use crate::support::CommandId;
 
 const TYPES_EXPORT_COMMAND: CommandId = CommandId::new("types:export");
+const TYPES_EXPORT_MANIFEST: &str = ".forge-types-manifest.json";
 
 /// A registered TypeScript type exporter.
 pub struct TsType {
@@ -625,18 +626,13 @@ pub fn export_all(dir: &Path) -> Result<()> {
 pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Result<()> {
     std::fs::create_dir_all(dir).map_err(Error::other)?;
 
-    // Clean existing .ts files
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("ts") {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
+    let ts_types: Vec<&TsType> = inventory::iter::<TsType>.into_iter().collect();
+    let app_enums: Vec<&TsAppEnum> = inventory::iter::<TsAppEnum>.into_iter().collect();
+    let output_files = planned_output_files(&ts_types, &app_enums);
+    clean_manifest_files(dir, &output_files)?;
 
     let mut names: Vec<&str> = Vec::new();
-    for ts_type in inventory::iter::<TsType> {
+    for ts_type in ts_types {
         (ts_type.export_fn)(dir)
             .map_err(|e| Error::message(format!("ts export `{}`: {e}", ts_type.name)))?;
         names.push(ts_type.name);
@@ -646,7 +642,7 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
     // the metadata-based AppEnum export owns the final file content.
     let mut enum_names = HashSet::new();
     let mut grouped_enum_names = HashSet::new();
-    for app_enum in inventory::iter::<TsAppEnum> {
+    for app_enum in app_enums {
         let file_path = dir.join(format!("{}.ts", app_enum.name));
         let rendered = render_app_enum(app_enum.name, &(app_enum.meta_fn)())?;
         if rendered.has_groups {
@@ -682,10 +678,85 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
         "export { RouteManifest, RouteIds, createRouteUrlBuilder, routeUrl, type RouteName, type RouteParams, type RouteParamValue, type RouteUrlOptions } from \"./RouteManifest\";\n",
     );
     std::fs::write(dir.join("index.ts"), barrel).map_err(Error::other)?;
+    write_export_manifest(dir, &output_files)?;
 
     println!("Exported {} type(s) to {}", names.len(), dir.display());
 
     Ok(())
+}
+
+fn planned_output_files(ts_types: &[&TsType], app_enums: &[&TsAppEnum]) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for ts_type in ts_types {
+        files.insert(format!("{}.ts", ts_type.name));
+    }
+    for app_enum in app_enums {
+        files.insert(format!("{}.ts", app_enum.name));
+    }
+    files.insert("RouteManifest.ts".to_string());
+    files.insert("index.ts".to_string());
+    files
+}
+
+fn clean_manifest_files(dir: &Path, output_files: &BTreeSet<String>) -> Result<()> {
+    let mut files = read_export_manifest(dir);
+    files.extend(output_files.iter().cloned());
+
+    for file in files {
+        let Some(path) = generated_file_path(dir, &file) else {
+            tracing::warn!(
+                target: "forge.typescript",
+                file = %file,
+                "skipping unsafe generated TypeScript manifest path"
+            );
+            continue;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::other(error)),
+        }
+    }
+
+    Ok(())
+}
+
+fn read_export_manifest(dir: &Path) -> BTreeSet<String> {
+    let path = dir.join(TYPES_EXPORT_MANIFEST);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return BTreeSet::new();
+    };
+    match serde_json::from_str::<Vec<String>>(&content) {
+        Ok(files) => files.into_iter().collect(),
+        Err(error) => {
+            tracing::warn!(
+                target: "forge.typescript",
+                path = %path.display(),
+                error = %error,
+                "ignoring invalid generated TypeScript manifest"
+            );
+            BTreeSet::new()
+        }
+    }
+}
+
+fn write_export_manifest(dir: &Path, output_files: &BTreeSet<String>) -> Result<()> {
+    let files: Vec<&str> = output_files.iter().map(String::as_str).collect();
+    let content = serde_json::to_string_pretty(&files).map_err(Error::other)?;
+    std::fs::write(dir.join(TYPES_EXPORT_MANIFEST), content).map_err(Error::other)
+}
+
+fn generated_file_path(dir: &Path, file: &str) -> Option<PathBuf> {
+    let path = Path::new(file);
+    if path.is_absolute()
+        || file.contains('/')
+        || file.contains('\\')
+        || file.chars().any(|ch| ch.is_control())
+        || path.extension().and_then(|ext| ext.to_str()) != Some("ts")
+    {
+        return None;
+    }
+    Some(dir.join(path))
 }
 
 fn collect_route_manifest(routes: &[RouteRegistrar]) -> Result<Vec<RouteManifestEntry>> {
@@ -744,6 +815,7 @@ mod tests {
     use super::export_all_with_routes;
     use super::render_app_enum;
     use super::render_route_manifest;
+    use super::TYPES_EXPORT_MANIFEST;
 
     #[derive(Clone, Debug, PartialEq, Eq, crate::AppEnum)]
     enum MinimalExportStatus {
@@ -1058,6 +1130,45 @@ mod tests {
             route_manifest.contains("export const RouteIds = {} as const;"),
             "expected empty route ids when no routes were exported:\n{route_manifest}"
         );
+    }
+
+    #[test]
+    fn export_preserves_unmanaged_typescript_files() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("manual.ts"),
+            "export const manual = true;\n",
+        )
+        .unwrap();
+
+        export_all(dir.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("manual.ts")).unwrap(),
+            "export const manual = true;\n"
+        );
+        assert!(dir.path().join(TYPES_EXPORT_MANIFEST).exists());
+    }
+
+    #[test]
+    fn export_removes_stale_files_from_previous_manifest() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("StaleGenerated.ts"), "stale\n").unwrap();
+        fs::write(
+            dir.path().join(TYPES_EXPORT_MANIFEST),
+            serde_json::to_string(&vec!["StaleGenerated.ts"]).unwrap(),
+        )
+        .unwrap();
+
+        export_all(dir.path()).unwrap();
+
+        assert!(!dir.path().join("StaleGenerated.ts").exists());
+        let manifest: Vec<String> = serde_json::from_str(
+            &fs::read_to_string(dir.path().join(TYPES_EXPORT_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest.iter().any(|file| file == "index.ts"));
+        assert!(manifest.iter().any(|file| file == "RouteManifest.ts"));
     }
 
     #[test]

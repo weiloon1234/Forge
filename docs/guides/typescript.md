@@ -54,7 +54,10 @@ make types
 import type { CreateOrderRequest, OrderStatus } from "@shared/types/generated";
 ```
 
-The configured `typescript.output_dir` is the supported frontend import path. If you see raw ts-rs files in a root `bindings/` directory, treat them as manual or stale output rather than a second source of truth.
+The configured `typescript.output_dir` is the supported frontend import path. `types:export`
+tracks Forge-owned output in `.forge-types-manifest.json` and cleans only those generated files on
+later runs, so colocated manual `.ts` files are not deleted. If you see raw ts-rs files in a root
+`bindings/` directory, treat them as manual or stale output rather than a second source of truth.
 
 ---
 

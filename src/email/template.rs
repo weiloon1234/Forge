@@ -34,6 +34,8 @@ impl TemplateRenderer {
         template_name: &str,
         variables: &serde_json::Value,
     ) -> Result<RenderedTemplate> {
+        validate_template_name(template_name)?;
+
         let html_path = self.base_path.join(format!("{template_name}.html"));
         let text_path = self.base_path.join(format!("{template_name}.txt"));
 
@@ -73,10 +75,38 @@ impl TemplateRenderer {
 
     /// Check if a template exists (either .html or .txt variant).
     pub fn exists(&self, template_name: &str) -> bool {
+        if validate_template_name(template_name).is_err() {
+            return false;
+        }
+
         let html_path = self.base_path.join(format!("{template_name}.html"));
         let text_path = self.base_path.join(format!("{template_name}.txt"));
         html_path.exists() || text_path.exists()
     }
+}
+
+fn validate_template_name(template_name: &str) -> Result<()> {
+    if template_name.is_empty() {
+        return Err(Error::message("email template name cannot be empty"));
+    }
+    if template_name.contains('\\') {
+        return Err(Error::message(
+            "email template name cannot contain backslash separators",
+        ));
+    }
+    if template_name.chars().any(|ch| ch.is_control()) {
+        return Err(Error::message(
+            "email template name cannot contain control characters",
+        ));
+    }
+    for segment in template_name.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(Error::message(
+                "email template name must be a safe relative template path",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Result of rendering an email template.
@@ -163,5 +193,22 @@ mod tests {
         let vars = json!({"name": "Alice"});
         let result = replace_variables(content, &vars);
         assert_eq!(result, "Hello Alice!");
+    }
+
+    #[test]
+    fn template_names_reject_traversal_and_unsafe_paths() {
+        let renderer = TemplateRenderer::new("templates/emails");
+
+        assert!(renderer.render("../secret", &json!({})).is_err());
+        assert!(!renderer.exists("../secret"));
+        assert!(renderer.render("/absolute", &json!({})).is_err());
+        assert!(renderer.render("auth\\welcome", &json!({})).is_err());
+        assert!(renderer.render("auth//welcome", &json!({})).is_err());
+    }
+
+    #[test]
+    fn nested_relative_template_names_are_allowed() {
+        assert!(validate_template_name("auth/welcome").is_ok());
+        assert!(validate_template_name("marketing/order_shipped").is_ok());
     }
 }

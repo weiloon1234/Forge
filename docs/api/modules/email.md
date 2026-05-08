@@ -38,6 +38,7 @@ enum EmailAttachment { Path, Storage }
   fn with_name(self, name: impl Into<String>) -> Self
   fn with_content_type(self, ct: impl Into<String>) -> Self
   fn name(&self) -> Option<&str>
+  fn content_type(&self) -> Option<&str>
   fn path(&self) -> &str
 struct ResolvedAttachment
 ```

@@ -3,7 +3,9 @@ use std::path::Path;
 use crate::foundation::{AppContext, Error, Result};
 use crate::storage::StorageManager;
 
-use super::address::EmailAddress;
+use crate::support::filename::sanitize_filename;
+
+use super::address::{validate_address, EmailAddress};
 use super::attachment::{EmailAttachment, ResolvedAttachment};
 use super::config::EmailFromConfig;
 use super::driver::OutboundEmail;
@@ -97,7 +99,7 @@ impl EmailMailer {
             attachments.push(self.resolve_attachment(att).await?);
         }
 
-        Ok(OutboundEmail {
+        let outbound = OutboundEmail {
             from,
             to: message.to,
             cc: message.cc,
@@ -108,7 +110,9 @@ impl EmailMailer {
             html_body: message.html_body,
             headers: message.headers,
             attachments,
-        })
+        };
+        validate_outbound_email(&outbound)?;
+        Ok(outbound)
     }
 
     async fn resolve_attachment(&self, att: &EmailAttachment) -> Result<ResolvedAttachment> {
@@ -142,8 +146,11 @@ impl EmailMailer {
                 )
             }
         };
-        let name = att.name().unwrap_or(&fallback_name).to_string();
-        let content_type = infer_content_type(&name);
+        let name = sanitize_filename(att.name().unwrap_or(&fallback_name), "attachment", 255);
+        let content_type = match att.content_type() {
+            Some(content_type) => validate_content_type(content_type)?.to_string(),
+            None => infer_content_type(&name),
+        };
         Ok(ResolvedAttachment {
             content,
             name,
@@ -152,8 +159,79 @@ impl EmailMailer {
     }
 }
 
+fn validate_outbound_email(email: &OutboundEmail) -> Result<()> {
+    validate_address(&email.from, "from")?;
+    for addr in &email.to {
+        validate_address(addr, "to")?;
+    }
+    for addr in &email.cc {
+        validate_address(addr, "cc")?;
+    }
+    for addr in &email.bcc {
+        validate_address(addr, "bcc")?;
+    }
+    for addr in &email.reply_to {
+        validate_address(addr, "reply-to")?;
+    }
+
+    validate_header_value("subject", &email.subject)?;
+    for (name, value) in &email.headers {
+        validate_header_name(name)?;
+        validate_header_value(name, value)?;
+    }
+    for attachment in &email.attachments {
+        validate_header_value("attachment filename", &attachment.name)?;
+        validate_content_type(&attachment.content_type)?;
+    }
+
+    Ok(())
+}
+
+fn validate_header_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::message("email header name cannot be empty"));
+    }
+    if !name
+        .bytes()
+        .all(|byte| matches!(byte, b'!' | b'#'..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'0'..=b'9' | b'A'..=b'Z' | b'^' | b'_' | b'`' | b'a'..=b'z' | b'|' | b'~'))
+    {
+        return Err(Error::message(format!(
+            "invalid email header name `{name}`: names must be ASCII header token characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_header_value(field: &str, value: &str) -> Result<()> {
+    if value.chars().any(|ch| matches!(ch, '\r' | '\n')) {
+        return Err(Error::message(format!(
+            "email {field} cannot contain CR/LF characters"
+        )));
+    }
+    if value.chars().any(|ch| ch.is_control() && ch != '\t') {
+        return Err(Error::message(format!(
+            "email {field} cannot contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_content_type(content_type: &str) -> Result<&str> {
+    validate_header_value("content type", content_type)?;
+    let content_type = content_type.trim();
+    if content_type.is_empty() {
+        return Err(Error::message("email content type cannot be empty"));
+    }
+    Ok(content_type)
+}
+
 fn infer_content_type(name: &str) -> String {
-    match Path::new(name).extension().and_then(|e| e.to_str()) {
+    match Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("pdf") => "application/pdf",
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
@@ -171,6 +249,24 @@ fn infer_content_type(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::foundation::{AppContext, Container};
+    use crate::validation::RuleRegistry;
+    use std::collections::BTreeMap;
+
+    fn outbound_email() -> OutboundEmail {
+        OutboundEmail {
+            from: EmailAddress::with_name("sender@example.com", "Sender"),
+            to: vec![EmailAddress::new("recipient@example.com")],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            reply_to: Vec::new(),
+            subject: "Hello".to_string(),
+            text_body: Some("Body".to_string()),
+            html_body: None,
+            headers: BTreeMap::new(),
+            attachments: Vec::new(),
+        }
+    }
 
     #[test]
     fn infer_content_type_known_extensions() {
@@ -188,5 +284,72 @@ mod tests {
     fn infer_content_type_unknown_extension() {
         assert_eq!(infer_content_type("file.xyz"), "application/octet-stream");
         assert_eq!(infer_content_type("file"), "application/octet-stream");
+    }
+
+    #[test]
+    fn outbound_email_validation_rejects_header_injection() {
+        let mut email = outbound_email();
+        email.subject = "Hello\r\nBcc: victim@example.com".to_string();
+        assert!(validate_outbound_email(&email)
+            .unwrap_err()
+            .to_string()
+            .contains("subject"));
+
+        let mut email = outbound_email();
+        email
+            .headers
+            .insert("X-Bad\r\nHeader".to_string(), "value".to_string());
+        assert!(validate_outbound_email(&email)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid email header name"));
+
+        let mut email = outbound_email();
+        email
+            .headers
+            .insert("X-Custom".to_string(), "ok\r\nbad".to_string());
+        assert!(validate_outbound_email(&email)
+            .unwrap_err()
+            .to_string()
+            .contains("X-Custom"));
+    }
+
+    #[test]
+    fn outbound_email_validation_rejects_invalid_addresses() {
+        let mut email = outbound_email();
+        email.to = vec![EmailAddress::new("bad\r\nto@example.com")];
+
+        assert!(validate_outbound_email(&email)
+            .unwrap_err()
+            .to_string()
+            .contains("email to address"));
+    }
+
+    #[test]
+    fn attachment_names_are_sanitized_and_custom_content_type_is_respected() {
+        let path =
+            std::env::temp_dir().join(format!("forge-email-attachment-{}.pdf", std::process::id()));
+        std::fs::write(&path, b"pdf").unwrap();
+        let attachment = EmailAttachment::from_path(path.to_string_lossy().to_string())
+            .with_name("../unsafe\r\nname.PDF")
+            .with_content_type("application/custom");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let resolved = runtime.block_on(async {
+            let app = AppContext::new(
+                Container::new(),
+                crate::config::ConfigRepository::empty(),
+                RuleRegistry::new(),
+            )
+            .unwrap();
+            EmailMailer::new(app, None)
+                .resolve_attachment(&attachment)
+                .await
+        });
+
+        let resolved = resolved.unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(resolved.name, "unsafename.PDF");
+        assert_eq!(resolved.content_type, "application/custom");
     }
 }

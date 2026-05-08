@@ -51,6 +51,9 @@ let msg = EmailMessage::new("Your order shipped")
 ```
 
 Dot-notation works for nested values: `{{tracking.number}}`.
+Template names are safe relative names under the configured template directory.
+Nested names such as `auth/welcome` are allowed, while absolute paths,
+traversal segments, backslashes, and control characters are rejected.
 
 ### Attachments
 
@@ -68,6 +71,12 @@ let msg = EmailMessage::new("Contract")
     .attach(EmailAttachment::from_storage("s3", "documents/contract.pdf")
         .with_name("contract.pdf"));
 ```
+
+Outbound email is validated before delivery. Forge rejects CR/LF injection in
+subjects, headers, attachment filenames, and addresses; attachment display names
+are sanitized before provider delivery. Custom headers must use valid HTTP-style
+header token names, and custom attachment content types must be non-empty and
+free of control characters.
 
 ### Sending vs Queueing
 

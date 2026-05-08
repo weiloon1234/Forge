@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::foundation::{Error, Result};
 
-use super::address::EmailAddress;
+use super::address::format_address;
 use super::config::ResolvedMailgunConfig;
 use super::driver::{EmailDriver, OutboundEmail};
 
@@ -91,13 +91,6 @@ impl EmailDriver for MailgunEmailDriver {
         }
 
         Ok(())
-    }
-}
-
-fn format_address(addr: &EmailAddress) -> String {
-    match addr.name() {
-        Some(name) => format!("{name} <{}>", addr.address()),
-        None => addr.address().to_string(),
     }
 }
 

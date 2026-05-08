@@ -62,6 +62,14 @@ impl EmailAttachment {
         }
     }
 
+    pub fn content_type(&self) -> Option<&str> {
+        match self {
+            Self::Path { content_type, .. } | Self::Storage { content_type, .. } => {
+                content_type.as_deref()
+            }
+        }
+    }
+
     pub fn path(&self) -> &str {
         match self {
             Self::Path { path, .. } | Self::Storage { path, .. } => path,

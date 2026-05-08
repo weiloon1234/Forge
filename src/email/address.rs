@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+
+use crate::foundation::{Error, Result};
 
 /// An email address with an optional display name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,11 +47,63 @@ impl From<String> for EmailAddress {
 
 impl std::fmt::Display for EmailAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.name {
-            Some(name) => write!(f, "{} <{}>", name, self.address),
-            None => write!(f, "{}", self.address),
+        f.write_str(&format_address(self))
+    }
+}
+
+pub(crate) fn validate_address(addr: &EmailAddress, field: &str) -> Result<()> {
+    if contains_forbidden_email_control(addr.address()) {
+        return Err(Error::message(format!(
+            "email {field} address contains control characters"
+        )));
+    }
+    lettre::Address::from_str(addr.address()).map_err(|error| {
+        Error::message(format!(
+            "invalid email {field} address '{}': {error}",
+            addr.address()
+        ))
+    })?;
+
+    if let Some(name) = addr.name() {
+        if contains_forbidden_email_control(name) {
+            return Err(Error::message(format!(
+                "email {field} display name contains control characters"
+            )));
         }
     }
+
+    Ok(())
+}
+
+pub(crate) fn format_address(addr: &EmailAddress) -> String {
+    match addr.name() {
+        Some(name) if !name.is_empty() => {
+            format!("{} <{}>", format_display_name(name), addr.address())
+        }
+        _ => addr.address().to_string(),
+    }
+}
+
+fn format_display_name(name: &str) -> String {
+    if !needs_quoted_display_name(name) {
+        return name.to_string();
+    }
+
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+fn needs_quoted_display_name(name: &str) -> bool {
+    name.chars().any(|ch| {
+        matches!(
+            ch,
+            '"' | '\\' | '(' | ')' | '<' | '>' | ',' | ';' | ':' | '@' | '[' | ']'
+        )
+    })
+}
+
+fn contains_forbidden_email_control(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_control() && ch != '\t')
 }
 
 #[cfg(test)]
@@ -80,6 +135,24 @@ mod tests {
     fn email_address_display_with_name() {
         let email = EmailAddress::with_name("test@example.com", "Test User");
         assert_eq!(email.to_string(), "Test User <test@example.com>");
+    }
+
+    #[test]
+    fn format_address_quotes_special_display_names() {
+        let email = EmailAddress::with_name("test@example.com", "User, Example");
+        assert_eq!(email.to_string(), "\"User, Example\" <test@example.com>");
+    }
+
+    #[test]
+    fn validate_address_rejects_invalid_addresses_and_control_names() {
+        let invalid = EmailAddress::new("bad\r\nbcc@example.com");
+        assert!(validate_address(&invalid, "to").is_err());
+
+        let invalid = EmailAddress::with_name("test@example.com", "Bad\nName");
+        assert!(validate_address(&invalid, "from").is_err());
+
+        let valid = EmailAddress::with_name("test@example.com", "Test User");
+        assert!(validate_address(&valid, "from").is_ok());
     }
 
     #[test]

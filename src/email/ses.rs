@@ -7,7 +7,7 @@ use sha2::Sha256;
 use crate::foundation::{Error, Result};
 use crate::support::sha256::{hex_encode, sha256_hex};
 
-use super::address::EmailAddress;
+use super::address::format_address;
 use super::config::ResolvedSesConfig;
 use super::driver::{EmailDriver, OutboundEmail};
 
@@ -142,13 +142,6 @@ impl EmailDriver for SesEmailDriver {
         }
 
         Ok(())
-    }
-}
-
-fn format_address(addr: &EmailAddress) -> String {
-    match addr.name() {
-        Some(name) => format!("{name} <{}>", addr.address()),
-        None => addr.address().to_string(),
     }
 }
 

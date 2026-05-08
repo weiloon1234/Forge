@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::foundation::{Error, Result};
 
-use super::address::EmailAddress;
+use super::address::format_address;
 use super::config::ResolvedPostmarkConfig;
 use super::driver::{EmailDriver, OutboundEmail};
 
@@ -130,13 +130,6 @@ impl EmailDriver for PostmarkEmailDriver {
     }
 }
 
-fn format_address(addr: &EmailAddress) -> String {
-    match addr.name() {
-        Some(name) => format!("{name} <{}>", addr.address()),
-        None => addr.address().to_string(),
-    }
-}
-
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
@@ -145,6 +138,7 @@ fn base64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::email::EmailAddress;
 
     #[test]
     fn format_address_with_name() {

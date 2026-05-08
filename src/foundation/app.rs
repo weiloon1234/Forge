@@ -1266,6 +1266,7 @@ impl AppBuilder {
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());
             boot_commands.push(crate::auth::builtin_cli_registrar());
+            boot_commands.push(crate::attachments::builtin_cli_registrar());
         }
         if !prepared_plugins.registry.is_empty() {
             boot_commands.push(crate::plugin::builtin_cli_registrar());

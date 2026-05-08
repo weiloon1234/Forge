@@ -643,6 +643,7 @@ pub struct Worker {
     history_prune: Arc<Mutex<JobHistoryPruneState>>,
     auth_prune: Arc<Mutex<AuthCredentialPruneState>>,
     upload_temp_prune: Arc<Mutex<UploadTempPruneState>>,
+    attachment_orphan_prune: Arc<Mutex<AttachmentOrphanPruneState>>,
 }
 
 #[derive(Default)]
@@ -659,6 +660,11 @@ struct AuthCredentialPruneState {
 
 #[derive(Default)]
 struct UploadTempPruneState {
+    last_attempt: Option<Instant>,
+}
+
+#[derive(Default)]
+struct AttachmentOrphanPruneState {
     last_attempt: Option<Instant>,
 }
 
@@ -680,6 +686,7 @@ impl Worker {
             history_prune: Arc::new(Mutex::new(JobHistoryPruneState::default())),
             auth_prune: Arc::new(Mutex::new(AuthCredentialPruneState::default())),
             upload_temp_prune: Arc::new(Mutex::new(UploadTempPruneState::default())),
+            attachment_orphan_prune: Arc::new(Mutex::new(AttachmentOrphanPruneState::default())),
         })
     }
 
@@ -745,6 +752,7 @@ impl Worker {
                         maintenance_worker.prune_job_history_if_due().await;
                         maintenance_worker.prune_auth_credentials_if_due().await;
                         maintenance_worker.prune_upload_temp_files_if_due().await;
+                        maintenance_worker.prune_attachment_orphans_if_due().await;
                     }
                 }
             }
@@ -1116,6 +1124,70 @@ impl Worker {
         true
     }
 
+    async fn prune_attachment_orphans_if_due(&self) {
+        let storage = match self.app.config().storage() {
+            Ok(storage) => storage,
+            Err(error) => {
+                tracing::warn!(
+                    target: "forge.worker",
+                    error = %error,
+                    "failed to load storage config for attachment orphan audit"
+                );
+                return;
+            }
+        };
+
+        if !storage.attachment_orphan_audit_enabled
+            || storage.attachment_orphan_prune_batch_size == 0
+            || !self.attachment_orphan_prune_due(storage.attachment_orphan_prune_interval_ms)
+        {
+            return;
+        }
+
+        let options = crate::attachments::AttachmentOrphanOptions {
+            disk: None,
+            prefix: storage.attachment_orphan_prefix.clone(),
+            limit: storage.attachment_orphan_prune_batch_size as usize,
+            older_than_seconds: storage.attachment_orphan_retention_seconds,
+            delete: storage.attachment_orphan_delete_enabled,
+        };
+
+        match crate::attachments::audit_attachment_orphans_with_lock(&self.app, options).await {
+            Ok(Some(report)) if report.candidate_count > 0 || report.deleted_count > 0 => {
+                tracing::info!(
+                    target: "forge.worker",
+                    candidates = report.candidate_count,
+                    deleted = report.deleted_count,
+                    delete_enabled = storage.attachment_orphan_delete_enabled,
+                    "attachment orphan maintenance complete"
+                );
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) => tracing::warn!(
+                target: "forge.worker",
+                error = %error,
+                "failed to audit attachment orphans"
+            ),
+        }
+    }
+
+    fn attachment_orphan_prune_due(&self, interval_ms: u64) -> bool {
+        let interval = Duration::from_millis(interval_ms.max(1));
+        let now = Instant::now();
+        let mut state = lock_unpoisoned(
+            &self.attachment_orphan_prune,
+            "attachment orphan prune state",
+        );
+        if state
+            .last_attempt
+            .is_some_and(|last| now.duration_since(last) < interval)
+        {
+            return false;
+        }
+        state.last_attempt = Some(now);
+        true
+    }
+
     pub async fn run_once(&self) -> Result<bool> {
         let now_millis = Utc::now().timestamp_millis();
         let promoted = self.runtime.promote_due_jobs(now_millis).await?;
@@ -1123,6 +1195,7 @@ impl Worker {
         self.prune_job_history_if_due().await;
         self.prune_auth_credentials_if_due().await;
         self.prune_upload_temp_files_if_due().await;
+        self.prune_attachment_orphans_if_due().await;
         for _ in 0..requeued {
             self.diagnostics
                 .record_job_outcome(RecordedJobOutcome::ExpiredLeaseRequeued);

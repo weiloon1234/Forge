@@ -16,6 +16,16 @@ pub struct StorageConfig {
     pub upload_temp_retention_seconds: u64,
     pub upload_temp_prune_interval_ms: u64,
     pub upload_temp_prune_batch_size: u64,
+    pub image_max_input_bytes: u64,
+    pub image_max_pixels: u64,
+    pub image_max_width: u64,
+    pub image_max_height: u64,
+    pub attachment_orphan_audit_enabled: bool,
+    pub attachment_orphan_delete_enabled: bool,
+    pub attachment_orphan_retention_seconds: u64,
+    pub attachment_orphan_prune_interval_ms: u64,
+    pub attachment_orphan_prune_batch_size: u64,
+    pub attachment_orphan_prefix: String,
     #[serde(default)]
     pub disks: BTreeMap<String, toml::Table>,
 }
@@ -30,6 +40,16 @@ impl Default for StorageConfig {
             upload_temp_retention_seconds: 3600,
             upload_temp_prune_interval_ms: 3_600_000,
             upload_temp_prune_batch_size: 1000,
+            image_max_input_bytes: 52_428_800,
+            image_max_pixels: 50_000_000,
+            image_max_width: 12_000,
+            image_max_height: 12_000,
+            attachment_orphan_audit_enabled: true,
+            attachment_orphan_delete_enabled: false,
+            attachment_orphan_retention_seconds: 604_800,
+            attachment_orphan_prune_interval_ms: 3_600_000,
+            attachment_orphan_prune_batch_size: 100,
+            attachment_orphan_prefix: "attachments/".to_string(),
             disks: BTreeMap::new(),
         }
     }
@@ -156,6 +176,16 @@ mod tests {
         assert_eq!(config.upload_temp_retention_seconds, 3600);
         assert_eq!(config.upload_temp_prune_interval_ms, 3_600_000);
         assert_eq!(config.upload_temp_prune_batch_size, 1000);
+        assert_eq!(config.image_max_input_bytes, 52_428_800);
+        assert_eq!(config.image_max_pixels, 50_000_000);
+        assert_eq!(config.image_max_width, 12_000);
+        assert_eq!(config.image_max_height, 12_000);
+        assert!(config.attachment_orphan_audit_enabled);
+        assert!(!config.attachment_orphan_delete_enabled);
+        assert_eq!(config.attachment_orphan_retention_seconds, 604_800);
+        assert_eq!(config.attachment_orphan_prune_interval_ms, 3_600_000);
+        assert_eq!(config.attachment_orphan_prune_batch_size, 100);
+        assert_eq!(config.attachment_orphan_prefix, "attachments/");
         assert!(config.disks.is_empty());
     }
 
@@ -169,6 +199,16 @@ mod tests {
             upload_temp_retention_seconds = 900
             upload_temp_prune_interval_ms = 60000
             upload_temp_prune_batch_size = 50
+            image_max_input_bytes = 1024
+            image_max_pixels = 2000000
+            image_max_width = 2000
+            image_max_height = 1000
+            attachment_orphan_audit_enabled = false
+            attachment_orphan_delete_enabled = true
+            attachment_orphan_retention_seconds = 120
+            attachment_orphan_prune_interval_ms = 30000
+            attachment_orphan_prune_batch_size = 25
+            attachment_orphan_prefix = "tenant-a/attachments/"
 
             [disks.local]
             root = "/tmp/storage"
@@ -183,6 +223,16 @@ mod tests {
         assert_eq!(config.upload_temp_retention_seconds, 900);
         assert_eq!(config.upload_temp_prune_interval_ms, 60_000);
         assert_eq!(config.upload_temp_prune_batch_size, 50);
+        assert_eq!(config.image_max_input_bytes, 1024);
+        assert_eq!(config.image_max_pixels, 2_000_000);
+        assert_eq!(config.image_max_width, 2_000);
+        assert_eq!(config.image_max_height, 1_000);
+        assert!(!config.attachment_orphan_audit_enabled);
+        assert!(config.attachment_orphan_delete_enabled);
+        assert_eq!(config.attachment_orphan_retention_seconds, 120);
+        assert_eq!(config.attachment_orphan_prune_interval_ms, 30_000);
+        assert_eq!(config.attachment_orphan_prune_batch_size, 25);
+        assert_eq!(config.attachment_orphan_prefix, "tenant-a/attachments/");
         assert!(config.disks.contains_key("local"));
 
         let local_table = &config.disks["local"];

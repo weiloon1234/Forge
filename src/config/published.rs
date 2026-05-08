@@ -856,6 +856,86 @@ const STORAGE_FIELDS: &[PublishedField] = &[
         false,
         Some("Max upload temp files deleted per prune pass"),
     ),
+    field(
+        "image_max_input_bytes",
+        "52428800",
+        "52428800",
+        false,
+        false,
+        Some("Max image bytes decoded by attachment processing (0 = disabled)"),
+    ),
+    field(
+        "image_max_pixels",
+        "50000000",
+        "50000000",
+        false,
+        false,
+        Some("Max decoded image pixels for attachment processing (0 = disabled)"),
+    ),
+    field(
+        "image_max_width",
+        "12000",
+        "12000",
+        false,
+        false,
+        Some("Max decoded image width for attachment processing (0 = disabled)"),
+    ),
+    field(
+        "image_max_height",
+        "12000",
+        "12000",
+        false,
+        false,
+        Some("Max decoded image height for attachment processing (0 = disabled)"),
+    ),
+    field(
+        "attachment_orphan_audit_enabled",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Audit old storage objects under attachment_orphan_prefix during worker maintenance"),
+    ),
+    field(
+        "attachment_orphan_delete_enabled",
+        "false",
+        "false",
+        false,
+        false,
+        Some("Allow Forge to delete audited attachment orphans (off by default)"),
+    ),
+    field(
+        "attachment_orphan_retention_seconds",
+        "604800",
+        "604800",
+        false,
+        false,
+        Some("Only audit/delete attachment orphans older than this age"),
+    ),
+    field(
+        "attachment_orphan_prune_interval_ms",
+        "3600000",
+        "3600000",
+        false,
+        false,
+        Some("How often workers attempt attachment orphan audit/delete"),
+    ),
+    field(
+        "attachment_orphan_prune_batch_size",
+        "100",
+        "100",
+        false,
+        false,
+        Some("Max listed attachment objects checked per maintenance pass"),
+    ),
+    field(
+        "attachment_orphan_prefix",
+        "\"attachments/\"",
+        "attachments/",
+        false,
+        false,
+        Some("Storage prefix owned by Forge attachments for orphan audit/delete"),
+    ),
 ];
 
 const PUBLISHED_SECTIONS: &[PublishedSection] = &[
@@ -1480,8 +1560,16 @@ mod tests {
             output.contains("# max_upload_files = 0  # Max uploaded files per multipart request")
         );
         assert!(output.contains("# upload_temp_retention_seconds = 3600"));
+        assert!(output.contains("# image_max_input_bytes = 52428800"));
+        assert!(output.contains("# image_max_pixels = 50000000"));
+        assert!(output.contains("# attachment_orphan_audit_enabled = true"));
+        assert!(output.contains("# attachment_orphan_delete_enabled = false"));
+        assert!(output.contains("# attachment_orphan_prefix = \"attachments/\""));
         assert!(env.contains("# STORAGE__MAX_UPLOAD_SIZE_BYTES=0"));
         assert!(env.contains("# STORAGE__UPLOAD_TEMP_RETENTION_SECONDS=3600"));
+        assert!(env.contains("# STORAGE__IMAGE_MAX_INPUT_BYTES=52428800"));
+        assert!(env.contains("# STORAGE__ATTACHMENT_ORPHAN_AUDIT_ENABLED=true"));
+        assert!(env.contains("# STORAGE__ATTACHMENT_ORPHAN_PREFIX=attachments/"));
     }
 
     fn config_repository_root_sections() -> BTreeSet<String> {

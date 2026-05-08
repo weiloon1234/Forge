@@ -215,6 +215,14 @@ impl StorageManager {
     ) -> Result<String> {
         self.default_disk()?.temporary_url(path, expires_at).await
     }
+
+    pub async fn list_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<stored_file::StorageObject>> {
+        self.default_disk()?.list_prefix(prefix, limit).await
+    }
 }
 
 pub use adapter::{StorageAdapter, StorageVisibility};
@@ -223,7 +231,7 @@ pub use disk::StorageDisk;
 pub use local::LocalStorageAdapter;
 pub use multipart::MultipartForm;
 pub use s3::S3StorageAdapter;
-pub use stored_file::StoredFile;
+pub use stored_file::{StorageObject, StoredFile};
 pub use upload::{scope_upload_limits, UploadCounters, UploadLimits, UploadedFile};
 
 #[cfg(test)]

@@ -190,6 +190,8 @@ Attachment::upload(uploaded_file)
 
 Image specs reject invalid image uploads with `invalid_attachment_image`. If `.upscale(false)` is set on a fixed resize and the uploaded image is too small, Forge returns `attachment_image_too_small`.
 
+Forge also applies storage-level image decode safety limits from `[storage]` before attachment image transforms run. The defaults are intentionally generous; apps can lower them for stricter upload policies without changing `HasAttachments` or model code.
+
 ### Querying Attachments
 
 ```rust
@@ -313,6 +315,8 @@ product.detach_keep_file(&app, &attachment.id).await?;
 // Delete all in a collection
 product.detach_all(&app, "images").await?;
 ```
+
+Forge worker maintenance audits old objects under `storage.attachment_orphan_prefix` and compares them with `attachments.disk/path`. Candidates are logged by default; deletion requires `storage.attachment_orphan_delete_enabled = true` so shared buckets are not cleaned accidentally. Operators can run the same audit with `cargo run -- attachment:orphans`.
 
 ### Collections
 

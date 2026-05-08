@@ -119,8 +119,8 @@ pub use crate::redis::{RedisChannel, RedisConnection, RedisKey, RedisManager};
 pub use crate::scheduler::{CronExpression, ScheduleInvocation, ScheduleOptions, ScheduleRegistry};
 pub use crate::storage::{
     LocalStorageAdapter, MultipartForm, S3StorageAdapter, StorageAdapter, StorageConfig,
-    StorageDisk, StorageManager, StorageVisibility, StoredFile, UploadCounters, UploadLimits,
-    UploadedFile,
+    StorageDisk, StorageManager, StorageObject, StorageVisibility, StoredFile, UploadCounters,
+    UploadLimits, UploadedFile,
 };
 pub use crate::support::lock::{DistributedLock, LockGuard};
 pub use crate::support::{

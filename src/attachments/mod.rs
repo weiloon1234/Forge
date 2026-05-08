@@ -1,7 +1,9 @@
 mod callback;
+mod orphans;
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::io::Cursor;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -13,10 +15,14 @@ use crate::database::extensions::{
 use crate::database::{DbType, DbValue, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
 use crate::imaging::ImageFormat;
-use crate::storage::UploadedFile;
+use crate::storage::{StorageConfig, UploadedFile};
 use crate::support::DateTime;
 
 const LOCALIZED_COLLECTION_SEPARATOR: &str = ":";
+
+pub(crate) use orphans::{
+    audit_attachment_orphans_with_lock, builtin_cli_registrar, AttachmentOrphanOptions,
+};
 
 /// A file attachment record from the `attachments` table.
 #[derive(Clone, Debug)]
@@ -536,11 +542,14 @@ impl AttachmentUploadBuilder {
             process_image_bytes(
                 &bytes,
                 self.file.original_name.as_deref(),
-                &self.image_transforms,
-                self.output_format,
-                self.quality,
-                self.allow_upscale,
-                self.require_image,
+                &ImageProcessingOptions {
+                    transforms: &self.image_transforms,
+                    output_format: self.output_format,
+                    quality: self.quality,
+                    allow_upscale: self.allow_upscale,
+                    require_image: self.require_image,
+                    safety_limits: ImageSafetyLimits::from_storage_config(&app.config().storage()?),
+                },
             )?
         } else {
             None
@@ -901,6 +910,80 @@ struct ProcessedImage {
     format: ImageFormat,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ImageSafetyLimits {
+    max_input_bytes: u64,
+    max_pixels: u64,
+    max_width: u64,
+    max_height: u64,
+}
+
+impl ImageSafetyLimits {
+    fn from_storage_config(config: &StorageConfig) -> Self {
+        Self {
+            max_input_bytes: config.image_max_input_bytes,
+            max_pixels: config.image_max_pixels,
+            max_width: config.image_max_width,
+            max_height: config.image_max_height,
+        }
+    }
+
+    fn validate_input_bytes(&self, len: usize) -> Result<()> {
+        if self.max_input_bytes > 0 && len as u64 > self.max_input_bytes {
+            return Err(attachment_image_input_too_large_error(
+                len as u64,
+                self.max_input_bytes,
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_dimensions(&self, width: u32, height: u32) -> Result<()> {
+        let width = width as u64;
+        let height = height as u64;
+        let pixels = width.saturating_mul(height);
+
+        if (self.max_width > 0 && width > self.max_width)
+            || (self.max_height > 0 && height > self.max_height)
+            || (self.max_pixels > 0 && pixels > self.max_pixels)
+        {
+            return Err(attachment_image_dimensions_too_large_error(
+                width,
+                height,
+                self.max_width,
+                self.max_height,
+                self.max_pixels,
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for ImageSafetyLimits {
+    fn default() -> Self {
+        Self::from_storage_config(&StorageConfig::default())
+    }
+}
+
+struct ImageProcessingOptions<'a> {
+    transforms: &'a [ImageTransform],
+    output_format: Option<ImageFormat>,
+    quality: Option<u8>,
+    allow_upscale: bool,
+    require_image: bool,
+    safety_limits: ImageSafetyLimits,
+}
+
+impl ImageProcessingOptions<'_> {
+    fn should_process(&self) -> bool {
+        self.require_image
+            || !self.transforms.is_empty()
+            || self.output_format.is_some()
+            || self.quality.is_some()
+    }
+}
+
 async fn store_model_attachment<M>(
     model: &M,
     app: &AppContext,
@@ -1176,36 +1259,37 @@ fn split_localized_collection(collection: &str) -> Option<(&str, &str)> {
 fn process_image_bytes(
     bytes: &[u8],
     original_name: Option<&str>,
-    transforms: &[ImageTransform],
-    output_format: Option<ImageFormat>,
-    quality: Option<u8>,
-    allow_upscale: bool,
-    require_image: bool,
+    options: &ImageProcessingOptions<'_>,
 ) -> Result<Option<ProcessedImage>> {
-    let should_process =
-        require_image || !transforms.is_empty() || output_format.is_some() || quality.is_some();
-    if !should_process {
+    if !options.should_process() {
         return Ok(None);
     }
+
+    options.safety_limits.validate_input_bytes(bytes.len())?;
+    let (width, height) = image_dimensions_from_bytes(bytes)?;
+    options.safety_limits.validate_dimensions(width, height)?;
 
     let mut processor = crate::imaging::ImageProcessor::from_bytes(bytes)
         .map_err(|_| invalid_attachment_image_error())?;
     let detected_format = processor.format();
-    let needs_reencode = !transforms.is_empty() || output_format.is_some() || quality.is_some();
+    let needs_reencode = !options.transforms.is_empty()
+        || options.output_format.is_some()
+        || options.quality.is_some();
 
     if !needs_reencode {
         return Ok(None);
     }
 
-    for transform in transforms {
-        processor = apply_image_transform(processor, *transform, allow_upscale)?;
+    for transform in options.transforms {
+        processor = apply_image_transform(processor, *transform, options.allow_upscale)?;
     }
 
-    if let Some(quality) = quality {
+    if let Some(quality) = options.quality {
         processor = processor.quality(quality);
     }
 
-    let format = output_format
+    let format = options
+        .output_format
         .or_else(|| image_format_from_name(original_name))
         .or(detected_format)
         .unwrap_or(ImageFormat::Jpeg);
@@ -1261,6 +1345,14 @@ fn ensure_transform_without_upscale(
     Ok(())
 }
 
+fn image_dimensions_from_bytes(bytes: &[u8]) -> Result<(u32, u32)> {
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| invalid_attachment_image_error())?
+        .into_dimensions()
+        .map_err(|_| invalid_attachment_image_error())
+}
+
 fn image_format_from_name(name: Option<&str>) -> Option<ImageFormat> {
     name.and_then(|name| name.rsplit('.').next())
         .and_then(ImageFormat::from_extension)
@@ -1292,6 +1384,30 @@ fn attachment_image_too_small_error(width: u32, height: u32) -> Error {
         422,
         format!("attachment image must be at least {width}x{height}"),
         "attachment_image_too_small",
+    )
+}
+
+fn attachment_image_input_too_large_error(actual: u64, max: u64) -> Error {
+    Error::http_with_code(
+        422,
+        format!("attachment image input is too large ({actual} bytes, max {max})"),
+        "attachment_image_input_too_large",
+    )
+}
+
+fn attachment_image_dimensions_too_large_error(
+    width: u64,
+    height: u64,
+    max_width: u64,
+    max_height: u64,
+    max_pixels: u64,
+) -> Error {
+    Error::http_with_code(
+        422,
+        format!(
+            "attachment image dimensions are too large ({width}x{height}; max width {max_width}, max height {max_height}, max pixels {max_pixels})"
+        ),
+        "attachment_image_dimensions_too_large",
     )
 }
 
@@ -2018,17 +2134,18 @@ mod tests {
     #[test]
     fn image_policy_resizes_and_converts_output_format() {
         let input = test_image_bytes(640, 360, ImageFormat::Png);
-        let processed = process_image_bytes(
-            &input,
-            Some("voucher.png"),
-            &[ImageTransform::ResizeToFill(1200, 630)],
+        let transforms = [ImageTransform::ResizeToFill(1200, 630)];
+        let options = image_processing_options(
+            &transforms,
             Some(ImageFormat::WebP),
             Some(85),
             true,
             true,
-        )
-        .unwrap()
-        .unwrap();
+            ImageSafetyLimits::default(),
+        );
+        let processed = process_image_bytes(&input, Some("voucher.png"), &options)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(processed.format, ImageFormat::WebP);
         let image = crate::imaging::ImageProcessor::from_bytes(&processed.bytes).unwrap();
@@ -2037,27 +2154,78 @@ mod tests {
 
     #[test]
     fn image_policy_rejects_invalid_images() {
-        let error =
-            process_image_bytes(b"not an image", None, &[], None, None, true, true).unwrap_err();
+        let options =
+            image_processing_options(&[], None, None, true, true, ImageSafetyLimits::default());
+        let error = process_image_bytes(b"not an image", None, &options).unwrap_err();
 
         assert_error_code(error, "invalid_attachment_image");
     }
 
     #[test]
+    fn image_policy_rejects_oversized_image_input_before_decode() {
+        let input = test_image_bytes(10, 10, ImageFormat::Png);
+        let limits = ImageSafetyLimits {
+            max_input_bytes: (input.len() - 1) as u64,
+            ..ImageSafetyLimits::default()
+        };
+
+        let options =
+            image_processing_options(&[], Some(ImageFormat::Png), None, true, true, limits);
+        let error = process_image_bytes(&input, Some("image.png"), &options).unwrap_err();
+
+        assert_error_code(error, "attachment_image_input_too_large");
+    }
+
+    #[test]
+    fn image_policy_rejects_oversized_image_dimensions() {
+        let input = test_image_bytes(20, 10, ImageFormat::Png);
+        let limits = ImageSafetyLimits {
+            max_input_bytes: 0,
+            max_pixels: 0,
+            max_width: 10,
+            max_height: 0,
+        };
+
+        let options =
+            image_processing_options(&[], Some(ImageFormat::Png), None, true, true, limits);
+        let error = process_image_bytes(&input, Some("image.png"), &options).unwrap_err();
+
+        assert_error_code(error, "attachment_image_dimensions_too_large");
+    }
+
+    #[test]
     fn image_policy_rejects_too_small_fixed_resize_without_upscale() {
         let input = test_image_bytes(100, 100, ImageFormat::Png);
-        let error = process_image_bytes(
-            &input,
-            Some("small.png"),
-            &[ImageTransform::ResizeToFill(200, 200)],
+        let transforms = [ImageTransform::ResizeToFill(200, 200)];
+        let options = image_processing_options(
+            &transforms,
             Some(ImageFormat::Png),
             None,
             false,
             true,
-        )
-        .unwrap_err();
+            ImageSafetyLimits::default(),
+        );
+        let error = process_image_bytes(&input, Some("small.png"), &options).unwrap_err();
 
         assert_error_code(error, "attachment_image_too_small");
+    }
+
+    fn image_processing_options<'a>(
+        transforms: &'a [ImageTransform],
+        output_format: Option<ImageFormat>,
+        quality: Option<u8>,
+        allow_upscale: bool,
+        require_image: bool,
+        safety_limits: ImageSafetyLimits,
+    ) -> ImageProcessingOptions<'a> {
+        ImageProcessingOptions {
+            transforms,
+            output_format,
+            quality,
+            allow_upscale,
+            require_image,
+            safety_limits,
+        }
     }
 
     fn test_app_context() -> AppContext {

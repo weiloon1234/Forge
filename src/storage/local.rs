@@ -7,7 +7,7 @@ use crate::support::DateTime;
 
 use super::adapter::{StorageAdapter, StorageVisibility};
 use super::config::ResolvedLocalConfig;
-use super::stored_file::StoredFile;
+use super::stored_file::{StorageObject, StoredFile};
 
 pub struct LocalStorageAdapter {
     root: PathBuf,
@@ -32,6 +32,11 @@ impl LocalStorageAdapter {
             .and_then(|n| n.to_str())
             .unwrap_or(path)
             .to_string()
+    }
+
+    fn object_path(&self, full_path: &Path) -> Result<String> {
+        let relative = full_path.strip_prefix(&self.root).map_err(Error::other)?;
+        Ok(relative.to_string_lossy().replace('\\', "/"))
     }
 }
 
@@ -174,6 +179,55 @@ impl StorageAdapter for LocalStorageAdapter {
         Err(Error::message(
             "Temporary URLs are not supported for local disk",
         ))
+    }
+
+    async fn list_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<StorageObject>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let start = self.full_path(prefix);
+        if tokio::fs::metadata(&start)
+            .await
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(Vec::new());
+        }
+
+        let mut pending = vec![start];
+        let mut objects = Vec::new();
+
+        while let Some(path) = pending.pop() {
+            let metadata = match tokio::fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Error::other(error)),
+            };
+
+            if metadata.is_file() {
+                let modified_at = metadata.modified().map_err(Error::other)?;
+                let modified_at: chrono::DateTime<chrono::Utc> = modified_at.into();
+                objects.push(StorageObject {
+                    path: self.object_path(&path)?,
+                    size: metadata.len(),
+                    modified_at: DateTime::from_chrono(modified_at),
+                });
+                continue;
+            }
+
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let mut entries = tokio::fs::read_dir(&path).await.map_err(Error::other)?;
+            while let Some(entry) = entries.next_entry().await.map_err(Error::other)? {
+                pending.push(entry.path());
+            }
+        }
+
+        objects.sort_by(|left, right| left.path.cmp(&right.path));
+        objects.truncate(limit);
+        Ok(objects)
     }
 }
 
@@ -354,6 +408,56 @@ mod tests {
         let result = adapter.temporary_url("test.txt", DateTime::now()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Temporary"));
+    }
+
+    #[tokio::test]
+    async fn list_prefix_returns_bounded_sorted_file_metadata() {
+        let dir = TempDir::new().unwrap();
+        let adapter = make_adapter(&dir);
+
+        adapter
+            .put_bytes(
+                "attachments/b.txt",
+                b"bbb",
+                Some("text/plain"),
+                StorageVisibility::Private,
+            )
+            .await
+            .unwrap();
+        adapter
+            .put_bytes(
+                "attachments/nested/a.txt",
+                b"a",
+                Some("text/plain"),
+                StorageVisibility::Private,
+            )
+            .await
+            .unwrap();
+        adapter
+            .put_bytes("other.txt", b"nope", None, StorageVisibility::Private)
+            .await
+            .unwrap();
+
+        let objects = adapter.list_prefix("attachments/", 10).await.unwrap();
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].path, "attachments/b.txt");
+        assert_eq!(objects[0].size, 3);
+        assert_eq!(objects[1].path, "attachments/nested/a.txt");
+
+        let limited = adapter.list_prefix("attachments/", 1).await.unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].path, "attachments/b.txt");
+    }
+
+    #[tokio::test]
+    async fn list_prefix_returns_empty_for_missing_prefix() {
+        let dir = TempDir::new().unwrap();
+        let adapter = make_adapter(&dir);
+
+        let objects = adapter.list_prefix("missing/", 10).await.unwrap();
+
+        assert!(objects.is_empty());
     }
 
     #[tokio::test]

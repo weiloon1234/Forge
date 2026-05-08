@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::foundation::Result;
 use crate::support::DateTime;
 
-use super::stored_file::StoredFile;
+use super::stored_file::{StorageObject, StoredFile};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,4 +40,10 @@ pub trait StorageAdapter: Send + Sync + 'static {
     async fn move_to(&self, from: &str, to: &str) -> Result<()>;
     async fn url(&self, path: &str) -> Result<String>;
     async fn temporary_url(&self, path: &str, expires_at: DateTime) -> Result<String>;
+
+    async fn list_prefix(&self, _prefix: &str, _limit: usize) -> Result<Vec<StorageObject>> {
+        Err(crate::foundation::Error::message(
+            "storage adapter does not support prefix listing",
+        ))
+    }
 }

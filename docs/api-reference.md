@@ -1670,6 +1670,7 @@ Local + S3 file storage with multipart uploads.
 | `StorageDisk` | Single disk instance |
 | `LocalStorageAdapter` | Local filesystem adapter |
 | `S3StorageAdapter` | S3-compatible adapter |
+| `StorageObject` | Listed object metadata: `path`, `size`, `modified_at` |
 | `StoredFile` | `disk`, `path`, `name`, `size`, `content_type`, `url` |
 | `UploadedFile` | `field_name`, `original_name`, `content_type`, `size`, `temp_path` |
 | `MultipartForm` | Parsed multipart form |
@@ -1695,6 +1696,7 @@ trait StorageAdapter: Send + Sync + 'static {
     async fn move_to(&self, from: &str, to: &str) -> Result<()>;
     async fn url(&self, path: &str) -> Result<String>;
     async fn temporary_url(&self, path: &str, expires_at: DateTime) -> Result<String>;
+    async fn list_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<StorageObject>>;
 }
 ```
 
@@ -1712,7 +1714,7 @@ fn default_disk(&self) -> Result<StorageDisk>
 fn disk(&self, name: &str) -> Result<StorageDisk>
 fn default_disk_name(&self) -> &str
 fn configured_disks(&self) -> Vec<String>
-// Also delegates: put, put_bytes, put_file, get, delete, exists, copy, move_to, url, temporary_url
+// Also delegates: put, put_bytes, put_file, get, delete, exists, copy, move_to, url, temporary_url, list_prefix
 ```
 
 ### UploadedFile — methods
@@ -1737,6 +1739,8 @@ fn text(&self, name: &str) -> Option<&str>
 ```
 
 Multipart extraction honors `[storage]` upload caps and returns Forge JSON `413` errors for oversized uploads or too many uploaded files. Forge worker maintenance prunes stale `forge-upload-*` temp files according to storage retention settings.
+
+Attachment image processing also honors `[storage]` decode safety limits for input bytes, width, height, and total pixels. Forge worker maintenance audits old objects under `storage.attachment_orphan_prefix`; deletion is off by default and requires `storage.attachment_orphan_delete_enabled = true`.
 
 ---
 

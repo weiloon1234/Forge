@@ -2,16 +2,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectPath;
-use object_store::ObjectStoreExt;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::foundation::{Error, Result};
 use crate::support::DateTime;
 
 use super::adapter::{StorageAdapter, StorageVisibility};
 use super::config::ResolvedS3Config;
-use super::stored_file::StoredFile;
+use super::stored_file::{StorageObject, StoredFile};
 
 pub struct S3StorageAdapter {
     inner: Arc<object_store::aws::AmazonS3>,
@@ -163,5 +164,30 @@ impl StorageAdapter for S3StorageAdapter {
             .map_err(Error::other)?;
 
         Ok(url.to_string())
+    }
+
+    async fn list_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<StorageObject>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let prefix = ObjectPath::from(prefix);
+        let mut stream = self.inner.list(Some(&prefix));
+        let mut objects = Vec::new();
+
+        while let Some(next) = stream.next().await {
+            let meta = next.map_err(Error::other)?;
+            objects.push(StorageObject {
+                path: meta.location.to_string(),
+                size: meta.size,
+                modified_at: DateTime::from_chrono(meta.last_modified),
+            });
+            if objects.len() >= limit {
+                break;
+            }
+        }
+
+        objects.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(objects)
     }
 }

@@ -24,6 +24,7 @@ struct StorageManager
   async fn move_to(&self, from: &str, to: &str) -> Result<()>
   async fn url(&self, path: &str) -> Result<String>
   async fn temporary_url( &self, path: &str, expires_at: DateTime, ) -> Result<String>
+  async fn list_prefix( &self, prefix: &str, limit: usize, ) -> Result<Vec<StorageObject>>
 ```
 
 ## forge::storage::adapter
@@ -40,6 +41,7 @@ trait StorageAdapter
   fn move_to<'life0, 'life1, 'life2, 'async_trait>(
   fn url<'life0, 'life1, 'async_trait>(
   fn temporary_url<'life0, 'life1, 'async_trait>(
+  fn list_prefix<'life0, 'life1, 'async_trait>(
 ```
 
 ## forge::storage::config
@@ -68,6 +70,7 @@ struct StorageDisk
   async fn move_to(&self, from: &str, to: &str) -> Result<()>
   async fn url(&self, path: &str) -> Result<String>
   async fn temporary_url( &self, path: &str, expires_at: DateTime, ) -> Result<String>
+  async fn list_prefix( &self, prefix: &str, limit: usize, ) -> Result<Vec<StorageObject>>
 ```
 
 ## forge::storage::local
@@ -97,6 +100,7 @@ struct S3StorageAdapter
 ## forge::storage::stored_file
 
 ```rust
+struct StorageObject
 struct StoredFile
 ```
 

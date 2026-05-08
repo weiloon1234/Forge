@@ -29,6 +29,16 @@ max_upload_files = 0                 # max files per multipart request; 0 = no s
 upload_temp_retention_seconds = 3600 # worker cleanup age for forge-upload-* temp files; 0 = keep forever
 upload_temp_prune_interval_ms = 3600000
 upload_temp_prune_batch_size = 1000
+image_max_input_bytes = 52428800    # max image bytes decoded by attachments; 0 = disabled
+image_max_pixels = 50000000         # max decoded image pixels; 0 = disabled
+image_max_width = 12000             # max decoded image width; 0 = disabled
+image_max_height = 12000            # max decoded image height; 0 = disabled
+attachment_orphan_audit_enabled = true
+attachment_orphan_delete_enabled = false
+attachment_orphan_retention_seconds = 604800
+attachment_orphan_prune_interval_ms = 3600000
+attachment_orphan_prune_batch_size = 100
+attachment_orphan_prefix = "attachments/"
 
 [storage.disks.local]
 driver = "local"
@@ -51,6 +61,10 @@ visibility = "public"
 Upload caps are storage-level guardrails for `UploadedFile`, `MultipartForm`, and derive-generated multipart DTOs. Route-level validators and file rules still own product-specific limits such as avatar size, gallery count, and allowed MIME types.
 
 Forge streams multipart files to OS temp files named `forge-upload-*`. The worker prunes stale temp files using the retention settings above, so consumers do not need to add a scheduler job. Stored attachments/files are not pruned by this temp cleanup.
+
+Attachment image processing has generous decode guardrails by default. `image_max_input_bytes` rejects large image uploads before decode, and the width/height/pixel caps reject suspicious image dimensions before transforms. Set an individual value to `0` only when the app has its own stricter validation or explicitly needs to disable that one safety check.
+
+Forge can audit attachment storage objects under `attachment_orphan_prefix` on list-capable disks (`local` and `s3`). The worker compares listed objects against `attachments.disk/path` and logs candidates older than `attachment_orphan_retention_seconds`. Deletion is off by default; enable `attachment_orphan_delete_enabled` only when the app owns that prefix in the bucket/disk. Consumers do not need to add a scheduler job.
 
 ---
 
@@ -166,6 +180,16 @@ let url = storage.temporary_url("documents/contract.pdf", DateTime::now().add_da
 
 Attachment detach deletes database rows before best-effort file deletion. If storage deletion fails, Forge avoids leaving a visible attachment record pointing at a missing file; operators can clean any leftover storage object separately.
 
+Run an operator audit manually with:
+
+```bash
+cargo run -- attachment:orphans
+cargo run -- attachment:orphans --json --disk s3 --limit 100
+cargo run -- attachment:orphans --delete
+```
+
+`--delete` requires `storage.attachment_orphan_delete_enabled = true`. Custom storage drivers compile without listing support; they can opt in by implementing `StorageAdapter::list_prefix`.
+
 ### Working with Specific Disks
 
 ```rust
@@ -181,6 +205,8 @@ let url = s3.url("exports/data.csv")?;
 
 // List configured disks
 let disks = storage.configured_disks();  // ["local", "s3"]
+
+let objects = storage.disk("s3")?.list_prefix("attachments/", 100).await?;
 ```
 
 ---

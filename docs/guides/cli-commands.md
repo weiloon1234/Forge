@@ -292,6 +292,7 @@ These are available automatically — no registration needed:
 | `up` | Exit maintenance mode |
 | `routes:list` | List named routes |
 | `token:prune` | Manually prune expired/revoked personal access tokens |
+| `attachment:orphans` | Audit or delete old attachment storage objects missing from the attachments table |
 | `plugin:list` | List plugins |
 | `plugin:install-assets` | Install plugin assets |
 | `plugin:scaffold` | Run plugin scaffold |
@@ -312,6 +313,10 @@ per-guard token TTL examples, `[auth.password_resets]`, `[auth.email_verificatio
 `audit_area(...)`, so it no longer appears in generated config files. Error reporters are
 registered in code with `AppBuilder::register_error_reporter*()`, so they are intentionally not
 part of the generated config files either.
+
+`attachment:orphans` checks list-capable storage disks against `attachments.disk/path`. It accepts
+`--json`, `--disk <name>`, `--limit <n>`, `--older-than-seconds <n>`, and `--delete`. Deletion is
+guarded by `storage.attachment_orphan_delete_enabled = true`; the default is audit/log only.
 
 ---
 

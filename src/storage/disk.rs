@@ -6,7 +6,7 @@ use crate::support::DateTime;
 
 use super::adapter::{StorageAdapter, StorageVisibility};
 use super::callback;
-use super::stored_file::StoredFile;
+use super::stored_file::{StorageObject, StoredFile};
 
 #[derive(Clone)]
 pub struct StorageDisk {
@@ -111,6 +111,13 @@ impl StorageDisk {
         })
         .await
     }
+
+    pub async fn list_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<StorageObject>> {
+        callback::run_storage_operation(&self.name, "list_prefix", || {
+            self.adapter.list_prefix(prefix, limit)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +180,10 @@ mod tests {
 
         async fn temporary_url(&self, _path: &str, _expires_at: DateTime) -> Result<String> {
             panic!("temporary url exploded")
+        }
+
+        async fn list_prefix(&self, _prefix: &str, _limit: usize) -> Result<Vec<StorageObject>> {
+            panic!("list prefix exploded")
         }
     }
 
@@ -307,6 +318,11 @@ mod tests {
             "temporary_url",
             "temporary url exploded",
         );
+        assert_storage_panic(
+            disk.list_prefix("files/", 10).await.unwrap_err(),
+            "list_prefix",
+            "list prefix exploded",
+        );
     }
 
     #[tokio::test]
@@ -316,5 +332,16 @@ mod tests {
         let error = disk.get("file.txt").await.unwrap_err();
 
         assert_eq!(error.to_string(), "get failed");
+    }
+
+    #[tokio::test]
+    async fn default_list_prefix_is_unsupported_for_custom_adapters() {
+        let disk = disk(ErrorAdapter);
+
+        let error = disk.list_prefix("files/", 10).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("storage adapter does not support prefix listing"));
     }
 }

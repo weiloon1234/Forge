@@ -217,6 +217,7 @@ struct ETag
 struct MaintenanceMode
   fn new() -> Self
   fn bypass_secret(self, secret: impl Into<String>) -> Self
+  fn allow_query_bypass(self) -> Self
   fn build(self) -> MiddlewareConfig
 struct MaxBodySize
   fn bytes(n: usize) -> Self
@@ -256,6 +257,7 @@ struct SecurityHeaders
 struct TrustedProxy
   fn new() -> Self
   fn cloudflare() -> Self
+  fn trust_all(self) -> Self
   fn with_header(self, hdr: HeaderName) -> Self
   fn trusted_cidr(self, cidr: &str) -> Self
   fn build(self) -> MiddlewareConfig
@@ -295,7 +297,7 @@ struct RouteRegistry
 ## Notes
 
 - `HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.
-- `HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` remains compatible and trusts all headers.
+- `HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` trusts no peers until CIDRs or `trust_all()` are configured.
 - Config-derived CORS validates origins, methods, and headers at boot; wildcard origins with credentials are rejected.
 - Config-derived CSRF is opt-in; code-registered `Csrf` remains source-compatible and path exclusions are segment-aware.
 - Config-derived body-limit, request-timeout, and rate-limit rejections return JSON `ErrorResponse` bodies with HTTP 413, 408, and 429.

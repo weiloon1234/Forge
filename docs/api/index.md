@@ -16,12 +16,12 @@ Load only the file you need — don't read them all at once.
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
 | [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 102L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
-| [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 727L |
+| [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 729L |
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 217L |
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 167L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 31L |
 | [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 136L |
-| [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 304L |
+| [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 306L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
 | [jobs](modules/jobs.md) | Background job queue with leased at-least-once delivery | 60L |
@@ -35,7 +35,7 @@ Load only the file you need — don't read them all at once.
 | [redis](modules/redis.md) | Namespaced Redis wrapper (RedisManager, RedisConnection) | 41L |
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 54L |
 | [settings](modules/settings.md) |  | 37L |
-| [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 130L |
+| [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 133L |
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 210L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 38L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
@@ -43,4 +43,4 @@ Load only the file you need — don't read them all at once.
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 67L |
 
-**Total: 35 modules, 3427 lines across all files.**
+**Total: 35 modules, 3434 lines across all files.**

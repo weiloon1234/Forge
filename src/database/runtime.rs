@@ -813,12 +813,41 @@ impl DbRecord {
         }
     }
 
+    /// Extract a required text value.
+    pub fn try_text(&self, field: &str) -> Result<String> {
+        match self.get(field) {
+            Some(DbValue::Text(s)) => Ok(s.clone()),
+            Some(value) => Err(Error::message(format!(
+                "database field `{field}` expected text, got {:?}",
+                value.db_type()
+            ))),
+            None => Err(Error::message(format!(
+                "database field `{field}` is missing"
+            ))),
+        }
+    }
+
     /// Extract a text or UUID value as string.
     pub fn text_or_uuid(&self, field: &str) -> String {
         match self.get(field) {
             Some(DbValue::Text(s)) => s.clone(),
             Some(DbValue::Uuid(u)) => u.to_string(),
             _ => String::new(),
+        }
+    }
+
+    /// Extract a required text or UUID value as string.
+    pub fn try_text_or_uuid(&self, field: &str) -> Result<String> {
+        match self.get(field) {
+            Some(DbValue::Text(s)) => Ok(s.clone()),
+            Some(DbValue::Uuid(u)) => Ok(u.to_string()),
+            Some(value) => Err(Error::message(format!(
+                "database field `{field}` expected text or uuid, got {:?}",
+                value.db_type()
+            ))),
+            None => Err(Error::message(format!(
+                "database field `{field}` is missing"
+            ))),
         }
     }
 
@@ -2384,7 +2413,7 @@ mod tests {
         n_plus_one_log, normalize_type_name, receiver_stream, recent_n_plus_one_suspects,
         recent_slow_queries, record_slow_query, record_sql_observation, redact_sql_literals,
         scope_http_sql_query_trace, slow_query_log, spawn_stream_task, sql_fingerprint,
-        sql_observability_snapshot, DbRecord, Result, SlowQueryEntry,
+        sql_observability_snapshot, DbRecord, DbValue, Result, SlowQueryEntry,
     };
 
     fn sql_observability_test_lock() -> &'static Mutex<()> {
@@ -2401,6 +2430,30 @@ mod tests {
         assert_eq!(normalize_type_name("char[]"), "_char");
         assert_eq!(normalize_type_name("CHAR[]"), "_char");
         assert_eq!(normalize_type_name("\"CHAR\"[]"), "_char");
+    }
+
+    #[test]
+    fn db_record_try_text_helpers_report_missing_and_wrong_types() {
+        let mut record = DbRecord::new();
+        record.insert("name", DbValue::Text("Forge".to_string()));
+        record.insert("id", DbValue::Uuid(uuid::Uuid::nil()));
+        record.insert("count", DbValue::Int64(7));
+
+        assert_eq!(record.try_text("name").unwrap(), "Forge");
+        assert_eq!(
+            record.try_text_or_uuid("id").unwrap(),
+            uuid::Uuid::nil().to_string()
+        );
+        assert!(record
+            .try_text("missing")
+            .unwrap_err()
+            .to_string()
+            .contains("missing"));
+        assert!(record
+            .try_text("count")
+            .unwrap_err()
+            .to_string()
+            .contains("expected text"));
     }
 
     #[test]

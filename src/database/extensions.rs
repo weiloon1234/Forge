@@ -405,7 +405,7 @@ impl Hash for TranslationCacheKey {
 }
 
 fn id_from_record(record: &DbRecord, primary_key: &str) -> Option<String> {
-    let id = record.text_or_uuid(primary_key);
+    let id = record.try_text_or_uuid(primary_key).ok()?;
     (!id.is_empty()).then_some(id)
 }
 

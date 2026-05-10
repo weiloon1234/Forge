@@ -890,12 +890,22 @@ impl CompilerState {
             }
             Condition::Exists(query) => Ok(format!("EXISTS ({})", self.compile_query(query)?)),
             Condition::Raw { sql, bindings } => {
+                let placeholder_count = sql.matches('?').count();
+                if placeholder_count != bindings.len() {
+                    return Err(Error::message(format!(
+                        "raw condition placeholder count mismatch: expected {placeholder_count} bindings, got {}",
+                        bindings.len()
+                    )));
+                }
+
                 let mut compiled = String::new();
                 let mut binding_iter = bindings.iter();
-                for segment in sql.split('?') {
+                for (index, segment) in sql.split('?').enumerate() {
                     compiled.push_str(segment);
-                    if let Some(value) = binding_iter.next() {
-                        compiled.push_str(&self.bind_value(value.clone()));
+                    if index < placeholder_count {
+                        if let Some(value) = binding_iter.next() {
+                            compiled.push_str(&self.bind_value(value.clone()));
+                        }
                     }
                 }
                 Ok(compiled)
@@ -1119,6 +1129,65 @@ mod tests {
             compiled.sql,
             "SELECT \"users\".\"id\", \"users\".\"email\" FROM \"users\" LEFT JOIN \"profiles\" ON \"profiles\".\"user_id\" = \"users\".\"id\" WHERE (\"users\".\"active\" = $1::boolean AND (\"users\".\"role\" = $2::text OR \"users\".\"role\" = $3::text)) ORDER BY \"users\".\"id\" DESC LIMIT $4::bigint OFFSET $5::bigint"
         );
+    }
+
+    #[test]
+    fn raw_condition_requires_exact_binding_count() {
+        let ast = QueryAst::select(SelectNode {
+            from: FromItem::Table(TableRef::new("users")),
+            distinct: false,
+            columns: vec![SelectItem::new(Expr::column(ColumnRef::new("users", "id")))],
+            joins: Vec::new(),
+            condition: Some(Condition::raw(
+                "email = ? AND status = ?",
+                vec![DbValue::Text("a@example.com".to_string())],
+            )),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            lock: None,
+            relations: Vec::new(),
+            aggregates: Vec::new(),
+        });
+
+        let error = PostgresCompiler::compile(&ast).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("raw condition placeholder count mismatch: expected 2 bindings, got 1"));
+    }
+
+    #[test]
+    fn raw_condition_rejects_extra_bindings() {
+        let ast = QueryAst::select(SelectNode {
+            from: FromItem::Table(TableRef::new("users")),
+            distinct: false,
+            columns: vec![SelectItem::new(Expr::column(ColumnRef::new("users", "id")))],
+            joins: Vec::new(),
+            condition: Some(Condition::raw(
+                "email = ?",
+                vec![
+                    DbValue::Text("a@example.com".to_string()),
+                    DbValue::Text("active".to_string()),
+                ],
+            )),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            lock: None,
+            relations: Vec::new(),
+            aggregates: Vec::new(),
+        });
+
+        let error = PostgresCompiler::compile(&ast).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("raw condition placeholder count mismatch: expected 1 bindings, got 2"));
     }
 
     #[test]

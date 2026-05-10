@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use tokio::io::AsyncWriteExt as _;
 
 use crate::foundation::{Error, Result};
 use crate::support::DateTime;
@@ -44,6 +45,7 @@ impl LocalStorageAdapter {
         let path = normalize_path(path)?;
         let full = self.full_path(&path);
 
+        self.reject_symlink_components(&path, false).await?;
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -52,6 +54,77 @@ impl LocalStorageAdapter {
         self.reject_symlink_components(&path, true).await?;
 
         Ok((path, full))
+    }
+
+    async fn open_unique_temp_file(&self, full: &Path) -> Result<(PathBuf, tokio::fs::File)> {
+        let parent = full
+            .parent()
+            .ok_or_else(|| Error::message("storage path has no parent directory"))?;
+        let file_name = full
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+
+        for _ in 0..16 {
+            let temp_path = parent.join(format!(".forge-tmp-{}-{file_name}", uuid::Uuid::now_v7()));
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .await
+            {
+                Ok(file) => return Ok((temp_path, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(Error::other(error)),
+            }
+        }
+
+        Err(Error::message(
+            "failed to create a unique storage temp file",
+        ))
+    }
+
+    async fn write_bytes_atomically(&self, full: &Path, bytes: &[u8]) -> Result<u64> {
+        let (temp_path, mut file) = self.open_unique_temp_file(full).await?;
+        let result = async {
+            file.write_all(bytes).await.map_err(Error::other)?;
+            file.flush().await.map_err(Error::other)?;
+            drop(file);
+            tokio::fs::rename(&temp_path, full)
+                .await
+                .map_err(Error::other)?;
+            Ok(bytes.len() as u64)
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+
+        result
+    }
+
+    async fn copy_file_atomically(&self, source: &Path, full: &Path) -> Result<u64> {
+        let (temp_path, mut file) = self.open_unique_temp_file(full).await?;
+        let result = async {
+            let mut source = tokio::fs::File::open(source).await.map_err(Error::other)?;
+            let bytes = tokio::io::copy(&mut source, &mut file)
+                .await
+                .map_err(Error::other)?;
+            file.flush().await.map_err(Error::other)?;
+            drop(file);
+            tokio::fs::rename(&temp_path, full)
+                .await
+                .map_err(Error::other)?;
+            Ok(bytes)
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+
+        result
     }
 
     async fn resolve_read_path(&self, path: &str) -> Result<(String, PathBuf)> {
@@ -109,7 +182,7 @@ impl StorageAdapter for LocalStorageAdapter {
     ) -> Result<StoredFile> {
         let (path, full) = self.prepare_write_path(path).await?;
 
-        tokio::fs::write(&full, bytes).await.map_err(Error::other)?;
+        self.write_bytes_atomically(&full, bytes).await?;
 
         Ok(StoredFile {
             disk: String::new(),
@@ -130,9 +203,7 @@ impl StorageAdapter for LocalStorageAdapter {
     ) -> Result<StoredFile> {
         let (path, full) = self.prepare_write_path(path).await?;
 
-        let metadata = tokio::fs::copy(temp_path, &full)
-            .await
-            .map_err(Error::other)?;
+        let metadata = self.copy_file_atomically(temp_path, &full).await?;
 
         Ok(StoredFile {
             disk: String::new(),
@@ -171,7 +242,7 @@ impl StorageAdapter for LocalStorageAdapter {
         let (from, src) = self.resolve_read_path(from).await?;
         let (to, dst) = self.prepare_write_path(to).await?;
 
-        tokio::fs::copy(&src, &dst)
+        self.copy_file_atomically(&src, &dst)
             .await
             .map_err(|e| Error::message(format!("Failed to copy '{from}' to '{to}': {e}")))?;
 
@@ -188,7 +259,7 @@ impl StorageAdapter for LocalStorageAdapter {
                 || e.to_string().contains("Invalid cross-device link")
             {
                 let data = tokio::fs::read(&src).await.map_err(Error::other)?;
-                tokio::fs::write(&dst, &data).await.map_err(Error::other)?;
+                self.write_bytes_atomically(&dst, &data).await?;
                 tokio::fs::remove_file(&src).await.map_err(Error::other)?;
             } else {
                 return Err(Error::message(format!(
@@ -584,6 +655,56 @@ mod tests {
 
         assert!(error.to_string().contains("symlink"));
         assert_eq!(std::fs::read(&outside_file).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_rejects_symlinked_parent_before_creating_children() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let adapter = make_adapter(&dir);
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("attachments")).unwrap();
+
+        let error = adapter
+            .put_bytes(
+                "attachments/nested/target.txt",
+                b"changed",
+                None,
+                StorageVisibility::Private,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("symlink"));
+        assert!(!outside.path().join("nested").exists());
+    }
+
+    #[tokio::test]
+    async fn write_uses_temp_file_then_atomic_rename() {
+        let dir = TempDir::new().unwrap();
+        let adapter = make_adapter(&dir);
+
+        adapter
+            .put_bytes(
+                "attachments/file.txt",
+                b"data",
+                None,
+                StorageVisibility::Private,
+            )
+            .await
+            .unwrap();
+
+        let mut entries = std::fs::read_dir(dir.path().join("attachments")).unwrap();
+        let names = entries
+            .by_ref()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["file.txt".to_string()]);
+        assert_eq!(
+            std::fs::read(dir.path().join("attachments/file.txt")).unwrap(),
+            b"data"
+        );
     }
 
     #[tokio::test]

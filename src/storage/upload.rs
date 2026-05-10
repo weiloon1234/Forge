@@ -17,6 +17,7 @@ use super::StorageConfig;
 use super::StorageManager;
 
 const UPLOAD_TEMP_PREFIX: &str = "forge-upload-";
+const UPLOAD_TEMP_DIR: &str = "forge/uploads";
 const FALLBACK_UPLOAD_FILENAME: &str = "upload";
 const MAX_UPLOAD_FILENAME_BYTES: usize = 255;
 
@@ -225,8 +226,7 @@ pub async fn uploaded_file_from_multipart_field(
 
     let original_name = field.file_name().map(UploadedFile::sanitize_name);
     let content_type = field.content_type().and_then(normalize_content_type);
-    let temp_id = uuid::Uuid::now_v7().to_string();
-    let temp_path = std::env::temp_dir().join(format!("{UPLOAD_TEMP_PREFIX}{temp_id}"));
+    let temp_path = forge_upload_temp_path();
 
     uploaded_file_from_multipart_field_at_path(
         field_name,
@@ -249,20 +249,14 @@ async fn uploaded_file_from_multipart_field_at_path(
     counters: &mut UploadCounters,
     temp_path: PathBuf,
 ) -> Result<Option<UploadedFile>> {
-    let result = stream_field_to_temp_file(field, &temp_path, limits, counters).await;
-    match result {
-        Ok(size) => Ok(Some(UploadedFile {
-            field_name,
-            original_name,
-            content_type,
-            size,
-            temp_path,
-        })),
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            Err(error)
-        }
-    }
+    let size = stream_field_to_temp_file(field, &temp_path, limits, counters).await?;
+    Ok(Some(UploadedFile {
+        field_name,
+        original_name,
+        content_type,
+        size,
+        temp_path,
+    }))
 }
 
 async fn stream_field_to_temp_file(
@@ -271,44 +265,66 @@ async fn stream_field_to_temp_file(
     limits: UploadLimits,
     counters: &mut UploadCounters,
 ) -> Result<u64> {
-    let mut file = tokio::fs::File::create(temp_path)
+    if let Some(parent) = temp_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| Error::message(format!("temp directory error: {error}")))?;
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
         .await
         .map_err(|error| Error::message(format!("temp file error: {error}")))?;
 
     let mut file_size = 0u64;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|error| Error::message(format!("chunk error: {error}")))?
-    {
-        let chunk_size = chunk.len() as u64;
-        file_size = file_size
-            .checked_add(chunk_size)
-            .ok_or_else(upload_too_large_error)?;
-        counters.uploaded_bytes = counters
-            .uploaded_bytes
-            .checked_add(chunk_size)
-            .ok_or_else(upload_too_large_error)?;
-
-        if limits.max_upload_file_size_bytes > 0 && file_size > limits.max_upload_file_size_bytes {
-            return Err(upload_file_too_large_error());
-        }
-        if limits.max_upload_size_bytes > 0
-            && counters.uploaded_bytes > limits.max_upload_size_bytes
-        {
-            return Err(upload_too_large_error());
-        }
-
-        file.write_all(&chunk)
+    let result = async {
+        while let Some(chunk) = field
+            .chunk()
             .await
-            .map_err(|error| Error::message(format!("write error: {error}")))?;
+            .map_err(|error| Error::message(format!("chunk error: {error}")))?
+        {
+            let chunk_size = chunk.len() as u64;
+            file_size = file_size
+                .checked_add(chunk_size)
+                .ok_or_else(upload_too_large_error)?;
+            counters.uploaded_bytes = counters
+                .uploaded_bytes
+                .checked_add(chunk_size)
+                .ok_or_else(upload_too_large_error)?;
+
+            if limits.max_upload_file_size_bytes > 0
+                && file_size > limits.max_upload_file_size_bytes
+            {
+                return Err(upload_file_too_large_error());
+            }
+            if limits.max_upload_size_bytes > 0
+                && counters.uploaded_bytes > limits.max_upload_size_bytes
+            {
+                return Err(upload_too_large_error());
+            }
+
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| Error::message(format!("write error: {error}")))?;
+        }
+
+        Ok(file_size)
+    }
+    .await;
+
+    if result.is_err() {
+        drop(file);
+        let _ = tokio::fs::remove_file(temp_path).await;
     }
 
-    Ok(file_size)
+    result
 }
 
 pub async fn prune_stale_upload_temp_files(retention_seconds: u64, batch_size: u64) -> Result<u64> {
-    prune_stale_upload_temp_files_in_dir(&std::env::temp_dir(), retention_seconds, batch_size).await
+    prune_stale_upload_temp_files_in_dir(&forge_upload_temp_dir(), retention_seconds, batch_size)
+        .await
 }
 
 pub async fn remove_uploaded_temp_file(file: &UploadedFile) -> bool {
@@ -338,6 +354,10 @@ async fn prune_stale_upload_temp_files_in_dir(
     batch_size: u64,
 ) -> Result<u64> {
     if retention_seconds == 0 || batch_size == 0 {
+        return Ok(0);
+    }
+
+    if !tokio::fs::try_exists(dir).await.map_err(Error::other)? {
         return Ok(0);
     }
 
@@ -401,9 +421,20 @@ fn normalize_content_type(value: &str) -> Option<String> {
 }
 
 fn is_forge_upload_temp_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with(UPLOAD_TEMP_PREFIX))
+    path.parent()
+        .is_some_and(|parent| parent == forge_upload_temp_dir())
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(UPLOAD_TEMP_PREFIX))
+}
+
+pub(crate) fn forge_upload_temp_dir() -> PathBuf {
+    std::env::temp_dir().join(UPLOAD_TEMP_DIR)
+}
+
+fn forge_upload_temp_path() -> PathBuf {
+    forge_upload_temp_dir().join(format!("{UPLOAD_TEMP_PREFIX}{}", uuid::Uuid::now_v7()))
 }
 
 pub(crate) fn invalid_multipart_response(status: u16, error: impl std::fmt::Display) -> Response {
@@ -676,6 +707,105 @@ mod tests {
         assert!(!stale.exists());
         assert!(fresh.exists());
         assert!(unrelated.exists());
+    }
+
+    #[tokio::test]
+    async fn uploaded_file_uses_private_forge_temp_directory() {
+        let request = multipart_request(concat!(
+            "--forge-test\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "abc\r\n",
+            "--forge-test--\r\n"
+        ));
+        let mut multipart = axum::extract::Multipart::from_request(request, &())
+            .await
+            .unwrap();
+        let field = multipart.next_field().await.unwrap().unwrap();
+        let mut counters = UploadCounters::default();
+
+        let upload = uploaded_file_from_multipart_field(
+            "file".to_string(),
+            field,
+            UploadLimits::default(),
+            &mut counters,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let temp_dir = forge_upload_temp_dir();
+        assert_eq!(upload.temp_path.parent(), Some(temp_dir.as_path()));
+        assert!(is_forge_upload_temp_path(&upload.temp_path));
+        assert!(remove_uploaded_temp_file(&upload).await);
+    }
+
+    #[tokio::test]
+    async fn stream_field_to_temp_file_uses_create_new() {
+        let request = multipart_request(concat!(
+            "--forge-test\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "abcdef\r\n",
+            "--forge-test--\r\n"
+        ));
+        let mut multipart = axum::extract::Multipart::from_request(request, &())
+            .await
+            .unwrap();
+        let field = multipart.next_field().await.unwrap().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let temp_path = dir.path().join(format!(
+            "{UPLOAD_TEMP_PREFIX}existing-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&temp_path, b"existing").unwrap();
+        let mut counters = UploadCounters::default();
+
+        let error = uploaded_file_from_multipart_field_at_path(
+            "file".to_string(),
+            Some("a.txt".to_string()),
+            Some("text/plain".to_string()),
+            field,
+            UploadLimits::default(),
+            &mut counters,
+            temp_path.clone(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("temp file error"));
+        assert_eq!(std::fs::read(&temp_path).unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn remove_uploaded_temp_file_only_removes_private_forge_uploads() {
+        let temp_dir = forge_upload_temp_dir();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let owned_path = temp_dir.join(format!(
+            "{UPLOAD_TEMP_PREFIX}owned-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let unowned_path = std::env::temp_dir().join(format!(
+            "{UPLOAD_TEMP_PREFIX}unowned-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&owned_path, b"owned").unwrap();
+        std::fs::write(&unowned_path, b"unowned").unwrap();
+
+        let owned = UploadedFile {
+            temp_path: owned_path.clone(),
+            ..make_upload(Some("owned.txt"))
+        };
+        let unowned = UploadedFile {
+            temp_path: unowned_path.clone(),
+            ..make_upload(Some("unowned.txt"))
+        };
+
+        assert!(remove_uploaded_temp_file(&owned).await);
+        assert!(!remove_uploaded_temp_file(&unowned).await);
+        assert!(!owned_path.exists());
+        assert!(unowned_path.exists());
+        std::fs::remove_file(unowned_path).unwrap();
     }
 
     #[tokio::test]

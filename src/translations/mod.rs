@@ -353,7 +353,7 @@ pub trait HasTranslations: Send + Sync {
                 ],
             )
             .await?;
-        Ok(rows.iter().map(row_to_model_translation).collect())
+        rows.iter().map(row_to_model_translation).collect()
     }
 
     async fn delete_translations(&self, app: &AppContext, locale: &str) -> Result<u64> {
@@ -476,18 +476,18 @@ async fn load_translation_rows(
         }
     };
 
-    Ok(rows.iter().map(row_to_model_translation).collect())
+    rows.iter().map(row_to_model_translation).collect()
 }
 
-fn row_to_model_translation(row: &crate::database::DbRecord) -> ModelTranslation {
-    ModelTranslation {
-        id: row.text_or_uuid("id"),
-        translatable_type: row.text("translatable_type"),
-        translatable_id: row.text_or_uuid("translatable_id"),
-        locale: row.text("locale"),
-        field: row.text("field"),
-        value: row.text("value"),
-    }
+fn row_to_model_translation(row: &crate::database::DbRecord) -> Result<ModelTranslation> {
+    Ok(ModelTranslation {
+        id: row.try_text_or_uuid("id")?,
+        translatable_type: row.try_text("translatable_type")?,
+        translatable_id: row.try_text_or_uuid("translatable_id")?,
+        locale: row.try_text("locale")?,
+        field: row.try_text("field")?,
+        value: row.try_text("value")?,
+    })
 }
 
 fn translated_fields_from_rows(app: &AppContext, rows: Vec<ModelTranslation>) -> TranslatedFields {

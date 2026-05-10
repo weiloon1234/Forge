@@ -130,18 +130,19 @@ pub trait HasMetadata: Send + Sync {
                 ],
             )
             .await?;
-        Ok(rows
-            .iter()
-            .map(|row| ModelMeta {
-                id: row.text_or_uuid("id"),
-                metadatable_type: row.text("metadatable_type"),
-                metadatable_id: row.text_or_uuid("metadatable_id"),
-                key: row.text("key"),
-                value: match row.get("value") {
-                    Some(DbValue::Json(v)) => Some(v.clone()),
-                    _ => None,
-                },
+        rows.iter()
+            .map(|row| {
+                Ok(ModelMeta {
+                    id: row.try_text_or_uuid("id")?,
+                    metadatable_type: row.try_text("metadatable_type")?,
+                    metadatable_id: row.try_text_or_uuid("metadatable_id")?,
+                    key: row.try_text("key")?,
+                    value: match row.get("value") {
+                        Some(DbValue::Json(v)) => Some(v.clone()),
+                        _ => None,
+                    },
+                })
             })
-            .collect())
+            .collect()
     }
 }

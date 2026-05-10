@@ -509,7 +509,13 @@ async fn websocket_handler(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebSocketServerState>,
 ) -> Response {
-    if !origin_allowed(&headers, &state.ws_config.allowed_origins) {
+    let production_like = state
+        .app
+        .config()
+        .app()
+        .map(|config| config.environment.is_production_like())
+        .unwrap_or(false);
+    if !origin_allowed(&headers, &state.ws_config.allowed_origins, production_like) {
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -519,9 +525,9 @@ async fn websocket_handler(
             .into_response();
     }
 
-    // Support token via query param for browser WebSocket connections which
-    // cannot set custom headers. Keep this bounded because URLs can be logged
-    // outside Forge by proxies or load balancers.
+    // Support short-lived tokens via query param for browser WebSocket
+    // connections which cannot set custom headers. Keep this bounded because
+    // URLs can be logged outside Forge by proxies or load balancers.
     let mut headers = headers;
     if state.ws_config.query_token_enabled
         && !headers.contains_key(axum::http::header::AUTHORIZATION)
@@ -660,9 +666,13 @@ fn bearer_token_from_query(
     Ok(token)
 }
 
-fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
-    if allowed_origins.is_empty() || allowed_origins.iter().any(|origin| origin == "*") {
+fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String], production_like: bool) -> bool {
+    if allowed_origins.iter().any(|origin| origin == "*") {
         return true;
+    }
+
+    if allowed_origins.is_empty() {
+        return !production_like || !headers.contains_key(axum::http::header::ORIGIN);
     }
 
     let Some(origin) = headers
@@ -2027,6 +2037,49 @@ mod tests {
                 .to_string(),
             "websocket token query parameter exceeds maximum length of 3 bytes"
         );
+    }
+
+    #[test]
+    fn websocket_empty_origin_allowlist_is_permissive_outside_production() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://example.com".parse().unwrap(),
+        );
+
+        assert!(origin_allowed(&headers, &[], false));
+    }
+
+    #[test]
+    fn websocket_empty_origin_allowlist_rejects_browser_origin_in_production() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://example.com".parse().unwrap(),
+        );
+
+        assert!(!origin_allowed(&headers, &[], true));
+        assert!(origin_allowed(&HeaderMap::new(), &[], true));
+    }
+
+    #[test]
+    fn websocket_allowed_origins_still_match_explicit_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://example.com".parse().unwrap(),
+        );
+
+        assert!(origin_allowed(
+            &headers,
+            &["https://example.com".to_string()],
+            true
+        ));
+        assert!(!origin_allowed(
+            &headers,
+            &["https://other.test".to_string()],
+            true
+        ));
     }
 
     #[tokio::test]

@@ -149,7 +149,9 @@ struct DbRecord
   fn get(&self, key: &str) -> Option<&DbValue>
   fn iter(&self) -> impl Iterator<Item = (&String, &DbValue)>
   fn text(&self, field: &str) -> String
+  fn try_text(&self, field: &str) -> Result<String>
   fn text_or_uuid(&self, field: &str) -> String
+  fn try_text_or_uuid(&self, field: &str) -> Result<String>
   fn optional_text(&self, field: &str) -> Option<String>
 struct DeleteModel
   fn with_timeout(self, timeout: Duration) -> Self

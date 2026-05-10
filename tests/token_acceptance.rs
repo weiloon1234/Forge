@@ -234,6 +234,66 @@ impl Authenticatable for DirectManagerActor {
     }
 }
 
+#[tokio::test]
+async fn password_reset_token_validation_is_atomic_single_use() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new().await else {
+        return;
+    };
+
+    let resets = runtime.app.password_resets().unwrap();
+    let token = resets
+        .create_token::<DirectManagerActor>("race@example.com")
+        .await
+        .unwrap();
+
+    let first = resets.clone();
+    let second = resets.clone();
+    let (left, right) = tokio::join!(
+        first.validate_token::<DirectManagerActor>("race@example.com", &token),
+        second.validate_token::<DirectManagerActor>("race@example.com", &token),
+    );
+
+    let successes = [left.is_ok(), right.is_ok()]
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    assert_eq!(successes, 1);
+    assert_eq!(runtime.reset_count("text_api").await, 0);
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn email_verification_token_validation_is_atomic_single_use() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new().await else {
+        return;
+    };
+
+    let verification = runtime.app.email_verification().unwrap();
+    let token = verification
+        .create_token::<DirectManagerActor>("verify@example.com")
+        .await
+        .unwrap();
+
+    verification
+        .validate_token::<DirectManagerActor>("verify@example.com", &token)
+        .await
+        .unwrap();
+    let error = verification
+        .validate_token::<DirectManagerActor>("verify@example.com", &token)
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("invalid or expired verification token"));
+    assert_eq!(runtime.reset_count("verify:%").await, 0);
+
+    runtime.cleanup().await;
+}
+
 #[derive(Clone, Debug)]
 struct ExternalActorUser {
     id: i64,

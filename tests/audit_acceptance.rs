@@ -69,7 +69,7 @@ async fn build_test_app(config_dir: &Path) -> TestApp {
     TestApp::builder()
         .load_config_dir(config_dir)
         .register_provider(AuditAuthProvider)
-        .register_middleware(TrustedProxy::new().build())
+        .register_middleware(TrustedProxy::new().trust_all().build())
         .register_routes(audit_routes)
         .build()
         .await

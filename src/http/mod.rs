@@ -1074,7 +1074,7 @@ impl HttpRegistrar {
                         options,
                         inherit_parent_defaults_on_merge,
                     } = *route;
-                    let path = format!("{prefix}{path}");
+                    let path = join_route_path(prefix, &path);
                     let options = if inherit_parent_defaults_on_merge {
                         options.with_defaults(&self.default_route_options)
                     } else {
@@ -1085,7 +1085,7 @@ impl HttpRegistrar {
                 }
                 HttpRegistration::Nest { path, router } => {
                     self.registrations.push(HttpRegistration::Nest {
-                        path: format!("{prefix}{path}"),
+                        path: join_route_path(prefix, &path),
                         router,
                     });
                 }
@@ -1101,7 +1101,7 @@ impl HttpRegistrar {
         // Merge named routes from sub-registrar with prefix applied
         for (name, pattern) in sub.named_routes.iter() {
             self.named_routes
-                .register(name.clone(), format!("{prefix}{pattern}"));
+                .register(name.clone(), join_route_path(prefix, pattern));
         }
         Ok(self)
     }
@@ -1880,6 +1880,28 @@ mod tests {
             .expect("route docs should be present");
         assert_eq!(doc.tags, vec!["users".to_string()]);
         assert_eq!(doc.summary.as_deref(), Some("List users"));
+    }
+
+    #[test]
+    fn group_joins_slashy_prefixes_without_duplicate_separators() {
+        let mut registrar = HttpRegistrar::new();
+        registrar
+            .group("/api/", |routes| {
+                routes.route_named(RouteId::new("users.index"), "/users", get(ok));
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(registrar.named_routes.has(RouteId::new("users.index")));
+        assert_eq!(
+            registrar
+                .named_routes
+                .url(RouteId::new("users.index"), &[])
+                .unwrap()
+                .as_str(),
+            "/api/users"
+        );
+        route_by_path(&registrar, "/api/users");
     }
 
     #[test]

@@ -16,16 +16,33 @@ use crate::foundation::{Error, Result};
 /// ```
 pub struct Token;
 
+const TOKEN_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const TOKEN_REJECTION_CUTOFF: u8 =
+    (u8::MAX / TOKEN_ALPHABET.len() as u8) * TOKEN_ALPHABET.len() as u8;
+
 impl Token {
     /// Generate a random alphanumeric string of the given length.
     /// Uses characters: a-z, A-Z, 0-9 (62 possible chars).
     pub fn generate(length: usize) -> Result<String> {
-        let bytes = Self::bytes(length)?;
-        let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let result: String = bytes
-            .iter()
-            .map(|&b| chars[b as usize % chars.len()] as char)
-            .collect();
+        let mut result = String::with_capacity(length);
+        let mut buf = [0u8; 64];
+
+        while result.len() < length {
+            getrandom::fill(&mut buf)
+                .map_err(|e| Error::message(format!("failed to generate random bytes: {e}")))?;
+            for byte in buf {
+                if byte >= TOKEN_REJECTION_CUTOFF {
+                    continue;
+                }
+
+                let index = byte as usize % TOKEN_ALPHABET.len();
+                result.push(TOKEN_ALPHABET[index] as char);
+                if result.len() == length {
+                    break;
+                }
+            }
+        }
+
         Ok(result)
     }
 
@@ -104,5 +121,12 @@ mod tests {
         assert_eq!(Token::generate(0).unwrap(), "");
         assert_eq!(Token::bytes(0).unwrap(), Vec::<u8>::new());
         assert_eq!(Token::hex(0).unwrap(), "");
+    }
+
+    #[test]
+    fn generate_rejection_cutoff_covers_whole_alphabet_evenly() {
+        assert_eq!(TOKEN_ALPHABET.len(), 62);
+        assert_eq!(TOKEN_REJECTION_CUTOFF, 248);
+        assert_eq!(TOKEN_REJECTION_CUTOFF as usize % TOKEN_ALPHABET.len(), 0);
     }
 }

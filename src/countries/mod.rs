@@ -79,7 +79,7 @@ impl Country {
                 &[DbValue::Text(iso2.to_ascii_uppercase())],
             )
             .await?;
-        Ok(rows.first().map(row_to_country))
+        rows.first().map(row_to_country).transpose()
     }
 
     /// List all countries, ordered by name.
@@ -88,7 +88,7 @@ impl Country {
         let rows = db
             .raw_query("SELECT * FROM countries ORDER BY name", &[])
             .await?;
-        Ok(rows.iter().map(row_to_country).collect())
+        rows.iter().map(row_to_country).collect()
     }
 
     /// List countries filtered by status.
@@ -100,7 +100,7 @@ impl Country {
                 &[DbValue::Text(status.as_str().to_string())],
             )
             .await?;
-        Ok(rows.iter().map(row_to_country).collect())
+        rows.iter().map(row_to_country).collect()
     }
 
     /// List only enabled countries.
@@ -320,12 +320,12 @@ async fn upsert_country_seed(executor: &dyn QueryExecutor, seed: &CountrySeed) -
     Ok(())
 }
 
-fn row_to_country(row: &crate::database::DbRecord) -> Country {
-    Country {
-        iso2: row.text("iso2"),
-        iso3: row.text("iso3"),
+fn row_to_country(row: &crate::database::DbRecord) -> Result<Country> {
+    Ok(Country {
+        iso2: row.try_text("iso2")?,
+        iso3: row.try_text("iso3")?,
         iso_numeric: row.optional_text("iso_numeric"),
-        name: row.text("name"),
+        name: row.try_text("name")?,
         official_name: row.optional_text("official_name"),
         capital: row.optional_text("capital"),
         region: row.optional_text("region"),
@@ -366,7 +366,7 @@ fn row_to_country(row: &crate::database::DbRecord) -> Country {
             _ => None,
         },
         flag_emoji: row.optional_text("flag_emoji"),
-        status: CountryStatus::parse(&row.text("status")),
+        status: CountryStatus::parse(&row.try_text("status")?),
         conversion_rate: match row.get("conversion_rate") {
             Some(DbValue::Float64(v)) => Some(*v),
             _ => None,
@@ -375,7 +375,7 @@ fn row_to_country(row: &crate::database::DbRecord) -> Country {
             Some(DbValue::Bool(v)) => *v,
             _ => false,
         },
-    }
+    })
 }
 
 #[cfg(test)]

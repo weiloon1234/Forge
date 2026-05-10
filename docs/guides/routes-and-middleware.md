@@ -688,14 +688,14 @@ Computes SHA-256 of response body. If client sends `If-None-Match` header matchi
 Extract real client IP from proxy headers:
 
 ```rust
-MiddlewareConfig::from(TrustedProxy::cloudflare())
+MiddlewareConfig::from(TrustedProxy::cloudflare().trusted_cidr("127.0.0.1/32"))
 ```
 
 Resolution order: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` (first entry).
 When configured through `[http.trusted_proxy]`, Forge only honors those headers if the TCP peer IP
-matches `trusted_cidrs`. Code-registered `TrustedProxy::cloudflare()` remains source-compatible and
-trusts all proxy headers; production-like environments log a warning so operators can move to CIDR
-configuration.
+matches `trusted_cidrs`. Code-registered `TrustedProxy::new()` and `TrustedProxy::cloudflare()`
+trust no proxy peers by default; use `trusted_cidr(...)` or config-driven `trusted_cidrs` for
+deployments, and reserve `trust_all()` for controlled tests.
 
 The resolved IP is available via the `RealIp` extractor:
 

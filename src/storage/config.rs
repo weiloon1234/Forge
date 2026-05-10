@@ -6,6 +6,10 @@ use crate::foundation::{Error, Result};
 
 use super::adapter::StorageVisibility;
 
+pub const DEFAULT_MAX_UPLOAD_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_MAX_UPLOAD_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
+pub const DEFAULT_MAX_UPLOAD_FILES: u64 = 20;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
@@ -34,9 +38,9 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             default: "local".to_string(),
-            max_upload_size_bytes: 0,
-            max_upload_file_size_bytes: 0,
-            max_upload_files: 0,
+            max_upload_size_bytes: DEFAULT_MAX_UPLOAD_SIZE_BYTES,
+            max_upload_file_size_bytes: DEFAULT_MAX_UPLOAD_FILE_SIZE_BYTES,
+            max_upload_files: DEFAULT_MAX_UPLOAD_FILES,
             upload_temp_retention_seconds: 3600,
             upload_temp_prune_interval_ms: 3_600_000,
             upload_temp_prune_batch_size: 1000,
@@ -170,9 +174,9 @@ mod tests {
     fn default_storage_config_has_local_default_and_empty_disks() {
         let config = StorageConfig::default();
         assert_eq!(config.default, "local");
-        assert_eq!(config.max_upload_size_bytes, 0);
-        assert_eq!(config.max_upload_file_size_bytes, 0);
-        assert_eq!(config.max_upload_files, 0);
+        assert_eq!(config.max_upload_size_bytes, 104_857_600);
+        assert_eq!(config.max_upload_file_size_bytes, 52_428_800);
+        assert_eq!(config.max_upload_files, 20);
         assert_eq!(config.upload_temp_retention_seconds, 3600);
         assert_eq!(config.upload_temp_prune_interval_ms, 3_600_000);
         assert_eq!(config.upload_temp_prune_batch_size, 1000);

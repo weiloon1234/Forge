@@ -224,7 +224,7 @@ impl Setting {
                 &[DbValue::Text(key.to_string())],
             )
             .await?;
-        Ok(rows.first().map(row_to_setting))
+        rows.first().map(row_to_setting).transpose()
     }
 
     /// Update only the value of an existing setting.
@@ -319,7 +319,7 @@ impl Setting {
                 &[],
             )
             .await?;
-        Ok(rows.iter().map(row_to_setting).collect())
+        rows.iter().map(row_to_setting).collect()
     }
 
     /// List settings in a specific group, ordered by sort_order.
@@ -331,7 +331,7 @@ impl Setting {
                 &[DbValue::Text(group.to_string())],
             )
             .await?;
-        Ok(rows.iter().map(row_to_setting).collect())
+        rows.iter().map(row_to_setting).collect()
     }
 
     /// List settings whose keys start with a given prefix.
@@ -344,7 +344,7 @@ impl Setting {
                 &[DbValue::Text(pattern)],
             )
             .await?;
-        Ok(rows.iter().map(row_to_setting).collect())
+        rows.iter().map(row_to_setting).collect()
     }
 
     /// List only public settings (safe to expose to frontend/unauthenticated API).
@@ -356,7 +356,7 @@ impl Setting {
                 &[],
             )
             .await?;
-        Ok(rows.iter().map(row_to_setting).collect())
+        rows.iter().map(row_to_setting).collect()
     }
 
     /// List all distinct group names, ordered alphabetically.
@@ -368,25 +368,26 @@ impl Setting {
                 &[],
             )
             .await?;
-        Ok(rows.iter().map(|r| r.text("group_name")).collect())
+        rows.iter().map(|r| r.try_text("group_name")).collect()
     }
 }
 
-fn row_to_setting(row: &crate::database::DbRecord) -> Setting {
-    Setting {
-        id: row.text_or_uuid("id"),
-        key: row.text("key"),
+fn row_to_setting(row: &crate::database::DbRecord) -> Result<Setting> {
+    Ok(Setting {
+        id: row.try_text_or_uuid("id")?,
+        key: row.try_text("key")?,
         value: match row.get("value") {
             Some(DbValue::Json(v)) => Some(v.clone()),
             _ => None,
         },
-        setting_type: SettingType::parse(&row.text("setting_type")).unwrap_or(SettingType::Text),
+        setting_type: SettingType::parse(&row.try_text("setting_type")?)
+            .unwrap_or(SettingType::Text),
         parameters: match row.get("parameters") {
             Some(DbValue::Json(v)) => v.clone(),
             _ => serde_json::json!({}),
         },
-        group_name: row.text("group_name"),
-        label: row.text("label"),
+        group_name: row.try_text("group_name")?,
+        label: row.try_text("label")?,
         description: row.optional_text("description"),
         sort_order: match row.get("sort_order") {
             Some(DbValue::Int32(v)) => *v,
@@ -396,7 +397,7 @@ fn row_to_setting(row: &crate::database::DbRecord) -> Setting {
             Some(DbValue::Bool(v)) => *v,
             _ => false,
         },
-    }
+    })
 }
 
 #[cfg(test)]

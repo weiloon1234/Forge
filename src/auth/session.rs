@@ -139,7 +139,7 @@ impl SessionManager {
         let mut conn = self.redis.connection().await?;
         let index_key = self.redis.key(format!("session_index:{guard}:{actor_id}"));
 
-        let session_ids: Vec<String> = conn.smembers(&index_key).await.unwrap_or_default();
+        let session_ids: Vec<String> = conn.smembers(&index_key).await?;
 
         let session_keys: Vec<_> = session_ids
             .iter()

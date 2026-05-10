@@ -54,30 +54,22 @@ impl TokenStore {
         let hash = crate::support::sha256_hex_str(token);
         let expiry_seconds = self.expiry.as_secs() as i64;
 
+        let invalid_msg = format!("invalid or expired {} token", self.kind);
         let rows = self
             .database
             .raw_query(
-                "SELECT token_hash, created_at FROM password_reset_tokens \
-                 WHERE email = $1 AND guard = $2",
+                "DELETE FROM password_reset_tokens \
+                 WHERE email = $1 AND guard = $2 AND token_hash = $3 \
+                 RETURNING created_at",
                 &[
                     DbValue::Text(email.to_string()),
-                    DbValue::Text(guard.clone()),
+                    DbValue::Text(guard),
+                    DbValue::Text(hash),
                 ],
             )
             .await?;
 
-        let invalid_msg = format!("invalid or expired {} token", self.kind);
-
         let row = rows.first().ok_or_else(|| Error::message(&invalid_msg))?;
-
-        let stored_hash = match row.get("token_hash") {
-            Some(DbValue::Text(h)) => h.clone(),
-            _ => return Err(Error::message(&invalid_msg)),
-        };
-
-        if stored_hash != hash {
-            return Err(Error::message(&invalid_msg));
-        }
 
         let created_at = match row.get("created_at") {
             Some(DbValue::TimestampTz(ts)) => *ts,
@@ -88,24 +80,9 @@ impl TokenStore {
         if expiry_seconds > 0
             && (now.as_chrono() - created_at.as_chrono()).num_seconds() > expiry_seconds
         {
-            self.delete_token(email, &guard).await?;
             return Err(Error::message(format!("{} token has expired", self.kind)));
         }
 
-        self.delete_token(email, &guard).await?;
-        Ok(())
-    }
-
-    pub async fn delete_token(&self, email: &str, guard: &str) -> Result<()> {
-        self.database
-            .raw_execute(
-                "DELETE FROM password_reset_tokens WHERE email = $1 AND guard = $2",
-                &[
-                    DbValue::Text(email.to_string()),
-                    DbValue::Text(guard.to_string()),
-                ],
-            )
-            .await?;
         Ok(())
     }
 

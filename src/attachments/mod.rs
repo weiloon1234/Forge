@@ -806,7 +806,7 @@ pub trait HasAttachments: Send + Sync {
                 ],
             )
             .await?;
-        Ok(rows.first().map(row_to_attachment))
+        rows.first().map(row_to_attachment).transpose()
     }
 
     async fn attachments(&self, app: &AppContext, collection: &str) -> Result<Vec<Attachment>> {
@@ -1090,7 +1090,7 @@ async fn attachments_for_identity(
             ],
         )
         .await?;
-    Ok(rows.iter().map(row_to_attachment).collect())
+    rows.iter().map(row_to_attachment).collect()
 }
 
 async fn detach_attachment_by_identity(
@@ -1457,15 +1457,15 @@ fn validate_attachment_locale(app: &AppContext, locale: &str) -> Result<String> 
     Err(Error::http_with_code(400, message, "invalid_locale"))
 }
 
-pub(crate) fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
-    Attachment {
-        id: row.text_or_uuid("id"),
-        attachable_type: row.text("attachable_type"),
-        attachable_id: row.text_or_uuid("attachable_id"),
-        collection: row.text("collection"),
-        disk: row.text("disk"),
-        path: row.text("path"),
-        name: row.text("name"),
+pub(crate) fn row_to_attachment(row: &crate::database::DbRecord) -> Result<Attachment> {
+    Ok(Attachment {
+        id: row.try_text_or_uuid("id")?,
+        attachable_type: row.try_text("attachable_type")?,
+        attachable_id: row.try_text_or_uuid("attachable_id")?,
+        collection: row.try_text("collection")?,
+        disk: row.try_text("disk")?,
+        path: row.try_text("path")?,
+        name: row.try_text("name")?,
         original_name: row.optional_text("original_name"),
         mime_type: row.optional_text("mime_type"),
         size: match row.get("size") {
@@ -1480,7 +1480,7 @@ pub(crate) fn row_to_attachment(row: &crate::database::DbRecord) -> Attachment {
             Some(DbValue::Json(v)) => v.clone(),
             _ => serde_json::json!({}),
         },
-    }
+    })
 }
 
 async fn cached_attachments_for_id(
@@ -1536,7 +1536,7 @@ async fn load_attachment_rows(
             ],
         )
         .await?;
-    Ok(rows.iter().map(row_to_attachment).collect())
+    rows.iter().map(row_to_attachment).collect()
 }
 
 fn invalidate_attachment_cache(

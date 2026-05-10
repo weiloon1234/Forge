@@ -4,6 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::HttpBody as _;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::header::{self, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -1530,8 +1531,7 @@ impl Default for Compression {
 /// Maintenance mode middleware.
 ///
 /// When active, returns `503 Service Unavailable` for all requests unless
-/// a valid bypass secret is supplied via the `X-Maintenance-Bypass` header
-/// or a `bypass` query parameter.
+/// a valid bypass secret is supplied via the `X-Maintenance-Bypass` header.
 ///
 /// Maintenance state is stored in the runtime backend (`maintenance:active` key),
 /// so it works across multiple instances in a distributed setup.
@@ -1546,22 +1546,32 @@ impl Default for Compression {
 #[derive(Clone, Debug)]
 pub struct MaintenanceMode {
     bypass_secret: Option<String>,
+    allow_query_bypass: bool,
 }
 
 impl MaintenanceMode {
     pub fn new() -> Self {
         Self {
             bypass_secret: None,
+            allow_query_bypass: false,
         }
     }
 
     /// Set a secret that allows bypassing maintenance mode.
     ///
-    /// Requests can bypass maintenance by providing the secret via:
-    /// - `X-Maintenance-Bypass` header
-    /// - `bypass` query parameter
+    /// Requests can bypass maintenance by providing the secret via the
+    /// `X-Maintenance-Bypass` header.
     pub fn bypass_secret(mut self, secret: impl Into<String>) -> Self {
         self.bypass_secret = Some(secret.into());
+        self
+    }
+
+    /// Allow the legacy `?bypass=...` query parameter bypass.
+    ///
+    /// Header bypass remains the default because query strings are commonly
+    /// logged by proxies, access logs, and analytics systems.
+    pub fn allow_query_bypass(mut self) -> Self {
+        self.allow_query_bypass = true;
         self
     }
 
@@ -1575,6 +1585,7 @@ impl MaintenanceMode {
             MaintenanceState {
                 app: app.clone(),
                 bypass_secret: self.bypass_secret,
+                allow_query_bypass: self.allow_query_bypass,
             },
             maintenance_middleware,
         ))
@@ -1591,6 +1602,7 @@ impl Default for MaintenanceMode {
 struct MaintenanceState {
     app: AppContext,
     bypass_secret: Option<String>,
+    allow_query_bypass: bool,
 }
 
 async fn maintenance_middleware(
@@ -1632,12 +1644,17 @@ async fn maintenance_middleware(
             }
         }
 
-        // Check bypass query parameter
-        if let Some(query) = request.uri().query() {
-            for param in query.split('&') {
-                if let Some(value) = param.strip_prefix("bypass=") {
-                    if crate::support::hmac::constant_time_eq(value.as_bytes(), secret.as_bytes()) {
-                        return next.run(request).await;
+        // Check legacy bypass query parameter when explicitly enabled.
+        if state.allow_query_bypass {
+            if let Some(query) = request.uri().query() {
+                for param in query.split('&') {
+                    if let Some(value) = param.strip_prefix("bypass=") {
+                        if crate::support::hmac::constant_time_eq(
+                            value.as_bytes(),
+                            secret.as_bytes(),
+                        ) {
+                            return next.run(request).await;
+                        }
                     }
                 }
             }
@@ -1678,17 +1695,31 @@ pub struct TrustedProxy {
 
 impl TrustedProxy {
     /// Create with default header priority (CF-Connecting-IP, X-Real-IP, X-Forwarded-For).
+    ///
+    /// No proxy is trusted by default. Configure trusted CIDRs with
+    /// [`Self::trusted_cidr`] or explicitly opt in to trusting all proxy peers
+    /// with [`Self::trust_all`].
     pub fn new() -> Self {
         Self {
             headers: default_proxy_headers(),
             trusted_cidrs: Vec::new(),
-            trust_all: true,
+            trust_all: false,
         }
     }
 
-    /// Alias for `new()` — documents Cloudflare support.
+    /// Alias for `new()` — documents Cloudflare header priority support.
     pub fn cloudflare() -> Self {
         Self::new()
+    }
+
+    /// Trust proxy headers from any peer.
+    ///
+    /// This is convenient for controlled test environments, but production
+    /// deployments should prefer [`Self::trusted_cidr`] or
+    /// `http.trusted_proxy.trusted_cidrs` configuration.
+    pub fn trust_all(mut self) -> Self {
+        self.trust_all = true;
+        self
     }
 
     /// Append a custom header to the priority list (checked after the defaults).
@@ -1934,6 +1965,8 @@ impl FromStr for IpCidr {
 // ETag — Conditional response middleware
 // ---------------------------------------------------------------------------
 
+const ETAG_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 /// ETag / conditional response middleware.
 ///
 /// Computes a SHA-256 based ETag for successful responses and returns
@@ -1982,9 +2015,12 @@ async fn etag_middleware(request: Request, next: Next) -> Response {
         return response;
     }
 
-    // Skip ETag for large responses (> 10 MB) to avoid excessive memory use
-    const ETAG_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
     let (parts, body) = response.into_parts();
+    let known_size = body.size_hint().upper();
+    if !matches!(known_size, Some(size) if size <= ETAG_MAX_BODY_SIZE as u64) {
+        return Response::from_parts(parts, body);
+    }
+
     let bytes = match axum::body::to_bytes(body, ETAG_MAX_BODY_SIZE).await {
         Ok(bytes) => bytes,
         Err(_) => return Response::from_parts(parts, axum::body::Body::empty()),
@@ -2051,6 +2087,10 @@ mod tests {
         "ok"
     }
 
+    async fn large_body_handler() -> axum::body::Body {
+        axum::body::Body::from(vec![b'x'; ETAG_MAX_BODY_SIZE + 1])
+    }
+
     fn test_app() -> AppContext {
         AppContext::new(
             Container::new(),
@@ -2058,6 +2098,17 @@ mod tests {
             RuleRegistry::new(),
         )
         .unwrap()
+    }
+
+    async fn test_app_in_maintenance(secret: &str) -> AppContext {
+        let app = test_app();
+        let backend = RuntimeBackend::memory(&format!("http-middleware-{}", uuid::Uuid::now_v7()));
+        backend
+            .set_value("maintenance:active", secret, 60)
+            .await
+            .unwrap();
+        app.container().singleton(backend).unwrap();
+        app
     }
 
     async fn json_handler(axum::Json(_payload): axum::Json<serde_json::Value>) -> StatusCode {
@@ -2507,6 +2558,79 @@ mod tests {
         assert!(response.headers().get("x-ratelimit-limit").is_none());
     }
 
+    // ---- MaintenanceMode tests ----
+
+    #[tokio::test]
+    async fn maintenance_query_bypass_is_disabled_by_default() {
+        let app = test_app_in_maintenance("secret").await;
+        let router = MaintenanceMode::new()
+            .apply(
+                axum::Router::<AppContext>::new().route("/", get(ok_handler)),
+                &app,
+            )
+            .with_state(app);
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/?bypass=secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn maintenance_header_bypass_remains_enabled() {
+        let app = test_app_in_maintenance("secret").await;
+        let router = MaintenanceMode::new()
+            .apply(
+                axum::Router::<AppContext>::new().route("/", get(ok_handler)),
+                &app,
+            )
+            .with_state(app);
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("x-maintenance-bypass", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn maintenance_query_bypass_can_be_enabled_for_legacy_clients() {
+        let app = test_app_in_maintenance("secret").await;
+        let router = MaintenanceMode::new()
+            .allow_query_bypass()
+            .apply(
+                axum::Router::<AppContext>::new().route("/", get(ok_handler)),
+                &app,
+            )
+            .with_state(app);
+
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/?bypass=secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     // ---- TrustedProxy tests ----
 
     #[tokio::test]
@@ -2603,6 +2727,54 @@ mod tests {
             .trusted_cidrs
             .iter()
             .any(|cidr| cidr.contains("2001:dead::1".parse().unwrap())));
+    }
+
+    #[test]
+    fn trusted_proxy_new_does_not_trust_headers_without_cidr() {
+        let proxy = TrustedProxy::new();
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let headers = HeaderMap::from_iter([(
+            HeaderName::from_static(X_REAL_IP),
+            HeaderValue::from_static("10.0.0.5"),
+        )]);
+
+        assert_eq!(proxy.resolve_ip(&headers, peer_ip), peer_ip);
+    }
+
+    #[test]
+    fn trusted_proxy_trust_all_preserves_explicit_legacy_behavior() {
+        let proxy = TrustedProxy::new().trust_all();
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let headers = HeaderMap::from_iter([(
+            HeaderName::from_static(X_REAL_IP),
+            HeaderValue::from_static("10.0.0.5"),
+        )]);
+
+        assert_eq!(
+            proxy.resolve_ip(&headers, peer_ip),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))
+        );
+    }
+
+    // ---- ETag tests ----
+
+    #[tokio::test]
+    async fn etag_leaves_known_large_body_unchanged() {
+        let router = ETag::new()
+            .apply(axum::Router::<AppContext>::new().route("/", get(large_body_handler)))
+            .with_state(test_app());
+
+        let response = router
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::ETAG).is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), ETAG_MAX_BODY_SIZE + 1);
     }
 
     #[test]

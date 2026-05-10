@@ -624,11 +624,11 @@ const JOBS_FIELDS: &[PublishedField] = &[
     field("requeue_batch_size", "64", "64", false, false, None),
     field(
         "max_concurrent_jobs",
-        "0",
-        "0",
+        "16",
+        "16",
         false,
         false,
-        Some("0 = unlimited"),
+        Some("Worker concurrency cap (0 = explicit unlimited)"),
     ),
     field("timeout_seconds", "300", "300", false, false, None),
     field("shutdown_timeout_ms", "30000", "30000", false, false, None),
@@ -730,7 +730,7 @@ const WEBSOCKET_FIELDS: &[PublishedField] = &[
         "true",
         false,
         false,
-        Some("Allow browser clients to pass bearer auth as a query token"),
+        Some("Allow browser clients to pass short-lived bearer auth as a query token"),
     ),
     field(
         "query_token_name",
@@ -754,7 +754,7 @@ const WEBSOCKET_FIELDS: &[PublishedField] = &[
         "",
         false,
         false,
-        Some("Exact Origin allow-list; empty allows any origin"),
+        Some("Exact Origin allow-list; production/staging reject browser origins when empty"),
     ),
     field(
         "history_buffer_size",
@@ -1036,24 +1036,24 @@ const STORAGE_FIELDS: &[PublishedField] = &[
     field("default", "\"local\"", "local", false, false, None),
     field(
         "max_upload_size_bytes",
-        "0",
-        "0",
+        "104857600",
+        "104857600",
         false,
         false,
         Some("Total multipart file bytes per request (0 = no storage-level cap)"),
     ),
     field(
         "max_upload_file_size_bytes",
-        "0",
-        "0",
+        "52428800",
+        "52428800",
         false,
         false,
         Some("Per-file multipart upload cap (0 = no storage-level cap)"),
     ),
     field(
         "max_upload_files",
-        "0",
-        "0",
+        "20",
+        "20",
         false,
         false,
         Some("Max uploaded files per multipart request (0 = no storage-level cap)"),
@@ -1796,10 +1796,11 @@ mod tests {
         assert!(output.contains("# max_room_length = 256"));
         assert!(output.contains("# max_ack_id_length = 128"));
         assert!(output.contains(
-            "# query_token_enabled = true  # Allow browser clients to pass bearer auth as a query token"
+            "# query_token_enabled = true  # Allow browser clients to pass short-lived bearer auth as a query token"
         ));
         assert!(output.contains("# query_token_name = \"token\""));
         assert!(output.contains("# query_token_max_length = 4096"));
+        assert!(output.contains("# allowed_origins = []  # Exact Origin allow-list"));
         assert!(env.contains("# WEBSOCKET__MAX_MESSAGE_SIZE_BYTES=1048576"));
         assert!(env.contains("# WEBSOCKET__MAX_SUBSCRIPTIONS_PER_CONNECTION=100"));
         assert!(env.contains("# WEBSOCKET__QUERY_TOKEN_ENABLED=true"));
@@ -1901,12 +1902,11 @@ mod tests {
         let env = render_sample_env();
 
         assert!(output.contains("[storage]"));
-        assert!(output.contains("# max_upload_size_bytes = 0  # Total multipart file bytes per request (0 = no storage-level cap)"));
+        assert!(output.contains("# max_upload_size_bytes = 104857600  # Total multipart file bytes per request (0 = no storage-level cap)"));
+        assert!(output
+            .contains("# max_upload_file_size_bytes = 52428800  # Per-file multipart upload cap"));
         assert!(
-            output.contains("# max_upload_file_size_bytes = 0  # Per-file multipart upload cap")
-        );
-        assert!(
-            output.contains("# max_upload_files = 0  # Max uploaded files per multipart request")
+            output.contains("# max_upload_files = 20  # Max uploaded files per multipart request")
         );
         assert!(output.contains("# upload_temp_retention_seconds = 3600"));
         assert!(output.contains("# image_max_input_bytes = 52428800"));
@@ -1914,7 +1914,7 @@ mod tests {
         assert!(output.contains("# attachment_orphan_audit_enabled = true"));
         assert!(output.contains("# attachment_orphan_delete_enabled = false"));
         assert!(output.contains("# attachment_orphan_prefix = \"attachments/\""));
-        assert!(env.contains("# STORAGE__MAX_UPLOAD_SIZE_BYTES=0"));
+        assert!(env.contains("# STORAGE__MAX_UPLOAD_SIZE_BYTES=104857600"));
         assert!(env.contains("# STORAGE__UPLOAD_TEMP_RETENTION_SECONDS=3600"));
         assert!(env.contains("# STORAGE__IMAGE_MAX_INPUT_BYTES=52428800"));
         assert!(env.contains("# STORAGE__ATTACHMENT_ORPHAN_AUDIT_ENABLED=true"));

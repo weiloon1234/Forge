@@ -307,9 +307,9 @@ mod tests {
     #[tokio::test]
     async fn cleanup_form_files_removes_only_forge_upload_temps() {
         let dir = tempfile::tempdir().unwrap();
-        let forge_temp = dir
-            .path()
-            .join(format!("forge-upload-{}", uuid::Uuid::now_v7()));
+        let forge_dir = crate::storage::upload::forge_upload_temp_dir();
+        std::fs::create_dir_all(&forge_dir).unwrap();
+        let forge_temp = forge_dir.join(format!("forge-upload-{}", uuid::Uuid::now_v7()));
         let other_temp = dir.path().join("other-upload");
         std::fs::write(&forge_temp, b"temp").unwrap();
         std::fs::write(&other_temp, b"keep").unwrap();

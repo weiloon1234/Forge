@@ -18,6 +18,7 @@ use crate::logging::{LogFormat, LogLevel};
 use crate::support::{GuardId, QueueId, Timezone};
 
 const MIN_SIGNING_KEY_BYTES: usize = 32;
+const MIN_AUTH_TOKEN_LENGTH: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct ConfigRepository {
@@ -436,7 +437,9 @@ pub struct WebSocketConfig {
     /// Maximum decoded query-token bytes. `0` disables this cap.
     pub query_token_max_length: usize,
     /// Optional exact Origin allow-list for browser WebSocket handshakes.
-    /// Empty means any origin is accepted.
+    /// Empty remains permissive outside production-like environments. In
+    /// production and staging, browser handshakes with an Origin header are
+    /// rejected when this list is empty.
     pub allowed_origins: Vec<String>,
     /// Maximum number of recent messages retained per channel for replay and
     /// observability history.
@@ -503,7 +506,7 @@ impl Default for JobsConfig {
             poll_interval_ms: 100,
             lease_ttl_ms: 30_000,
             requeue_batch_size: 64,
-            max_concurrent_jobs: 0,
+            max_concurrent_jobs: 16,
             timeout_seconds: 300,
             shutdown_timeout_ms: 30_000,
             track_history: true,
@@ -1095,7 +1098,13 @@ impl ConfigRepository {
     }
 
     pub fn auth(&self) -> Result<AuthConfig> {
-        self.section("auth")
+        let auth: AuthConfig = self.section("auth")?;
+        if auth.tokens.token_length < MIN_AUTH_TOKEN_LENGTH {
+            return Err(Error::message(format!(
+                "auth.tokens.token_length must be at least {MIN_AUTH_TOKEN_LENGTH}"
+            )));
+        }
+        Ok(auth)
     }
 
     pub fn audit(&self) -> Result<AuditConfig> {
@@ -1544,6 +1553,7 @@ mod tests {
         assert_eq!(jobs.max_retries, 9);
         assert_eq!(jobs.lease_ttl_ms, 45_000);
         assert_eq!(jobs.requeue_batch_size, 12);
+        assert_eq!(jobs.max_concurrent_jobs, 16);
         assert_eq!(jobs.shutdown_timeout_ms, 12_000);
         assert_eq!(jobs.history_retention_days, 45);
         assert_eq!(jobs.history_prune_interval_ms, 60_000);
@@ -1556,6 +1566,7 @@ mod tests {
     #[test]
     fn jobs_config_defaults_shutdown_timeout() {
         let jobs: JobsConfig = ConfigRepository::empty().jobs().unwrap();
+        assert_eq!(jobs.max_concurrent_jobs, 16);
         assert_eq!(jobs.shutdown_timeout_ms, 30_000);
         assert_eq!(jobs.history_retention_days, 30);
         assert_eq!(jobs.history_prune_interval_ms, 3_600_000);
@@ -1682,6 +1693,7 @@ mod tests {
         assert!(websocket.query_token_enabled);
         assert_eq!(websocket.query_token_name, "token");
         assert_eq!(websocket.query_token_max_length, 4_096);
+        assert!(websocket.allowed_origins.is_empty());
     }
 
     #[test]
@@ -1863,6 +1875,26 @@ mod tests {
         assert_eq!(auth.email_verification.expiry_minutes, 720);
         assert_eq!(auth.email_verification.prune_interval_ms, 90_000);
         assert_eq!(auth.email_verification.prune_batch_size, 30);
+    }
+
+    #[test]
+    fn auth_config_rejects_weak_token_length() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("00-auth.toml"),
+            r#"
+                [auth.tokens]
+                token_length = 0
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let error = config.auth().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("auth.tokens.token_length must be at least 32"));
     }
 
     #[test]

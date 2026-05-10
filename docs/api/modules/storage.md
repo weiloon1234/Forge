@@ -47,6 +47,9 @@ trait StorageAdapter
 ## forge::storage::config
 
 ```rust
+pub const DEFAULT_MAX_UPLOAD_FILES: u64;
+pub const DEFAULT_MAX_UPLOAD_FILE_SIZE_BYTES: u64;
+pub const DEFAULT_MAX_UPLOAD_SIZE_BYTES: u64;
 struct ResolvedLocalConfig
   fn from_table(table: &Table) -> Result<Self>
 struct ResolvedS3Config

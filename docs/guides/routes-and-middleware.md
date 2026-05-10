@@ -445,8 +445,10 @@ referrer_policy = "strict-origin-when-cross-origin"
 content_security_policy = ""
 
 [http.trusted_proxy]
-enabled = false
-trusted_cidrs = []
+enabled = true
+# Defaults to Cloudflare ranges. Add loopback/private CIDRs if a local reverse proxy
+# sits between Cloudflare and Forge.
+trusted_cidrs = ["173.245.48.0/20", "103.21.244.0/22", "..."]
 headers = ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"]
 
 [http.cors]
@@ -467,16 +469,17 @@ cookie_same_site = "lax"       # lax | strict | none; none requires secure cooki
 exclude_paths = []
 
 [http.rate_limit]
-enabled = false
+enabled = true
 max_requests = 600
 window_seconds = 60
 by = "actor_or_ip"             # ip | actor | actor_or_ip
 key_prefix = "http:"
 ```
 
-Compatibility defaults keep hard caps, CORS, trusted proxy, CSRF, and rate limiting opt-in.
-Security headers are enabled by default with HSTS off, so local HTTP and first deploys stay usable
-while still publishing the production hardening knobs.
+Compatibility defaults keep hard caps, CORS, and CSRF opt-in. Trusted proxy is enabled by default
+for Cloudflare CIDRs only, rate limiting is enabled by default with `actor_or_ip`, and security
+headers are enabled by default with HSTS off, so local HTTP and first deploys stay usable while
+still publishing the production hardening knobs.
 
 ### Execution Order
 
@@ -688,14 +691,15 @@ Computes SHA-256 of response body. If client sends `If-None-Match` header matchi
 Extract real client IP from proxy headers:
 
 ```rust
-MiddlewareConfig::from(TrustedProxy::cloudflare().trusted_cidr("127.0.0.1/32"))
+MiddlewareConfig::from(TrustedProxy::cloudflare())
 ```
 
 Resolution order: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` (first entry).
 When configured through `[http.trusted_proxy]`, Forge only honors those headers if the TCP peer IP
-matches `trusted_cidrs`. Code-registered `TrustedProxy::new()` and `TrustedProxy::cloudflare()`
-trust no proxy peers by default; use `trusted_cidr(...)` or config-driven `trusted_cidrs` for
-deployments, and reserve `trust_all()` for controlled tests.
+matches `trusted_cidrs`. The default CIDR set trusts Cloudflare proxy ranges, so
+code-registered `TrustedProxy::new()` and `TrustedProxy::cloudflare()` accept Cloudflare by
+default. Add `trusted_cidr("127.0.0.1/32")` or config loopback CIDRs when Nginx/Caddy sits on the
+same host between Cloudflare and Forge, and reserve `trust_all()` for controlled tests.
 
 The resolved IP is available via the `RealIp` extractor:
 

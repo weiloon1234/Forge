@@ -17,7 +17,7 @@ use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{
     HttpConfig, HttpCorsConfig, HttpCsrfConfig, HttpRateLimitByConfig, HttpRateLimitConfig,
-    HttpSecurityHeadersConfig, HttpTrustedProxyConfig,
+    HttpSecurityHeadersConfig, HttpTrustedProxyConfig, CLOUDFLARE_TRUSTED_CIDRS,
 };
 use crate::foundation::{AppContext, Error, Result};
 use crate::logging::RuntimeBackendKind;
@@ -1694,20 +1694,21 @@ pub struct TrustedProxy {
 }
 
 impl TrustedProxy {
-    /// Create with default header priority (CF-Connecting-IP, X-Real-IP, X-Forwarded-For).
+    /// Create with default header priority (CF-Connecting-IP, X-Real-IP, X-Forwarded-For)
+    /// and Cloudflare proxy CIDR trust.
     ///
-    /// No proxy is trusted by default. Configure trusted CIDRs with
-    /// [`Self::trusted_cidr`] or explicitly opt in to trusting all proxy peers
-    /// with [`Self::trust_all`].
+    /// Only Cloudflare proxy peers are trusted by default. Configure additional
+    /// trusted CIDRs with [`Self::trusted_cidr`] or explicitly opt in to
+    /// trusting all proxy peers with [`Self::trust_all`].
     pub fn new() -> Self {
         Self {
             headers: default_proxy_headers(),
-            trusted_cidrs: Vec::new(),
+            trusted_cidrs: default_trusted_proxy_cidrs(),
             trust_all: false,
         }
     }
 
-    /// Alias for `new()` — documents Cloudflare header priority support.
+    /// Alias for `new()` — documents Cloudflare header and CIDR support.
     pub fn cloudflare() -> Self {
         Self::new()
     }
@@ -1885,6 +1886,16 @@ fn default_proxy_headers() -> Vec<HeaderName> {
         HeaderName::from_static(X_REAL_IP),
         HeaderName::from_static(X_FORWARDED_FOR),
     ]
+}
+
+fn default_trusted_proxy_cidrs() -> Vec<IpCidr> {
+    CLOUDFLARE_TRUSTED_CIDRS
+        .iter()
+        .map(|cidr| {
+            cidr.parse::<IpCidr>()
+                .expect("Cloudflare trusted proxy CIDR constant is valid")
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2558,6 +2569,30 @@ mod tests {
         assert!(response.headers().get("x-ratelimit-limit").is_none());
     }
 
+    #[test]
+    fn actor_or_ip_rate_limit_uses_cloudflare_real_ip_fallback() {
+        let state = RateLimitState {
+            max: 1,
+            window_secs: 60,
+            key_prefix: "test:".to_string(),
+            by: RateLimitBy::ActorOrIp,
+            store: RateLimitStore::Memory(Arc::new(Mutex::new(HashMap::new()))),
+        };
+        let headers = HeaderMap::from_iter([(
+            HeaderName::from_static(CF_CONNECTING_IP),
+            HeaderValue::from_static("203.0.113.9"),
+        )]);
+        let cloudflare_peer = IpAddr::V4(Ipv4Addr::new(173, 245, 48, 1));
+        let real_ip = TrustedProxy::new().resolve_ip(&headers, cloudflare_peer);
+        let mut request = HttpRequest::builder().body(Body::empty()).unwrap();
+        request.extensions_mut().insert(RealIp(real_ip));
+
+        assert_eq!(
+            rate_limit_key_from_request(&state, &request).as_deref(),
+            Some("ip:203.0.113.9")
+        );
+    }
+
     // ---- MaintenanceMode tests ----
 
     #[tokio::test]
@@ -2730,7 +2765,22 @@ mod tests {
     }
 
     #[test]
-    fn trusted_proxy_new_does_not_trust_headers_without_cidr() {
+    fn trusted_proxy_new_trusts_cloudflare_peer_by_default() {
+        let proxy = TrustedProxy::new();
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(173, 245, 48, 1));
+        let headers = HeaderMap::from_iter([(
+            HeaderName::from_static(X_REAL_IP),
+            HeaderValue::from_static("10.0.0.5"),
+        )]);
+
+        assert_eq!(
+            proxy.resolve_ip(&headers, peer_ip),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_new_ignores_headers_from_untrusted_peer() {
         let proxy = TrustedProxy::new();
         let peer_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
         let headers = HeaderMap::from_iter([(

@@ -297,7 +297,7 @@ struct RouteRegistry
 ## Notes
 
 - `HttpConfig.security_headers` is applied globally by default with HSTS disabled until explicitly enabled.
-- `HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; code-registered `TrustedProxy::new()` trusts no peers until CIDRs or `trust_all()` are configured.
+- `HttpConfig.trusted_proxy` honors forwarded client IP headers only from configured CIDRs; the default CIDR set trusts Cloudflare ranges, and `TrustedProxy::new()` uses the same Cloudflare-safe default.
 - Config-derived CORS validates origins, methods, and headers at boot; wildcard origins with credentials are rejected.
 - Config-derived CSRF is opt-in; code-registered `Csrf` remains source-compatible and path exclusions are segment-aware.
 - Config-derived body-limit, request-timeout, and rate-limit rejections return JSON `ErrorResponse` bodies with HTTP 413, 408, and 429.

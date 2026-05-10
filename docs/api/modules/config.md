@@ -7,6 +7,7 @@ TOML-based configuration (ConfigRepository, AppConfig, etc.)
 ## forge::config
 
 ```rust
+pub const CLOUDFLARE_TRUSTED_CIDRS: &[&str];
 enum CacheDriver { Redis, Memory }
 enum CacheErrorMode { Strict, FailOpen }
 enum Environment { Development, Production, Staging, Testing, Custom }
@@ -89,7 +90,7 @@ struct WebSocketObservabilityConfig
 
 - `AppConfig` fields: `name`, `environment`, `timezone`, `signing_key`, `background_shutdown_timeout_ms`.
 - `AuditConfig.redact_sensitive_fields` is enabled by default and redacts common credential-like model columns in audit JSON.
-- `HttpConfig` is optional and additive: global body cap, request timeout, CORS, CSRF, trusted proxy, and rate limiting are opt-in; security headers are enabled by default with HSTS off.
+- `HttpConfig` is optional and additive: global body cap, request timeout, CORS, and CSRF are opt-in; trusted proxy is enabled by default for Cloudflare CIDRs, rate limiting is enabled by default with `actor_or_ip`, and security headers are enabled by default with HSTS off.
 - `CacheConfig.error_mode` defaults to `strict`; `remember_singleflight` is enabled by default and distributed remember locks are opt-in.
 - `DatabaseConfig.migration_lock_timeout_ms` defaults to `0`; `db:migrate` and `db:rollback` wait forever for the migration advisory lock unless overridden.
 - `DatabaseConfig.redact_sql_literals` is enabled by default so SQL logs and `/_forge/sql` retain query shape without common literal values.

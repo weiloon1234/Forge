@@ -88,6 +88,9 @@ const fn section(title: &'static str, parts: &'static [PublishedPart]) -> Publis
     PublishedSection { title, parts }
 }
 
+const CLOUDFLARE_TRUSTED_CIDRS_TOML: &str = "[\"173.245.48.0/20\", \"103.21.244.0/22\", \"103.22.200.0/22\", \"103.31.4.0/22\", \"141.101.64.0/18\", \"108.162.192.0/18\", \"190.93.240.0/20\", \"188.114.96.0/20\", \"197.234.240.0/22\", \"198.41.128.0/17\", \"162.158.0.0/15\", \"104.16.0.0/13\", \"104.24.0.0/14\", \"172.64.0.0/13\", \"131.0.72.0/22\", \"2400:cb00::/32\", \"2606:4700::/32\", \"2803:f800::/32\", \"2405:b500::/32\", \"2405:8100::/32\", \"2a06:98c0::/29\", \"2c0f:f248::/32\"]";
+const CLOUDFLARE_TRUSTED_CIDRS_ENV: &str = "[\"173.245.48.0/20\",\"103.21.244.0/22\",\"103.22.200.0/22\",\"103.31.4.0/22\",\"141.101.64.0/18\",\"108.162.192.0/18\",\"190.93.240.0/20\",\"188.114.96.0/20\",\"197.234.240.0/22\",\"198.41.128.0/17\",\"162.158.0.0/15\",\"104.16.0.0/13\",\"104.24.0.0/14\",\"172.64.0.0/13\",\"131.0.72.0/22\",\"2400:cb00::/32\",\"2606:4700::/32\",\"2803:f800::/32\",\"2405:b500::/32\",\"2405:8100::/32\",\"2a06:98c0::/29\",\"2c0f:f248::/32\"]";
+
 const APP_FIELDS: &[PublishedField] = &[
     field(
         "name",
@@ -178,14 +181,21 @@ const HTTP_SECURITY_HEADERS_FIELDS: &[PublishedField] = &[
 ];
 
 const HTTP_TRUSTED_PROXY_FIELDS: &[PublishedField] = &[
-    field("enabled", "false", "false", false, false, None),
+    field(
+        "enabled",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Enabled by default so Cloudflare client IP headers work automatically"),
+    ),
     field(
         "trusted_cidrs",
-        "[]",
-        "[]",
+        CLOUDFLARE_TRUSTED_CIDRS_TOML,
+        CLOUDFLARE_TRUSTED_CIDRS_ENV,
         false,
         false,
-        Some("Proxy CIDRs allowed to supply client IP headers"),
+        Some("Proxy CIDRs allowed to supply client IP headers; defaults to Cloudflare ranges"),
     ),
     field(
         "headers",
@@ -266,7 +276,14 @@ const HTTP_CSRF_FIELDS: &[PublishedField] = &[
 ];
 
 const HTTP_RATE_LIMIT_FIELDS: &[PublishedField] = &[
-    field("enabled", "false", "false", false, false, None),
+    field(
+        "enabled",
+        "true",
+        "true",
+        false,
+        false,
+        Some("Enabled by default with actor-or-IP keys"),
+    ),
     field("max_requests", "600", "600", false, false, None),
     field("window_seconds", "60", "60", false, false, None),
     field(
@@ -1768,16 +1785,19 @@ mod tests {
         assert!(output.contains("[http.security_headers]"));
         assert!(output.contains("# enabled = true"));
         assert!(output.contains("[http.trusted_proxy]"));
+        assert!(output.contains("# enabled = true  # Enabled by default so Cloudflare client IP headers work automatically"));
         assert!(output
             .contains("# headers = [\"cf-connecting-ip\", \"x-real-ip\", \"x-forwarded-for\"]"));
         assert!(output.contains("[http.cors]"));
         assert!(output.contains("[http.csrf]"));
         assert!(output.contains("# cookie_same_site = \"lax\"  # \"lax\", \"strict\", or \"none\"; none requires secure cookies"));
         assert!(output.contains("[http.rate_limit]"));
+        assert!(output.contains("# enabled = true  # Enabled by default with actor-or-IP keys"));
         assert!(output.contains("# by = \"actor_or_ip\"  # \"ip\", \"actor\", or \"actor_or_ip\""));
         assert!(env.contains("# HTTP__MAX_BODY_SIZE_BYTES=0"));
         assert!(env.contains("# HTTP__CSRF__COOKIE_SAME_SITE=lax"));
-        assert!(env.contains("# HTTP__TRUSTED_PROXY__TRUSTED_CIDRS=[]"));
+        assert!(env.contains("# HTTP__TRUSTED_PROXY__TRUSTED_CIDRS=[\"173.245.48.0/20\""));
+        assert!(env.contains("\"2c0f:f248::/32\"]"));
         assert!(env.contains("# HTTP__RATE_LIMIT__BY=actor_or_ip"));
     }
 

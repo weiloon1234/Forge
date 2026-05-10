@@ -20,6 +20,34 @@ use crate::support::{GuardId, QueueId, Timezone};
 const MIN_SIGNING_KEY_BYTES: usize = 32;
 const MIN_AUTH_TOKEN_LENGTH: usize = 32;
 
+/// Official Cloudflare reverse-proxy CIDR ranges.
+///
+/// Source: https://www.cloudflare.com/ips/
+pub const CLOUDFLARE_TRUSTED_CIDRS: &[&str] = &[
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+    "2400:cb00::/32",
+    "2606:4700::/32",
+    "2803:f800::/32",
+    "2405:b500::/32",
+    "2405:8100::/32",
+    "2a06:98c0::/29",
+    "2c0f:f248::/32",
+];
+
 #[derive(Clone, Debug)]
 pub struct ConfigRepository {
     root: Arc<Value>,
@@ -204,8 +232,11 @@ pub struct HttpTrustedProxyConfig {
 impl Default for HttpTrustedProxyConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            trusted_cidrs: Vec::new(),
+            enabled: true,
+            trusted_cidrs: CLOUDFLARE_TRUSTED_CIDRS
+                .iter()
+                .map(|cidr| (*cidr).to_string())
+                .collect(),
             headers: vec![
                 "cf-connecting-ip".to_string(),
                 "x-real-ip".to_string(),
@@ -299,7 +330,7 @@ pub struct HttpRateLimitConfig {
 impl Default for HttpRateLimitConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_requests: 600,
             window_seconds: 60,
             by: HttpRateLimitByConfig::ActorOrIp,
@@ -1258,7 +1289,7 @@ mod tests {
         AppConfig, AuditConfig, AuthConfig, CacheConfig, CacheDriver, CacheErrorMode,
         ConfigRepository, DatabaseConfig, DatatableConfig, Environment, HttpConfig,
         HttpRateLimitByConfig, JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig,
-        SchedulerConfig, TypeScriptConfig, WebSocketConfig,
+        SchedulerConfig, TypeScriptConfig, WebSocketConfig, CLOUDFLARE_TRUSTED_CIDRS,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -1639,8 +1670,15 @@ mod tests {
         assert!(http.security_headers.enabled);
         assert!(!http.security_headers.hsts);
         assert_eq!(http.security_headers.frame_options, "DENY");
-        assert!(!http.trusted_proxy.enabled);
-        assert!(http.trusted_proxy.trusted_cidrs.is_empty());
+        assert!(http.trusted_proxy.enabled);
+        assert_eq!(
+            http.trusted_proxy
+                .trusted_cidrs
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            CLOUDFLARE_TRUSTED_CIDRS
+        );
         assert_eq!(
             http.trusted_proxy.headers,
             vec!["cf-connecting-ip", "x-real-ip", "x-forwarded-for"]
@@ -1666,7 +1704,7 @@ mod tests {
         assert_eq!(http.csrf.cookie_path, "/");
         assert_eq!(http.csrf.cookie_same_site, "lax");
         assert!(http.csrf.exclude_paths.is_empty());
-        assert!(!http.rate_limit.enabled);
+        assert!(http.rate_limit.enabled);
         assert_eq!(http.rate_limit.max_requests, 600);
         assert_eq!(http.rate_limit.window_seconds, 60);
         assert_eq!(http.rate_limit.by, HttpRateLimitByConfig::ActorOrIp);

@@ -771,7 +771,7 @@ const WEBSOCKET_FIELDS: &[PublishedField] = &[
         "",
         false,
         false,
-        Some("Exact Origin allow-list; production/staging reject browser origins when empty"),
+        Some("Exact Origin allow-list; empty allows same-origin in production/staging"),
     ),
     field(
         "history_buffer_size",

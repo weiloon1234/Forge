@@ -8,7 +8,8 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::uri::Authority;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
@@ -671,18 +672,91 @@ fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String], production_li
         return true;
     }
 
-    if allowed_origins.is_empty() {
-        return !production_like || !headers.contains_key(axum::http::header::ORIGIN);
-    }
-
     let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
     else {
+        return allowed_origins.is_empty();
+    };
+
+    if allowed_origins.is_empty() {
+        return !production_like || origin_matches_request_host(headers, origin);
+    }
+
+    allowed_origins.iter().any(|allowed| allowed == origin)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OriginAuthority {
+    host: String,
+    port: Option<u16>,
+}
+
+impl OriginAuthority {
+    fn parse(value: &str) -> Option<Self> {
+        let raw = value.split(',').next()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        let authority = raw.parse::<Authority>().ok()?;
+        let host = authority
+            .host()
+            .trim_matches(|ch| ch == '[' || ch == ']')
+            .to_ascii_lowercase();
+        if host.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            host,
+            port: authority.port_u16(),
+        })
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.host == other.host
+            && (self.port == other.port || self.port.is_none() || other.port.is_none())
+    }
+}
+
+fn origin_matches_request_host(headers: &HeaderMap, origin: &str) -> bool {
+    let Some(origin) = origin_authority(origin) else {
         return false;
     };
 
-    allowed_origins.iter().any(|allowed| allowed == origin)
+    request_authorities(headers)
+        .into_iter()
+        .any(|authority| origin.matches(&authority))
+}
+
+fn origin_authority(origin: &str) -> Option<OriginAuthority> {
+    let uri = origin.parse::<Uri>().ok()?;
+    if !matches!(uri.scheme_str(), Some("http") | Some("https")) {
+        return None;
+    }
+
+    OriginAuthority::parse(uri.authority()?.as_str())
+}
+
+fn request_authorities(headers: &HeaderMap) -> Vec<OriginAuthority> {
+    let mut authorities = Vec::new();
+
+    for name in ["x-forwarded-host", axum::http::header::HOST.as_str()] {
+        let Some(authority) = headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(OriginAuthority::parse)
+        else {
+            continue;
+        };
+
+        if !authorities.contains(&authority) {
+            authorities.push(authority);
+        }
+    }
+
+    authorities
 }
 
 fn extract_client_ip(
@@ -2051,15 +2125,41 @@ mod tests {
     }
 
     #[test]
-    fn websocket_empty_origin_allowlist_rejects_browser_origin_in_production() {
+    fn websocket_empty_origin_allowlist_allows_same_origin_in_production() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
             "https://example.com".parse().unwrap(),
         );
+        headers.insert(axum::http::header::HOST, "example.com".parse().unwrap());
+
+        assert!(origin_allowed(&headers, &[], true));
+        assert!(origin_allowed(&HeaderMap::new(), &[], true));
+    }
+
+    #[test]
+    fn websocket_empty_origin_allowlist_allows_forwarded_same_origin_in_production() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://example.com".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "127.0.0.1:3010".parse().unwrap());
+        headers.insert("x-forwarded-host", "example.com".parse().unwrap());
+
+        assert!(origin_allowed(&headers, &[], true));
+    }
+
+    #[test]
+    fn websocket_empty_origin_allowlist_rejects_cross_origin_in_production() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.test".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "example.com".parse().unwrap());
 
         assert!(!origin_allowed(&headers, &[], true));
-        assert!(origin_allowed(&HeaderMap::new(), &[], true));
     }
 
     #[test]

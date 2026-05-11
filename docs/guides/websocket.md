@@ -376,12 +376,12 @@ outbound_buffer_size = 1024           # queued outbound frames before disconnect
 query_token_enabled = true            # allow ?token=... browser bearer auth
 query_token_name = "token"            # query parameter name for bearer auth
 query_token_max_length = 4096         # decoded query-token bytes; 0 = unlimited
-allowed_origins = []                  # exact Origin allow-list; empty allows any
+allowed_origins = []                  # exact Origin allow-list; empty allows same-origin in production/staging
 history_buffer_size = 50              # recent messages retained per channel
 history_ttl_seconds = 604800          # auto-reap idle history after 7 days
 ```
 
-If `allowed_origins` is non-empty, browser handshakes must include an `Origin` header that exactly matches one configured value. Use this with session-cookie authentication to prevent cross-site WebSocket handshakes.
+If `allowed_origins` is empty, Forge allows same-origin browser handshakes in production/staging and remains permissive outside production-like environments. If `allowed_origins` is non-empty, browser handshakes must include an `Origin` header that exactly matches one configured value. Use this with session-cookie authentication to prevent cross-site WebSocket handshakes.
 
 Forge accepts bearer tokens in the query string by default because browser
 WebSocket clients cannot set custom `Authorization` headers. The decoded token

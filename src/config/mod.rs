@@ -469,8 +469,8 @@ pub struct WebSocketConfig {
     pub query_token_max_length: usize,
     /// Optional exact Origin allow-list for browser WebSocket handshakes.
     /// Empty remains permissive outside production-like environments. In
-    /// production and staging, browser handshakes with an Origin header are
-    /// rejected when this list is empty.
+    /// production and staging, an empty list allows same-origin browser
+    /// handshakes and rejects cross-origin handshakes.
     pub allowed_origins: Vec<String>,
     /// Maximum number of recent messages retained per channel for replay and
     /// observability history.

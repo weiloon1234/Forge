@@ -428,9 +428,11 @@ App::builder()
 
 ### Global HTTP Config
 
-Forge can also derive global edge middleware from `config/forge.toml`. This is additive: existing
-route middleware and code-registered global middleware keep working, and an explicitly registered
-middleware kind wins over the config-derived duplicate.
+Forge can also derive global edge middleware from split files under `config/`, for example
+`config/10-http.toml`. Forge loads every direct `config/*.toml` file in lexical order, merges
+them in memory, then applies `.env` overrides. This is additive: existing route middleware and
+code-registered global middleware keep working, and an explicitly registered middleware kind wins
+over the config-derived duplicate.
 
 ```toml
 [http]

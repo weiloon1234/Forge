@@ -1330,6 +1330,74 @@ mod tests {
     }
 
     #[test]
+    fn later_config_files_override_same_section_values() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("JOBS__MAX_CONCURRENT_JOBS");
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("40-runtime.toml"),
+            r#"
+                [jobs]
+                max_concurrent_jobs = 16
+                timeout_seconds = 300
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("99-local.toml"),
+            r#"
+                [jobs]
+                max_concurrent_jobs = 4
+            "#,
+        )
+        .unwrap();
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let jobs = config.jobs().unwrap();
+
+        assert_eq!(jobs.max_concurrent_jobs, 4);
+        assert_eq!(jobs.timeout_seconds, 300);
+    }
+
+    #[test]
+    fn env_overlay_wins_after_split_config_merge() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("SERVER__PORT", "4123");
+        let directory = tempdir().unwrap();
+        for (filename, content) in super::published::render_sample_config_files() {
+            fs::write(directory.path().join(filename), content).unwrap();
+        }
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let server = config.server().unwrap();
+
+        std::env::remove_var("SERVER__PORT");
+        assert_eq!(server.port, 4123);
+    }
+
+    #[test]
+    fn generated_split_config_matches_single_file_config() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("SERVER__PORT");
+        let single_directory = tempdir().unwrap();
+        fs::write(
+            single_directory.path().join("forge.toml"),
+            super::published::render_sample_config(),
+        )
+        .unwrap();
+
+        let split_directory = tempdir().unwrap();
+        for (filename, content) in super::published::render_sample_config_files() {
+            fs::write(split_directory.path().join(filename), content).unwrap();
+        }
+
+        let single = ConfigRepository::from_dir(single_directory.path()).unwrap();
+        let split = ConfigRepository::from_dir(split_directory.path()).unwrap();
+
+        assert_eq!(single.root(), split.root());
+    }
+
+    #[test]
     fn parses_app_timezone_config_section() {
         let _guard = env_lock().lock().unwrap();
         let directory = tempdir().unwrap();

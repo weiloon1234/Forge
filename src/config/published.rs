@@ -34,6 +34,7 @@ enum PublishedPart {
 
 #[derive(Clone, Copy)]
 struct PublishedSection {
+    config_file: &'static str,
     title: &'static str,
     parts: &'static [PublishedPart],
 }
@@ -84,8 +85,16 @@ const fn example(
     })
 }
 
-const fn section(title: &'static str, parts: &'static [PublishedPart]) -> PublishedSection {
-    PublishedSection { title, parts }
+const fn section(
+    config_file: &'static str,
+    title: &'static str,
+    parts: &'static [PublishedPart],
+) -> PublishedSection {
+    PublishedSection {
+        config_file,
+        title,
+        parts,
+    }
 }
 
 const CLOUDFLARE_TRUSTED_CIDRS_TOML: &str = "[\"173.245.48.0/20\", \"103.21.244.0/22\", \"103.22.200.0/22\", \"103.31.4.0/22\", \"141.101.64.0/18\", \"108.162.192.0/18\", \"190.93.240.0/20\", \"188.114.96.0/20\", \"197.234.240.0/22\", \"198.41.128.0/17\", \"162.158.0.0/15\", \"104.16.0.0/13\", \"104.24.0.0/14\", \"172.64.0.0/13\", \"131.0.72.0/22\", \"2400:cb00::/32\", \"2606:4700::/32\", \"2803:f800::/32\", \"2405:b500::/32\", \"2405:8100::/32\", \"2a06:98c0::/29\", \"2c0f:f248::/32\"]";
@@ -1183,14 +1192,17 @@ const STORAGE_FIELDS: &[PublishedField] = &[
 
 const PUBLISHED_SECTIONS: &[PublishedSection] = &[
     section(
+        "00-app.toml",
         "Application",
         &[table(&["app"], None, false, APP_FIELDS)],
     ),
     section(
+        "00-app.toml",
         "HTTP Server",
         &[table(&["server"], None, false, SERVER_FIELDS)],
     ),
     section(
+        "10-http.toml",
         "HTTP Edge",
         &[
             table(&["http"], None, false, HTTP_FIELDS),
@@ -1226,8 +1238,13 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
             ),
         ],
     ),
-    section("Redis", &[table(&["redis"], None, false, REDIS_FIELDS)]),
     section(
+        "00-app.toml",
+        "Redis",
+        &[table(&["redis"], None, false, REDIS_FIELDS)],
+    ),
+    section(
+        "20-database.toml",
         "Database (PostgreSQL)",
         &[
             table(&["database"], None, false, DATABASE_FIELDS),
@@ -1240,6 +1257,7 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
         ],
     ),
     section(
+        "30-security.toml",
         "Authentication",
         &[
             table(&["auth"], None, false, AUTH_FIELDS),
@@ -1324,8 +1342,13 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
             ),
         ],
     ),
-    section("Audit", &[table(&["audit"], None, false, AUDIT_FIELDS)]),
     section(
+        "30-security.toml",
+        "Audit",
+        &[table(&["audit"], None, false, AUDIT_FIELDS)],
+    ),
+    section(
+        "40-runtime.toml",
         "Jobs (Background Queue)",
         &[
             table(&["jobs"], None, false, JOBS_FIELDS),
@@ -1347,15 +1370,22 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
         ],
     ),
     section(
+        "40-runtime.toml",
         "Scheduler (Cron)",
         &[table(&["scheduler"], None, false, SCHEDULER_FIELDS)],
     ),
     section(
+        "40-runtime.toml",
         "WebSocket",
         &[table(&["websocket"], None, false, WEBSOCKET_FIELDS)],
     ),
-    section("Logging", &[table(&["logging"], None, false, LOGGING_FIELDS)]),
     section(
+        "40-runtime.toml",
+        "Logging",
+        &[table(&["logging"], None, false, LOGGING_FIELDS)],
+    ),
+    section(
+        "40-runtime.toml",
         "Observability (Dashboard & Tracing)",
         &[
             table(
@@ -1372,25 +1402,38 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
             ),
         ],
     ),
-    section("Cache", &[table(&["cache"], None, false, CACHE_FIELDS)]),
     section(
+        "40-runtime.toml",
+        "Cache",
+        &[table(&["cache"], None, false, CACHE_FIELDS)],
+    ),
+    section(
+        "30-security.toml",
         "Hashing (Password)",
         &[table(&["hashing"], None, false, HASHING_FIELDS)],
     ),
-    section("Encryption", &[table(&["crypt"], None, false, CRYPT_FIELDS)]),
     section(
+        "30-security.toml",
+        "Encryption",
+        &[table(&["crypt"], None, false, CRYPT_FIELDS)],
+    ),
+    section(
+        "50-localization.toml",
         "Internationalization",
         &[table(&["i18n"], None, false, I18N_FIELDS)],
     ),
     section(
+        "50-localization.toml",
         "TypeScript",
         &[table(&["typescript"], None, false, TYPESCRIPT_FIELDS)],
     ),
     section(
+        "20-database.toml",
         "Datatable",
         &[table(&["datatable"], None, false, DATATABLE_FIELDS)],
     ),
     section(
+        "60-email.toml",
         "Email",
         &[
             table(&["email"], None, false, EMAIL_FIELDS),
@@ -1502,6 +1545,7 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
         ],
     ),
     section(
+        "70-storage.toml",
         "Storage (File System)",
         &[
             table(&["storage"], None, false, STORAGE_FIELDS),
@@ -1566,6 +1610,20 @@ const CONFIG_HEADER: &str = "\
 # =============================================================================
 ";
 
+fn split_config_header(title: &str) -> String {
+    format!(
+        "\
+# =============================================================================
+# Forge Framework Configuration - {title}
+#
+# Forge loads every direct config/*.toml file in lexical filename order,
+# merges the tables in memory, then applies environment variable overrides.
+# Environment variables use double-underscore notation, e.g. DATABASE__URL=...
+# =============================================================================
+"
+    )
+}
+
 const ENV_HEADER: &str = "\
 # =============================================================================
 # Forge Framework - Environment Variables
@@ -1586,6 +1644,29 @@ pub(super) fn render_sample_config() -> String {
     render_document(CONFIG_HEADER, RenderTarget::Config)
 }
 
+pub(super) fn render_sample_config_files() -> Vec<(&'static str, String)> {
+    let mut files = Vec::new();
+
+    for section in PUBLISHED_SECTIONS {
+        if files
+            .iter()
+            .any(|(filename, _)| *filename == section.config_file)
+        {
+            continue;
+        }
+
+        files.push((
+            section.config_file,
+            render_document(
+                &split_config_header(config_file_title(section.config_file)),
+                RenderTarget::ConfigFile(section.config_file),
+            ),
+        ));
+    }
+
+    files
+}
+
 pub(super) fn render_sample_env() -> String {
     render_document(ENV_HEADER, RenderTarget::Env)
 }
@@ -1593,16 +1674,25 @@ pub(super) fn render_sample_env() -> String {
 #[derive(Clone, Copy)]
 enum RenderTarget {
     Config,
+    ConfigFile(&'static str),
     Env,
 }
 
 fn render_document(header: &str, target: RenderTarget) -> String {
     let mut out = String::from(header);
+    let mut rendered_sections = 0usize;
 
-    for (section_index, section) in PUBLISHED_SECTIONS.iter().enumerate() {
-        if section_index > 0 {
+    for section in PUBLISHED_SECTIONS.iter() {
+        if let RenderTarget::ConfigFile(filename) = target {
+            if section.config_file != filename {
+                continue;
+            }
+        }
+
+        if rendered_sections > 0 {
             out.push('\n');
         }
+        rendered_sections += 1;
 
         push_section_banner(&mut out, section.title);
 
@@ -1612,13 +1702,15 @@ fn render_document(header: &str, target: RenderTarget) -> String {
             }
 
             match (target, part) {
-                (RenderTarget::Config, PublishedPart::Table(table)) => {
-                    push_config_table(&mut out, table)
-                }
+                (
+                    RenderTarget::Config | RenderTarget::ConfigFile(_),
+                    PublishedPart::Table(table),
+                ) => push_config_table(&mut out, table),
                 (RenderTarget::Env, PublishedPart::Table(table)) => push_env_table(&mut out, table),
-                (RenderTarget::Config, PublishedPart::Example(example)) => {
-                    push_example(&mut out, example.toml_heading, example.toml_lines)
-                }
+                (
+                    RenderTarget::Config | RenderTarget::ConfigFile(_),
+                    PublishedPart::Example(example),
+                ) => push_example(&mut out, example.toml_heading, example.toml_lines),
                 (RenderTarget::Env, PublishedPart::Example(example)) => {
                     push_example(&mut out, example.env_heading, example.env_lines)
                 }
@@ -1627,6 +1719,20 @@ fn render_document(header: &str, target: RenderTarget) -> String {
     }
 
     out
+}
+
+fn config_file_title(filename: &str) -> &str {
+    match filename {
+        "00-app.toml" => "Application",
+        "10-http.toml" => "HTTP",
+        "20-database.toml" => "Database",
+        "30-security.toml" => "Security",
+        "40-runtime.toml" => "Runtime",
+        "50-localization.toml" => "Localization",
+        "60-email.toml" => "Email",
+        "70-storage.toml" => "Storage",
+        _ => "Custom",
+    }
 }
 
 fn push_section_banner(out: &mut String, title: &str) {
@@ -1715,7 +1821,7 @@ mod tests {
 
     use regex::Regex;
 
-    use super::{render_sample_config, render_sample_env};
+    use super::{render_sample_config, render_sample_config_files, render_sample_env};
 
     #[test]
     fn published_outputs_cover_all_config_repository_root_sections() {
@@ -1730,6 +1836,28 @@ mod tests {
         assert_eq!(
             config_root_order(&render_sample_config()),
             env_root_order(&render_sample_env())
+        );
+    }
+
+    #[test]
+    fn published_split_config_file_names_are_stable() {
+        let names = render_sample_config_files()
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "00-app.toml",
+                "10-http.toml",
+                "20-database.toml",
+                "30-security.toml",
+                "40-runtime.toml",
+                "50-localization.toml",
+                "60-email.toml",
+                "70-storage.toml",
+            ]
         );
     }
 

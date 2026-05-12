@@ -272,7 +272,7 @@ These are available automatically — no registration needed:
 
 | Command | Description |
 |---------|-------------|
-| `config:publish` | Generate sample config file, including auth credential lifecycle, lockout, and MFA sections |
+| `config:publish` | Generate split sample config files, including auth credential lifecycle, lockout, and MFA sections |
 | `env:publish` | Generate `.env.example`, including auth credential lifecycle, lockout, and MFA env overrides |
 | `key:generate` | Generate 32-byte signing + encryption keys |
 | `doctor` | Run runtime health checks; accepts `--deploy` and `--json` for deploy tooling |
@@ -305,7 +305,11 @@ database, runtime backend, cache roundtrip, readiness probes, and migration drif
 non-zero only when a check fails. Warnings, such as an intentionally unconfigured database or a
 Redis cache driver without Redis configured, are reported but do not block the command.
 
-`config:publish` writes the current framework-owned auth sections, including token pruning,
+`config:publish` writes grouped `config/*.toml` files by default. Forge loads those files in
+lexical filename order, merges them in memory, then applies `.env` overrides. Use
+`config:publish --single-file` only when you need the legacy `config/forge.toml` layout.
+
+`config:publish` includes the current framework-owned auth sections, including token pruning,
 per-guard token TTL examples, `[auth.password_resets]`, `[auth.email_verification]`,
 `[auth.lockout]`, and `[auth.mfa]`. `env:publish` writes the matching `AUTH__TOKENS__*`,
 `AUTH__PASSWORD_RESETS__*`, `AUTH__EMAIL_VERIFICATION__*`, `AUTH__LOCKOUT__*`,

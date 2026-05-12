@@ -41,8 +41,12 @@ Every method is chainable and returns `Self`:
 ```rust
 App::builder()
     .load_env()                             // load .env file
-    .load_config_dir("config")              // load TOML files from directory
+    .load_config_dir("config")              // merge config/*.toml in lexical order
 ```
+
+`config:publish` creates grouped TOML files such as `00-app.toml`, `10-http.toml`, and
+`40-runtime.toml`. Environment variables still override the merged config with the same
+double-underscore names, for example `DATABASE__URL`.
 
 ### Registration
 

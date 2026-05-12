@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::CommandRegistrar;
@@ -23,18 +23,34 @@ pub fn sample_config() -> String {
     super::published::render_sample_config()
 }
 
+/// Generate the preferred split sample configuration TOML files.
+pub fn sample_config_files() -> Vec<(&'static str, String)> {
+    super::published::render_sample_config_files()
+}
+
+enum ConfigPublishOutcome {
+    Written(Vec<PathBuf>),
+    Exists(PathBuf),
+}
+
 pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
     Arc::new(|registry| {
         registry.command(
             CONFIG_PUBLISH_COMMAND,
             clap::Command::new(CONFIG_PUBLISH_COMMAND.as_str().to_string())
-                .about("Publish a sample configuration file to the config directory")
+                .about("Publish sample configuration files to the config directory")
                 .arg(
                     clap::Arg::new("path")
                         .long("path")
                         .value_name("DIR")
                         .default_value("config")
-                        .help("Directory to write the config file to"),
+                        .help("Directory to write configuration files to"),
+                )
+                .arg(
+                    clap::Arg::new("single-file")
+                        .long("single-file")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Write the legacy config/forge.toml file instead of split files"),
                 )
                 .arg(
                     clap::Arg::new("force")
@@ -49,26 +65,29 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
                     .map(|s| s.as_str())
                     .unwrap_or("config");
                 let force = invocation.matches().get_flag("force");
+                let single_file = invocation.matches().get_flag("single-file");
 
                 let path = Path::new(dir);
-                if !path.exists() {
-                    std::fs::create_dir_all(path).map_err(Error::other)?;
-                }
-
-                let file_path = path.join("forge.toml");
-                if let Err(error) = ensure_generated_file_writable(&file_path, force) {
-                    if !force && generated_file_exists_without_symlink(&file_path) {
+                match publish_sample_config(path, force, single_file)? {
+                    ConfigPublishOutcome::Written(files) => {
+                        if single_file {
+                            if let Some(file) = files.first() {
+                                println!("Configuration published to {}", file.display());
+                            }
+                        } else {
+                            println!("Configuration files published to {}", path.display());
+                            for file in files {
+                                println!("  {}", file.display());
+                            }
+                        }
+                    }
+                    ConfigPublishOutcome::Exists(file) => {
                         println!(
                             "Config file already exists at {}. Use --force to overwrite.",
-                            file_path.display()
+                            file.display()
                         );
-                        return Ok(());
                     }
-                    return Err(error);
                 }
-
-                write_generated_file(&file_path, sample_config())?;
-                println!("Configuration published to {}", file_path.display());
 
                 Ok(())
             },
@@ -238,6 +257,41 @@ pub(crate) fn config_publish_cli_registrar() -> CommandRegistrar {
     })
 }
 
+fn publish_sample_config(
+    path: &Path,
+    force: bool,
+    single_file: bool,
+) -> Result<ConfigPublishOutcome> {
+    if !path.exists() {
+        std::fs::create_dir_all(path).map_err(Error::other)?;
+    }
+
+    let files = if single_file {
+        vec![("forge.toml", sample_config())]
+    } else {
+        sample_config_files()
+    };
+
+    for (filename, _) in &files {
+        let file_path = path.join(filename);
+        if let Err(error) = ensure_generated_file_writable(&file_path, force) {
+            if !force && generated_file_exists_without_symlink(&file_path) {
+                return Ok(ConfigPublishOutcome::Exists(file_path));
+            }
+            return Err(error);
+        }
+    }
+
+    let mut written = Vec::with_capacity(files.len());
+    for (filename, contents) in files {
+        let file_path = path.join(filename);
+        write_generated_file(&file_path, contents)?;
+        written.push(file_path);
+    }
+
+    Ok(ConfigPublishOutcome::Written(written))
+}
+
 fn publish_framework_files(
     dir: &str,
     files: &[(&'static str, &'static str)],
@@ -272,6 +326,57 @@ fn publish_framework_files(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod config_publish_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{publish_sample_config, ConfigPublishOutcome};
+
+    #[test]
+    fn config_publish_defaults_to_split_files() {
+        let directory = tempdir().unwrap();
+        let outcome = publish_sample_config(directory.path(), false, false).unwrap();
+
+        let ConfigPublishOutcome::Written(files) = outcome else {
+            panic!("expected split config files to be written");
+        };
+
+        assert!(files.iter().any(|path| path.ends_with("00-app.toml")));
+        assert!(files.iter().any(|path| path.ends_with("10-http.toml")));
+        assert!(files.iter().any(|path| path.ends_with("70-storage.toml")));
+        assert!(!directory.path().join("forge.toml").exists());
+    }
+
+    #[test]
+    fn config_publish_single_file_keeps_legacy_forge_toml() {
+        let directory = tempdir().unwrap();
+        let outcome = publish_sample_config(directory.path(), false, true).unwrap();
+
+        let ConfigPublishOutcome::Written(files) = outcome else {
+            panic!("expected legacy config file to be written");
+        };
+
+        assert_eq!(files.len(), 1);
+        assert!(directory.path().join("forge.toml").exists());
+        assert!(!directory.path().join("00-app.toml").exists());
+    }
+
+    #[test]
+    fn config_publish_refuses_existing_split_file_without_force() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("00-app.toml"), "existing").unwrap();
+
+        let outcome = publish_sample_config(directory.path(), false, false).unwrap();
+
+        let ConfigPublishOutcome::Exists(path) = outcome else {
+            panic!("expected existing file outcome");
+        };
+        assert!(path.ends_with("00-app.toml"));
+    }
 }
 
 /// Framework-provided migration files (Rust format, discoverable by forge-build).

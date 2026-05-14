@@ -5,6 +5,8 @@
 Each file documents one module's public API (structs, enums, traits, functions).
 Load only the file you need — don't read them all at once.
 
+For import stability and compatibility expectations, see [Public API Contract](public-api-contract.md).
+
 | Module | Description | Size |
 |--------|-------------|------|
 | [root](root.md) | Crate root: derive macros, re-exports | 10L |

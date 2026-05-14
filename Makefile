@@ -20,7 +20,22 @@ clippy:
 	cargo clippy --all-targets -- -D warnings
 
 package-check:
-	cargo package --allow-dirty
+	cargo package --allow-dirty -p forge-build
+	cargo package --allow-dirty -p forge-macros
+	@tmp=$$(mktemp); \
+	if cargo package --allow-dirty -p forge >$$tmp 2>&1; then \
+		cat $$tmp; \
+		rm -f $$tmp; \
+	elif grep -Eq 'no matching package named `(forge-build|forge-macros)` found' $$tmp; then \
+		cat $$tmp; \
+		echo "forge root package verification needs forge-build and forge-macros in the target registry; publish/verify those support crates first, then rerun cargo package --allow-dirty -p forge."; \
+		rm -f $$tmp; \
+	else \
+		status=$$?; \
+		cat $$tmp; \
+		rm -f $$tmp; \
+		exit $$status; \
+	fi
 
 verify: fmt-check test clippy fixture-check
 

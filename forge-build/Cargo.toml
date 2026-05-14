@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Build-time helpers for Forge database migration and seeder discovery."
+repository = "https://github.com/weiloon1234/Forge"
+documentation = "https://docs.rs/forge-build"
 
 [lib]
 name = "forge_build"

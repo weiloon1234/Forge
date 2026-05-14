@@ -275,7 +275,7 @@ These are available automatically — no registration needed:
 | `config:publish` | Generate split sample config files, including auth credential lifecycle, lockout, and MFA sections |
 | `env:publish` | Generate `.env.example`, including auth credential lifecycle, lockout, and MFA env overrides |
 | `key:generate` | Generate 32-byte signing + encryption keys |
-| `doctor` | Run runtime health checks; accepts `--deploy` and `--json` for deploy tooling |
+| `doctor` | Run runtime health checks; accepts `--deploy`, `--json`, and `--strict` for deploy tooling |
 | `migrate:publish` | Publish framework migration files, including audit log and MFA tables |
 | `seed:publish` | Publish framework seeder files |
 | `db:migrate` | Run pending migrations; accepts `--lock-timeout-ms <MS>` |
@@ -285,9 +285,9 @@ These are available automatically — no registration needed:
 | `seed:countries` | Seed 250 countries |
 | `make:migration` | Create a migration file |
 | `make:seeder` | Create a seeder file |
-| `make:model` | Create a model file |
-| `make:job` | Create a job file |
-| `make:command` | Create a command file |
+| `make:model` | Create a model file; accepts `--path <DIR>` |
+| `make:job` | Create a job file; accepts `--path <DIR>` |
+| `make:command` | Create a command file; accepts `--path <DIR>` |
 | `down` | Enter maintenance mode |
 | `up` | Exit maintenance mode |
 | `routes:list` | List named routes |
@@ -304,6 +304,14 @@ only the compiled binary and built assets. It uses the server's existing `.env`,
 database, runtime backend, cache roundtrip, readiness probes, and migration drift, then exits
 non-zero only when a check fails. Warnings, such as an intentionally unconfigured database or a
 Redis cache driver without Redis configured, are reported but do not block the command.
+
+Use `doctor --deploy --strict` as a production readiness gate. Strict mode exits non-zero when
+any warning is reported, and text output ends with a `Production readiness: ...` verdict.
+
+`make:model`, `make:job`, and `make:command` default to the legacy `src/app/*` directories. Pass
+`--path <DIR>` to target split app layouts such as `src/domain/models`, `src/domain/jobs`, or
+`src/commands`. Relative paths are resolved from the current working directory; absolute paths are
+used as-is.
 
 `config:publish` writes grouped `config/*.toml` files by default. Forge loads those files in
 lexical filename order, merges them in memory, then applies `.env` overrides. Use

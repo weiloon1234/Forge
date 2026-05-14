@@ -110,14 +110,16 @@ impl DoctorCheck {
 struct DoctorReport {
     status: DoctorStatus,
     deploy: bool,
+    strict: bool,
     checks: Vec<DoctorCheck>,
 }
 
 impl DoctorReport {
-    fn new(deploy: bool) -> Self {
+    fn new(deploy: bool, strict: bool) -> Self {
         Self {
             status: DoctorStatus::Ok,
             deploy,
+            strict,
             checks: Vec::new(),
         }
     }
@@ -129,6 +131,10 @@ impl DoctorReport {
 
     fn failed(&self) -> bool {
         matches!(self.status, DoctorStatus::Failed)
+    }
+
+    fn should_fail_command(&self) -> bool {
+        self.failed() || (self.strict && matches!(self.status, DoctorStatus::Warning))
     }
 }
 
@@ -149,6 +155,12 @@ pub(crate) fn doctor_cli_registrar() -> CommandRegistrar {
                         .long("deploy")
                         .action(ArgAction::SetTrue)
                         .help("Run checks expected by runtime-only deploy tooling"),
+                )
+                .arg(
+                    Arg::new("strict")
+                        .long("strict")
+                        .action(ArgAction::SetTrue)
+                        .help("Exit non-zero when any warning is reported"),
                 ),
             |invocation| async move { doctor_command(invocation).await },
         )?;
@@ -159,7 +171,8 @@ pub(crate) fn doctor_cli_registrar() -> CommandRegistrar {
 async fn doctor_command(invocation: CommandInvocation) -> Result<()> {
     let json = invocation.matches().get_flag("json");
     let deploy = invocation.matches().get_flag("deploy");
-    let report = run_doctor(invocation.app(), deploy).await;
+    let strict = invocation.matches().get_flag("strict");
+    let report = run_doctor(invocation.app(), deploy, strict).await;
 
     if json {
         println!(
@@ -170,15 +183,20 @@ async fn doctor_command(invocation: CommandInvocation) -> Result<()> {
         print_text_report(&report);
     }
 
-    if report.failed() {
-        return Err(Error::message("doctor failed: one or more checks failed"));
+    if report.should_fail_command() {
+        let reason = if report.failed() {
+            "one or more checks failed"
+        } else {
+            "strict mode treats warnings as failures"
+        };
+        return Err(Error::message(format!("doctor failed: {reason}")));
     }
 
     Ok(())
 }
 
-async fn run_doctor(app: &AppContext, deploy: bool) -> DoctorReport {
-    let mut report = DoctorReport::new(deploy);
+async fn run_doctor(app: &AppContext, deploy: bool, strict: bool) -> DoctorReport {
+    let mut report = DoctorReport::new(deploy, strict);
     report.push(check_app_config(app));
     report.push(check_database(app).await);
     report.push(check_migrations(app).await);
@@ -377,7 +395,8 @@ async fn check_readiness(app: &AppContext) -> DoctorCheck {
 }
 
 fn print_text_report(report: &DoctorReport) {
-    println!("Forge doctor: {}", report.status.as_str());
+    let strict = if report.strict { " strict" } else { "" };
+    println!("Forge doctor: {}{}", report.status.as_str(), strict);
     for check in &report.checks {
         println!(
             "[{}] {}: {}",
@@ -385,6 +404,29 @@ fn print_text_report(report: &DoctorReport) {
             check.name,
             check.message
         );
+    }
+    println!("{}", readiness_verdict(report));
+}
+
+fn readiness_verdict(report: &DoctorReport) -> &'static str {
+    match (report.deploy, report.strict, report.status) {
+        (_, _, DoctorStatus::Failed) => {
+            "Production readiness: failed - fix failed checks before deploy."
+        }
+        (true, true, DoctorStatus::Warning) => {
+            "Production readiness: blocked - strict mode treats warnings as failures."
+        }
+        (true, false, DoctorStatus::Warning) => {
+            "Production readiness: warning - deploy checks completed with warnings; rerun with --strict to enforce them."
+        }
+        (true, _, DoctorStatus::Ok) => "Production readiness: ready - deploy checks passed.",
+        (false, true, DoctorStatus::Warning) => {
+            "Doctor verdict: blocked - strict mode treats warnings as failures."
+        }
+        (false, false, DoctorStatus::Warning) => {
+            "Doctor verdict: warning - checks completed with warnings."
+        }
+        (false, _, DoctorStatus::Ok) => "Doctor verdict: ok - checks passed.",
     }
 }
 
@@ -398,7 +440,7 @@ mod tests {
 
     #[test]
     fn report_status_tracks_worst_check_status() {
-        let mut report = DoctorReport::new(true);
+        let mut report = DoctorReport::new(true, false);
         assert_eq!(report.status, DoctorStatus::Ok);
 
         report.push(super::DoctorCheck::warning("warn", "warning"));
@@ -414,10 +456,11 @@ mod tests {
     #[tokio::test]
     async fn default_app_doctor_reports_warnings_without_failure() {
         let kernel = App::builder().build_cli_kernel().await.unwrap();
-        let report = super::run_doctor(kernel.app(), true).await;
+        let report = super::run_doctor(kernel.app(), true, false).await;
 
         assert_eq!(report.status, DoctorStatus::Warning);
         assert!(report.deploy);
+        assert!(!report.strict);
         assert!(report
             .checks
             .iter()
@@ -435,6 +478,21 @@ mod tests {
             .iter()
             .any(|check| check.name == "cache" && check.status == DoctorStatus::Warning));
         assert!(!report.failed());
+        assert!(!report.should_fail_command());
+    }
+
+    #[tokio::test]
+    async fn strict_doctor_treats_warnings_as_command_failure() {
+        let kernel = App::builder().build_cli_kernel().await.unwrap();
+        let report = super::run_doctor(kernel.app(), true, true).await;
+
+        assert_eq!(report.status, DoctorStatus::Warning);
+        assert!(report.strict);
+        assert!(report.should_fail_command());
+        assert_eq!(
+            super::readiness_verdict(&report),
+            "Production readiness: blocked - strict mode treats warnings as failures."
+        );
     }
 
     #[tokio::test]
@@ -454,7 +512,7 @@ mod tests {
             .await
             .unwrap();
 
-        let report = super::run_doctor(kernel.app(), true).await;
+        let report = super::run_doctor(kernel.app(), true, false).await;
         let cache = report
             .checks
             .iter()
@@ -482,7 +540,7 @@ mod tests {
             .await
             .unwrap();
 
-        let report = super::run_doctor(kernel.app(), true).await;
+        let report = super::run_doctor(kernel.app(), true, false).await;
         let config = report
             .checks
             .iter()
@@ -496,13 +554,14 @@ mod tests {
 
     #[test]
     fn doctor_report_json_includes_deploy_flag_and_status() {
-        let mut report = DoctorReport::new(true);
+        let mut report = DoctorReport::new(true, true);
         report.push(super::DoctorCheck::ok("config", "loaded"));
 
         let value = serde_json::to_value(report).unwrap();
 
         assert_eq!(value["status"], "ok");
         assert_eq!(value["deploy"], true);
+        assert_eq!(value["strict"], true);
         assert_eq!(value["checks"][0]["name"], "config");
     }
 }

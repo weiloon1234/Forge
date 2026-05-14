@@ -536,10 +536,11 @@ impl ServiceProvider for AppServiceProvider {
 | **Scaffolding** | |
 | `make:migration` | Create a new migration file |
 | `make:seeder` | Create a new seeder file |
-| `make:model` | Create a new model file |
-| `make:job` | Create a new job file |
-| `make:command` | Create a new command file |
+| `make:model` | Create a new model file; accepts `--path <DIR>` |
+| `make:job` | Create a new job file; accepts `--path <DIR>` |
+| `make:command` | Create a new command file; accepts `--path <DIR>` |
 | **Runtime** | |
+| `doctor` | Run runtime health checks; accepts `--deploy`, `--json`, and `--strict` |
 | `down` | Put the application into maintenance mode |
 | `up` | Bring the application out of maintenance mode |
 | `routes:list` | List all registered routes |
@@ -599,8 +600,10 @@ make verify-release
 | Resource | Description |
 |----------|-------------|
 | [API Surface](docs/api/index.md) | Auto-generated public API reference (per module) |
+| [Public API Contract](docs/api/public-api-contract.md) | Import layers and compatibility rules for consumer apps |
 | [API Reference](docs/api-reference.md) | Hand-curated API reference with context |
 | [Getting Started](docs/guides/getting-started.md) | AppBuilder, 5 process types, project structure |
+| [Recipes](docs/guides/recipes.md) | Production readiness, CRUD, queued email, uploads, datatables, plugins |
 | [CLI Commands](docs/guides/cli-commands.md) | Define commands with arguments and flags |
 | [Database Guide](docs/guides/database.md) | Models, relations, queries, projections, migrations |
 | [Auth Guide](docs/guides/auth.md) | Token/session auth, guards, permissions, policies |

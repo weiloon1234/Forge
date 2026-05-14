@@ -2571,7 +2571,7 @@ where
         )
         .await?;
 
-        Ok(records.into_iter().zip(models.into_iter()).collect())
+        Ok(records.into_iter().zip(models).collect())
     }
 
     pub async fn explain<E>(&self, executor: &E) -> Result<Vec<String>>

@@ -21,9 +21,14 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 - Configurable TTL on WebSocket replay history (`websocket.history_ttl_seconds`, default 7 days). Every publish refreshes the TTL on `ws:history:<channel>`, so active channels never expire; channels idle past the window are auto-reaped by Redis. Set to `0` to disable.
 - WebSocket hardening config: `websocket.outbound_buffer_size`, `websocket.allowed_origins`, and `websocket.history_buffer_size`.
 - WebSocket protocol/lifecycle acceptance coverage for raw JSON actions, subscription enforcement, room routing, client events, ack success/error, socket-close cleanup, and force-disconnect cleanup.
+- `doctor --strict` for production readiness gates; warnings now fail the command in strict mode and text output ends with a readiness verdict.
+- `make:model`, `make:job`, and `make:command` now accept `--path <DIR>` and are registered even when a project has not published database config yet.
+- Public API contract and recipe documentation covering production readiness, authenticated CRUD, queued email, uploads, datatables, and plugin extension.
+- Public API acceptance coverage for the blessed consumer import surface.
 
 ### Changed
 
+- Database scaffold command helpers moved out of the migration lifecycle module into a dedicated scaffold module.
 - Datatable blueprint/status documentation now reflects implemented JSON, filter, sort, download, export, registry, legacy query-param, and relation-filter acceptance coverage.
 - Consumer starter documentation now recommends the split bootstrap layout proven by the blueprint app fixture.
 - The README architecture diagram was replaced with an ASCII-safe AppBuilder/AppContext/kernel flow.

@@ -1,6 +1,6 @@
+use forge::__reexports::async_trait;
 use forge::prelude::*;
 use forge::Validate;
-use forge::__reexports::async_trait;
 
 fn test_app() -> forge::foundation::AppContext {
     forge::foundation::AppContext::new(

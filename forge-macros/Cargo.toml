@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Proc-macro derives for Forge database model and projection metadata."
+repository = "https://github.com/weiloon1234/Forge"
+documentation = "https://docs.rs/forge-macros"
 
 [lib]
 proc-macro = true

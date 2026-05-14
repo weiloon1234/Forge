@@ -40,8 +40,8 @@ chrono-tz = "0.10"
 clap = { version = "4", features = ["string"] }
 cron = "0.12"
 dotenvy = "0.15"
-forge-build = { path = "forge-build" }
-forge-macros = { path = "forge-macros" }
+forge-build = { version = "0.1.0", path = "forge-build" }
+forge-macros = { version = "0.1.0", path = "forge-macros" }
 futures-util = "0.3"
 inventory = "0.3"
 getrandom = "0.3"
@@ -86,4 +86,4 @@ tokio-tungstenite = "0.28"
 trybuild = "1"
 
 [build-dependencies]
-forge-build = { path = "forge-build" }
+forge-build = { version = "0.1.0", path = "forge-build" }

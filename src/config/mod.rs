@@ -22,7 +22,7 @@ const MIN_AUTH_TOKEN_LENGTH: usize = 32;
 
 /// Official Cloudflare reverse-proxy CIDR ranges.
 ///
-/// Source: https://www.cloudflare.com/ips/
+/// Source: <https://www.cloudflare.com/ips/>
 pub const CLOUDFLARE_TRUSTED_CIDRS: &[&str] = &[
     "173.245.48.0/20",
     "103.21.244.0/22",

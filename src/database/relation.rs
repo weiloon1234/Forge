@@ -814,7 +814,7 @@ where
         }
 
         let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
-        for (record, model) in records.into_iter().zip(models.into_iter()) {
+        for (record, model) in records.into_iter().zip(models) {
             let key = record
                 .get(RELATION_GROUP_KEY_ALIAS)
                 .ok_or_else(|| Error::message("missing many-to-many group key in record"))
@@ -908,7 +908,7 @@ where
         }
 
         let mut grouped: HashMap<String, Vec<To>> = HashMap::new();
-        for (record, model) in records.into_iter().zip(models.into_iter()) {
+        for (record, model) in records.into_iter().zip(models) {
             let key = record
                 .get(RELATION_GROUP_KEY_ALIAS)
                 .ok_or_else(|| Error::message("missing many-to-many group key in record"))

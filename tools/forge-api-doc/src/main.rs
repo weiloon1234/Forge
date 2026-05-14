@@ -159,6 +159,12 @@ fn main() {
     )
     .unwrap();
     writeln!(index).unwrap();
+    writeln!(
+        index,
+        "For import stability and compatibility expectations, see [Public API Contract](public-api-contract.md)."
+    )
+    .unwrap();
+    writeln!(index).unwrap();
     writeln!(index, "| Module | Description | Size |").unwrap();
     writeln!(index, "|--------|-------------|------|").unwrap();
 

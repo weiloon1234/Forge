@@ -1266,6 +1266,7 @@ impl AppBuilder {
             crate::config::env_publish::env_publish_cli_registrar(),
             crate::foundation::doctor::doctor_cli_registrar(),
             crate::http::maintenance_cli_registrar(),
+            crate::database::scaffold_cli_registrar(),
         ];
         if app.config().value("database").is_some() {
             boot_commands.push(crate::database::builtin_cli_registrar());

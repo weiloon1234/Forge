@@ -1673,7 +1673,7 @@ pub(crate) fn maintenance_cli_registrar() -> crate::cli::CommandRegistrar {
                 match app.resolve::<routes::RouteRegistry>() {
                     Ok(registry) => {
                         let mut routes: Vec<_> = registry.iter().collect();
-                        routes.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        routes.sort_by_key(|(name, _)| name.as_str());
                         if routes.is_empty() {
                             println!("No named routes registered.");
                         } else {

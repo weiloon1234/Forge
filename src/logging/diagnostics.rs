@@ -454,11 +454,7 @@ impl HttpRouteAggregate {
         self.duration_ms.sort_unstable();
         let requests_total = self.duration_ms.len() as u64;
         let sum_ms = self.duration_ms.iter().sum::<u64>();
-        let avg_duration_ms = if requests_total == 0 {
-            0
-        } else {
-            sum_ms / requests_total
-        };
+        let avg_duration_ms = sum_ms.checked_div(requests_total).unwrap_or(0);
         let max_duration_ms = self.duration_ms.last().copied().unwrap_or(0);
         let p95_duration_ms = percentile(&self.duration_ms, 95).unwrap_or(0);
         let p99_duration_ms = percentile(&self.duration_ms, 99).unwrap_or(0);

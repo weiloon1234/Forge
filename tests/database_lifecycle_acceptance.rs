@@ -530,6 +530,65 @@ async fn make_seeder_generates_a_rust_file_and_refuses_overwrite_without_force()
 }
 
 #[tokio::test]
+async fn make_app_scaffolds_can_target_custom_output_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_dir = dir.path().join("src/domain/models");
+    let job_dir = dir.path().join("src/domain/jobs");
+    let command_dir = dir.path().join("src/commands");
+
+    run_cli(
+        App::builder(),
+        vec![
+            "forge".into(),
+            "make:model".into(),
+            "--name".into(),
+            "AuditEvent".into(),
+            "--path".into(),
+            model_dir.display().to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    run_cli(
+        App::builder(),
+        vec![
+            "forge".into(),
+            "make:job".into(),
+            "--name".into(),
+            "SendWelcomeEmail".into(),
+            "--path".into(),
+            job_dir.display().to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    run_cli(
+        App::builder(),
+        vec![
+            "forge".into(),
+            "make:command".into(),
+            "--name".into(),
+            "SyncInventory".into(),
+            "--path".into(),
+            command_dir.display().to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let model = fs::read_to_string(model_dir.join("audit_event.rs")).unwrap();
+    assert!(model.contains("pub struct AuditEvent"));
+
+    let job = fs::read_to_string(job_dir.join("send_welcome_email.rs")).unwrap();
+    assert!(job.contains("pub struct SendWelcomeEmail;"));
+    assert!(!job.contains("TODO"));
+
+    let command = fs::read_to_string(command_dir.join("sync_inventory.rs")).unwrap();
+    assert!(command.contains("pub const SYNC_INVENTORY_COMMAND"));
+    assert!(!command.contains("TODO"));
+}
+
+#[tokio::test]
 async fn migrate_publish_generates_framework_migrations_without_stale_audit_follow_up() {
     let dir = tempfile::tempdir().unwrap();
     let migrations_dir = dir.path().join("migrations");

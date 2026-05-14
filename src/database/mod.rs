@@ -9,6 +9,7 @@ mod projection;
 mod query;
 pub mod relation;
 mod runtime;
+mod scaffold;
 
 pub use aggregate::AggregateProjection;
 pub use ast::{
@@ -55,3 +56,4 @@ pub(crate) use lifecycle::{
 };
 pub(crate) use model::set_runtime_model_defaults;
 pub(crate) use runtime::{scope_http_sql_query_trace, sql_observability_snapshot};
+pub(crate) use scaffold::scaffold_cli_registrar;

@@ -899,7 +899,7 @@ impl AppBuilder {
     }
 
     pub async fn build_http_kernel(self) -> Result<HttpKernel> {
-        let boot = self.bootstrap().await?;
+        let boot = self.bootstrap(BootProfile::http()).await?;
         Ok(HttpKernel::new(
             boot.app,
             boot.routes,
@@ -910,27 +910,27 @@ impl AppBuilder {
     }
 
     pub async fn build_cli_kernel(self) -> Result<CliKernel> {
-        let boot = self.bootstrap().await?;
+        let boot = self.bootstrap(BootProfile::cli()).await?;
         Ok(CliKernel::new(boot.app, boot.commands))
     }
 
     pub async fn build_scheduler_kernel(self) -> Result<SchedulerKernel> {
-        let boot = self.bootstrap().await?;
+        let boot = self.bootstrap(BootProfile::scheduler()).await?;
         let registry = crate::scheduler::build_registry(&boot.schedules)?;
         SchedulerKernel::new(boot.app, registry)
     }
 
     pub async fn build_worker_kernel(self) -> Result<WorkerKernel> {
-        let boot = self.bootstrap().await?;
+        let boot = self.bootstrap(BootProfile::worker()).await?;
         WorkerKernel::new(boot.app)
     }
 
     pub async fn build_websocket_kernel(self) -> Result<WebSocketKernel> {
-        let boot = self.bootstrap().await?;
+        let boot = self.bootstrap(BootProfile::websocket()).await?;
         Ok(WebSocketKernel::new(boot.app))
     }
 
-    async fn bootstrap(self) -> Result<BootArtifacts> {
+    async fn bootstrap(self, profile: BootProfile) -> Result<BootArtifacts> {
         let AppBuilder {
             load_env,
             config_dir,
@@ -1199,10 +1199,14 @@ impl AppBuilder {
             }
         }
 
-        let mut boot_routes = prepared_plugins.routes;
-        boot_routes.extend(routes);
-        let route_registry = Arc::new(crate::http::collect_named_routes(&boot_routes)?);
-        app.container().singleton_arc(route_registry)?;
+        let collect_route_metadata = profile.routes || profile.commands;
+        let mut boot_routes = Vec::new();
+        if collect_route_metadata {
+            boot_routes.extend(prepared_plugins.routes);
+            boot_routes.extend(routes);
+            let route_registry = Arc::new(crate::http::collect_named_routes(&boot_routes)?);
+            app.container().singleton_arc(route_registry)?;
+        }
 
         // Freeze registries that providers populated during register() before boot()
         // so boot hooks can resolve the same runtime services as handlers and jobs.
@@ -1231,16 +1235,19 @@ impl AppBuilder {
             app.container().singleton_arc(crypt)?;
         }
 
-        let mut boot_websocket_routes = prepared_plugins.websocket_routes;
-        boot_websocket_routes.extend(websocket_routes);
+        if profile.websocket_routes {
+            let mut boot_websocket_routes = prepared_plugins.websocket_routes;
+            boot_websocket_routes.extend(websocket_routes);
 
-        let ws_registrar = crate::websocket::build_registrar(&boot_websocket_routes)?;
-        let ws_registry = crate::websocket::WebSocketChannelRegistry::from_registrar(ws_registrar);
-        for descriptor in ws_registry.descriptors() {
-            diagnostics.register_websocket_channel(&descriptor.id);
+            let ws_registrar = crate::websocket::build_registrar(&boot_websocket_routes)?;
+            let ws_registry =
+                crate::websocket::WebSocketChannelRegistry::from_registrar(ws_registrar);
+            for descriptor in ws_registry.descriptors() {
+                diagnostics.register_websocket_channel(&descriptor.id);
+            }
+            app.container()
+                .singleton_arc(std::sync::Arc::new(ws_registry))?;
         }
-        app.container()
-            .singleton_arc(std::sync::Arc::new(ws_registry))?;
 
         for provider in &prepared_plugins.providers {
             boot_service_provider(provider.as_ref(), &app).await?;
@@ -1260,33 +1267,42 @@ impl AppBuilder {
 
         diagnostics.mark_bootstrap_complete();
 
-        let mut boot_commands = vec![
-            crate::config::publish::config_publish_cli_registrar(),
-            crate::config::api_docs::docs_api_cli_registrar(),
-            crate::config::env_publish::env_publish_cli_registrar(),
-            crate::foundation::doctor::doctor_cli_registrar(),
-            crate::http::maintenance_cli_registrar(),
-            crate::database::scaffold_cli_registrar(),
-        ];
-        if app.config().value("database").is_some() {
-            boot_commands.push(crate::database::builtin_cli_registrar());
-            boot_commands.push(crate::auth::builtin_cli_registrar());
-            boot_commands.push(crate::attachments::builtin_cli_registrar());
+        let mut boot_commands = Vec::new();
+        if profile.commands {
+            boot_commands.extend([
+                crate::config::publish::config_publish_cli_registrar(),
+                crate::config::api_docs::docs_api_cli_registrar(),
+                crate::config::env_publish::env_publish_cli_registrar(),
+                crate::foundation::doctor::doctor_cli_registrar(),
+                crate::http::maintenance_cli_registrar(),
+                crate::database::scaffold_cli_registrar(),
+            ]);
+            if app.config().value("database").is_some() {
+                boot_commands.push(crate::database::builtin_cli_registrar());
+                boot_commands.push(crate::auth::builtin_cli_registrar());
+                boot_commands.push(crate::attachments::builtin_cli_registrar());
+            }
+            if !prepared_plugins.registry.is_empty() {
+                boot_commands.push(crate::plugin::builtin_cli_registrar());
+            }
+            boot_commands.push(crate::typescript::builtin_cli_registrar(
+                boot_routes.clone(),
+            ));
+            boot_commands.extend(prepared_plugins.commands);
+            boot_commands.extend(commands);
         }
-        if !prepared_plugins.registry.is_empty() {
-            boot_commands.push(crate::plugin::builtin_cli_registrar());
+
+        let mut boot_schedules = Vec::new();
+        if profile.schedules {
+            boot_schedules.extend(prepared_plugins.schedules);
+            boot_schedules.extend(schedules);
         }
-        boot_commands.push(crate::typescript::builtin_cli_registrar(
-            boot_routes.clone(),
-        ));
-        boot_commands.extend(prepared_plugins.commands);
-        boot_commands.extend(commands);
 
-        let mut boot_schedules = prepared_plugins.schedules;
-        boot_schedules.extend(schedules);
-
-        let mut boot_middlewares = prepared_plugins.middlewares;
-        boot_middlewares.extend(middlewares);
+        let mut boot_middlewares = Vec::new();
+        if profile.routes {
+            boot_middlewares.extend(prepared_plugins.middlewares);
+            boot_middlewares.extend(middlewares);
+        }
 
         Ok(BootArtifacts {
             app,
@@ -1336,6 +1352,61 @@ struct BootArtifacts {
     middlewares: Vec<MiddlewareConfig>,
     observability: Option<ObservabilityOptions>,
     spa_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+struct BootProfile {
+    routes: bool,
+    commands: bool,
+    schedules: bool,
+    websocket_routes: bool,
+}
+
+impl BootProfile {
+    fn http() -> Self {
+        Self {
+            routes: true,
+            commands: false,
+            schedules: false,
+            websocket_routes: true,
+        }
+    }
+
+    fn cli() -> Self {
+        Self {
+            routes: false,
+            commands: true,
+            schedules: false,
+            websocket_routes: false,
+        }
+    }
+
+    fn scheduler() -> Self {
+        Self {
+            routes: false,
+            commands: false,
+            schedules: true,
+            websocket_routes: false,
+        }
+    }
+
+    fn worker() -> Self {
+        Self {
+            routes: false,
+            commands: false,
+            schedules: false,
+            websocket_routes: false,
+        }
+    }
+
+    fn websocket() -> Self {
+        Self {
+            routes: false,
+            commands: false,
+            schedules: false,
+            websocket_routes: true,
+        }
+    }
 }
 
 fn load_boot_config(
@@ -1587,9 +1658,6 @@ mod tests {
             app.crypt()?.encrypt_string("boot")?;
             self.resolved.lock().unwrap().push("crypt");
 
-            app.websocket_channels()?;
-            self.resolved.lock().unwrap().push("websocket_channels");
-
             Ok(())
         }
     }
@@ -1655,12 +1723,12 @@ mod tests {
 
         assert_eq!(
             resolved.lock().unwrap().as_slice(),
-            ["storage", "email", "hash", "crypt", "websocket_channels"]
+            ["storage", "email", "hash", "crypt"]
         );
     }
 
     #[tokio::test]
-    async fn route_urls_are_available_during_provider_boot() {
+    async fn route_urls_are_available_during_cli_provider_boot_for_registered_routes() {
         let urls = Arc::new(Mutex::new(Vec::new()));
         let _kernel = App::builder()
             .register_routes(|routes| {
@@ -2038,6 +2106,25 @@ mod tests {
         let descriptors = registry.descriptors();
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].id, ChannelId::new("alerts"));
+    }
+
+    #[tokio::test]
+    async fn cli_kernel_does_not_register_websocket_channel_registry() {
+        use crate::support::ChannelId;
+
+        let kernel = crate::App::builder()
+            .register_websocket_routes(|r| {
+                r.channel(ChannelId::new("alerts"), |_ctx, _payload| async { Ok(()) })?;
+                Ok(())
+            })
+            .build_cli_kernel()
+            .await
+            .unwrap();
+
+        let error = kernel.app().websocket_channels().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("WebSocketChannelRegistry` not registered"));
     }
 
     #[tokio::test]

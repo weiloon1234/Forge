@@ -274,17 +274,47 @@ impl TestResponse {
     }
 
     /// Parse the response body as JSON.
-    pub fn json<T: DeserializeOwned>(&self) -> T {
-        serde_json::from_slice(&self.body).expect("failed to parse response as JSON")
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
+        serde_json::from_slice(&self.body).map_err(crate::foundation::Error::other)
     }
 
     /// The response body as a UTF-8 string.
-    pub fn text(&self) -> String {
-        String::from_utf8(self.body.clone()).expect("response body is not UTF-8")
+    pub fn text(&self) -> Result<String> {
+        String::from_utf8(self.body.clone()).map_err(crate::foundation::Error::other)
     }
 
     /// The raw response body bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::Value;
+
+    use super::TestResponse;
+
+    fn response(body: impl Into<Vec<u8>>) -> TestResponse {
+        TestResponse {
+            status: StatusCode::OK,
+            headers: Vec::new(),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn json_returns_parse_errors() {
+        let error = response("not json").json::<Value>().unwrap_err();
+
+        assert!(error.to_string().contains("expected ident"));
+    }
+
+    #[test]
+    fn text_returns_utf8_errors() {
+        let error = response([0xff, 0xfe]).text().unwrap_err();
+
+        assert!(error.to_string().contains("invalid utf-8"));
     }
 }

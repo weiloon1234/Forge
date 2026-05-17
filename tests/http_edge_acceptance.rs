@@ -76,7 +76,7 @@ async fn global_http_edge_config_applies_json_body_timeout_rejections_and_record
         too_large.header(header::CONTENT_TYPE.as_str()),
         Some("application/json")
     );
-    let too_large_json: Value = too_large.json();
+    let too_large_json: Value = too_large.json().unwrap();
     assert_eq!(too_large_json["message"], "Payload too large");
     assert_eq!(too_large_json["status"], 413);
 
@@ -86,13 +86,13 @@ async fn global_http_edge_config_applies_json_body_timeout_rejections_and_record
         timeout.header(header::CONTENT_TYPE.as_str()),
         Some("application/json")
     );
-    let timeout_json: Value = timeout.json();
+    let timeout_json: Value = timeout.json().unwrap();
     assert_eq!(timeout_json["message"], "Request timed out");
     assert_eq!(timeout_json["status"], 408);
 
     let runtime = app.client().get("/_forge/runtime").send().await.unwrap();
     assert_eq!(runtime.status(), StatusCode::OK);
-    let runtime_json: Value = runtime.json();
+    let runtime_json: Value = runtime.json().unwrap();
     assert_eq!(
         runtime_json["http"]["edge_rejections"]["payload_too_large_total"],
         1
@@ -134,7 +134,7 @@ async fn global_rate_limit_returns_json_429_and_records_observability() {
         limited.header(header::CONTENT_TYPE.as_str()),
         Some("application/json")
     );
-    let limited_json: Value = limited.json();
+    let limited_json: Value = limited.json().unwrap();
     assert_eq!(limited_json["message"], "Rate limit exceeded");
     assert_eq!(limited_json["status"], 429);
 

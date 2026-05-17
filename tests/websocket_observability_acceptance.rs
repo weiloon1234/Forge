@@ -105,7 +105,7 @@ async fn ws_presence_endpoint_returns_members_for_presence_channel() {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    let body: WebSocketPresenceContract = response.json();
+    let body: WebSocketPresenceContract = response.json().unwrap();
     assert_eq!(body.channel, "team");
     assert_eq!(body.count, 1);
     assert_eq!(body.members.len(), 1);
@@ -181,7 +181,7 @@ async fn ws_channels_endpoint_lists_registered_channels() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: WebSocketChannelsContract = response.json();
+    let body: WebSocketChannelsContract = response.json().unwrap();
     assert_eq!(body.channels.len(), 2);
 
     let chat = body
@@ -239,7 +239,7 @@ async fn ws_history_redacts_payloads_by_default() {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    let body: WebSocketHistoryContract = response.json();
+    let body: WebSocketHistoryContract = response.json().unwrap();
     assert_eq!(body.channel, "history-redact");
     assert_eq!(body.messages.len(), 1);
     let message = &body.messages[0];
@@ -299,7 +299,7 @@ include_payloads = true
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    let body: WebSocketHistoryContract = response.json();
+    let body: WebSocketHistoryContract = response.json().unwrap();
     assert_eq!(body.channel, "history-full");
     assert_eq!(
         body.messages[0].payload.as_ref().unwrap()["secret"],
@@ -370,7 +370,7 @@ async fn ws_stats_exposes_global_and_per_channel_counters() {
 
     let response = app.client().get("/_forge/ws/stats").send().await.unwrap();
     assert_eq!(response.status(), 200);
-    let body: WebSocketStatsContract = response.json();
+    let body: WebSocketStatsContract = response.json().unwrap();
 
     assert_eq!(body.global.active_connections, 0);
     assert_eq!(body.global.subscriptions_total, 1);

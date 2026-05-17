@@ -30,8 +30,8 @@ struct TestClient
 struct TestResponse
   fn status(&self) -> StatusCode
   fn header(&self, name: &str) -> Option<&str>
-  fn json<T: DeserializeOwned>(&self) -> T
-  fn text(&self) -> String
+  fn json<T: DeserializeOwned>(&self) -> Result<T>
+  fn text(&self) -> Result<String>
   fn bytes(&self) -> &[u8] ⓘ
 trait Factory: Model
   fn definition() -> Vec<FactoryValue<Self>>

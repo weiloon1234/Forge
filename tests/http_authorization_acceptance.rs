@@ -237,7 +237,7 @@ async fn http_route_authorizer_runs_after_permissions_and_can_return_forbidden()
         .unwrap();
     assert_eq!(allowed.status(), StatusCode::OK);
     assert_eq!(counter.load(Ordering::SeqCst), 2);
-    let payload: Value = allowed.json();
+    let payload: Value = allowed.json().unwrap();
     assert_eq!(payload["actor_id"], "developer-1");
 }
 
@@ -259,7 +259,7 @@ async fn http_route_authorizer_can_return_unauthorized() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let payload: Value = response.json();
+    let payload: Value = response.json().unwrap();
     assert_eq!(payload["message"], "Re-authentication required");
 }
 
@@ -281,7 +281,7 @@ async fn http_route_authorizer_panic_returns_internal_error() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let payload: Value = response.json();
+    let payload: Value = response.json().unwrap();
     assert_eq!(payload["message"], "Internal server error");
 }
 
@@ -399,6 +399,6 @@ async fn observability_authorizer_panic_returns_internal_error() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let payload: Value = response.json();
+    let payload: Value = response.json().unwrap();
     assert_eq!(payload["message"], "Internal server error");
 }

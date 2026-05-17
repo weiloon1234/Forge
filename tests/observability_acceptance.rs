@@ -479,7 +479,7 @@ async fn sql_observability_endpoint_exposes_typed_stats_contract() {
 
     let response = app.client().get("/_forge/sql").send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let body: SlowQueriesContract = response.json();
+    let body: SlowQueriesContract = response.json().unwrap();
 
     assert_eq!(body.stats.capacity, 100);
     assert_eq!(body.stats.slow_query_threshold_ms, 500);
@@ -535,7 +535,7 @@ async fn observability_capture_disabled_keeps_routes_with_empty_counters() {
 
     let response = app.client().get("/_forge/runtime").send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let body: RuntimeSnapshot = response.json();
+    let body: RuntimeSnapshot = response.json().unwrap();
     assert_eq!(body.http.requests_total, 0);
     assert_eq!(body.jobs.enqueued_total, 0);
 }
@@ -768,7 +768,7 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
 
     let stats_response = app.client().get("/_forge/jobs/stats").send().await.unwrap();
     assert_eq!(stats_response.status(), reqwest::StatusCode::OK);
-    let stats: JobsStatsContract = stats_response.json();
+    let stats: JobsStatsContract = stats_response.json().unwrap();
     assert_eq!(
         stats
             .stats
@@ -785,7 +785,7 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
         .await
         .unwrap();
     assert_eq!(failed_response.status(), reqwest::StatusCode::OK);
-    let failed: JobsFailedContract = failed_response.json();
+    let failed: JobsFailedContract = failed_response.json().unwrap();
     assert_eq!(failed.failed_jobs.len(), 2);
     assert_eq!(failed.failed_jobs[0].job_id, "job-dead");
     assert_eq!(failed.failed_jobs[0].queue, "critical");
@@ -819,7 +819,7 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
 
     let sql_response = app.client().get("/_forge/sql").send().await.unwrap();
     assert_eq!(sql_response.status(), reqwest::StatusCode::OK);
-    let slow_queries: SlowQueriesContract = sql_response.json();
+    let slow_queries: SlowQueriesContract = sql_response.json().unwrap();
     assert_eq!(slow_queries.stats.capacity, 100);
     assert_eq!(slow_queries.stats.slow_query_threshold_ms, 500);
     assert_eq!(

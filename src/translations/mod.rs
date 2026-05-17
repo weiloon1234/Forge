@@ -3,13 +3,17 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::database::extensions::{
     current_extension_scope, uuid_array_from_ids, AnyModelExtension, ModelExtensionLoader,
     TranslationCacheShape,
 };
-use crate::database::{ColumnRef, ComparisonOp, Condition, DbValue, Expr, QueryExecutor, TableRef};
-use crate::foundation::{AppContext, Result};
+use crate::database::{
+    ColumnRef, ComparisonOp, Condition, DbRecord, DbValue, Expr, OrderBy, Query,
+    QueryExecutionOptions, QueryExecutor, Sql, TableRef,
+};
+use crate::foundation::{AppContext, Error, Result};
 
 tokio::task_local! {
     /// The current request's locale, set automatically by request middleware.
@@ -230,21 +234,28 @@ pub trait HasTranslations: Send + Sync {
     where
         E: QueryExecutor,
     {
-        executor.raw_execute(
-            "INSERT INTO model_translations (id, translatable_type, translatable_id, locale, field, value, created_at) \
-             VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, NOW()) \
-             ON CONFLICT (translatable_type, translatable_id, locale, field) \
-             DO UPDATE SET value = $5, updated_at = NOW()",
-            &[
-                DbValue::Text(Self::translatable_type().to_string()),
-                DbValue::Text(self.translatable_id()),
-                DbValue::Text(locale.to_string()),
-                DbValue::Text(field.to_string()),
-                DbValue::Text(value.to_string()),
-            ],
-        )
-        .await?;
-        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        let translatable_id = self.translatable_id();
+        let translatable_uuid = parse_translatable_uuid(&translatable_id)?;
+
+        Query::insert_into(MODEL_TRANSLATIONS_TABLE)
+            .values([
+                (
+                    "translatable_type",
+                    DbValue::Text(Self::translatable_type().to_string()),
+                ),
+                ("translatable_id", DbValue::Uuid(translatable_uuid)),
+                ("locale", DbValue::Text(locale.to_string())),
+                ("field", DbValue::Text(field.to_string())),
+                ("value", DbValue::Text(value.to_string())),
+            ])
+            .on_conflict_columns(["translatable_type", "translatable_id", "locale", "field"])
+            .do_update()
+            .set_excluded("value")
+            .set_expr("updated_at", Sql::now())
+            .execute(executor)
+            .await?;
+
+        invalidate_translation_cache(Self::translatable_type(), &translatable_id);
         Ok(())
     }
 
@@ -297,19 +308,16 @@ pub trait HasTranslations: Send + Sync {
             return Ok(rows.into_iter().next().map(|row| row.value));
         }
 
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT value FROM model_translations \
-                 WHERE translatable_type = $1 AND translatable_id = $2::uuid \
-                 AND locale = $3 AND field = $4",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                    DbValue::Text(locale.to_string()),
-                    DbValue::Text(field.to_string()),
-                ],
+        let translatable_id = self.translatable_id();
+        let rows = translation_select_query()
+            .where_eq("translatable_type", Self::translatable_type())
+            .where_eq(
+                "translatable_id",
+                parse_translatable_uuid(&translatable_id)?,
             )
+            .where_eq("locale", locale.to_string())
+            .where_eq("field", field.to_string())
+            .get(&*app.database()?)
             .await?;
         match rows.first() {
             Some(row) => match row.get("value") {
@@ -339,20 +347,18 @@ pub trait HasTranslations: Send + Sync {
             return Ok(rows.into_iter().map(|row| (row.field, row.value)).collect());
         }
 
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT field, value FROM model_translations \
-                 WHERE translatable_type = $1 AND translatable_id = $2::uuid AND locale = $3",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                    DbValue::Text(locale.to_string()),
-                ],
+        let translatable_id = self.translatable_id();
+        let rows = translation_select_query()
+            .where_eq("translatable_type", Self::translatable_type())
+            .where_eq(
+                "translatable_id",
+                parse_translatable_uuid(&translatable_id)?,
             )
+            .where_eq("locale", locale.to_string())
+            .get(&*app.database()?)
             .await?;
         let mut map = HashMap::new();
-        for row in &rows {
+        for row in rows.iter() {
             if let (Some(DbValue::Text(field)), Some(DbValue::Text(value))) =
                 (row.get("field"), row.get("value"))
             {
@@ -381,17 +387,15 @@ pub trait HasTranslations: Send + Sync {
             return Ok(translated_fields_from_rows(app, rows));
         }
 
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT locale, value FROM model_translations \
-                 WHERE translatable_type = $1 AND translatable_id = $2::uuid AND field = $3",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                    DbValue::Text(field.to_string()),
-                ],
+        let translatable_id = self.translatable_id();
+        let rows = translation_select_query()
+            .where_eq("translatable_type", Self::translatable_type())
+            .where_eq(
+                "translatable_id",
+                parse_translatable_uuid(&translatable_id)?,
             )
+            .where_eq("field", field.to_string())
+            .get(&*app.database()?)
             .await?;
         let entries: Vec<(String, String)> = rows
             .iter()
@@ -423,19 +427,17 @@ pub trait HasTranslations: Send + Sync {
             return Ok(rows);
         }
 
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT id, translatable_type, translatable_id, locale, field, value \
-                 FROM model_translations \
-                 WHERE translatable_type = $1 AND translatable_id = $2::uuid \
-                 ORDER BY field, locale",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                ],
-            )
-            .await?;
+        let translatable_id = self.translatable_id();
+        let rows = order_translation_rows(
+            translation_select_query()
+                .where_eq("translatable_type", Self::translatable_type())
+                .where_eq(
+                    "translatable_id",
+                    parse_translatable_uuid(&translatable_id)?,
+                ),
+        )
+        .get(&*app.database()?)
+        .await?;
         rows.iter().map(row_to_model_translation).collect()
     }
 
@@ -448,18 +450,17 @@ pub trait HasTranslations: Send + Sync {
     where
         E: QueryExecutor,
     {
-        let affected = executor
-            .raw_execute(
-                "DELETE FROM model_translations \
-             WHERE translatable_type = $1 AND translatable_id = $2::uuid AND locale = $3",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                    DbValue::Text(locale.to_string()),
-                ],
+        let translatable_id = self.translatable_id();
+        let affected = Query::delete_from(MODEL_TRANSLATIONS_TABLE)
+            .where_eq("translatable_type", Self::translatable_type())
+            .where_eq(
+                "translatable_id",
+                parse_translatable_uuid(&translatable_id)?,
             )
+            .where_eq("locale", locale.to_string())
+            .execute(executor)
             .await?;
-        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        invalidate_translation_cache(Self::translatable_type(), &translatable_id);
         Ok(affected)
     }
 
@@ -472,18 +473,17 @@ pub trait HasTranslations: Send + Sync {
     where
         E: QueryExecutor,
     {
-        let affected = executor
-            .raw_execute(
-                "DELETE FROM model_translations \
-             WHERE translatable_type = $1 AND translatable_id = $2::uuid AND field = $3",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                    DbValue::Text(field.to_string()),
-                ],
+        let translatable_id = self.translatable_id();
+        let affected = Query::delete_from(MODEL_TRANSLATIONS_TABLE)
+            .where_eq("translatable_type", Self::translatable_type())
+            .where_eq(
+                "translatable_id",
+                parse_translatable_uuid(&translatable_id)?,
             )
+            .where_eq("field", field.to_string())
+            .execute(executor)
             .await?;
-        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        invalidate_translation_cache(Self::translatable_type(), &translatable_id);
         Ok(affected)
     }
 
@@ -496,17 +496,16 @@ pub trait HasTranslations: Send + Sync {
     where
         E: QueryExecutor,
     {
-        let affected = executor
-            .raw_execute(
-                "DELETE FROM model_translations \
-             WHERE translatable_type = $1 AND translatable_id = $2::uuid",
-                &[
-                    DbValue::Text(Self::translatable_type().to_string()),
-                    DbValue::Text(self.translatable_id()),
-                ],
+        let translatable_id = self.translatable_id();
+        let affected = Query::delete_from(MODEL_TRANSLATIONS_TABLE)
+            .where_eq("translatable_type", Self::translatable_type())
+            .where_eq(
+                "translatable_id",
+                parse_translatable_uuid(&translatable_id)?,
             )
+            .execute(executor)
             .await?;
-        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        invalidate_translation_cache(Self::translatable_type(), &translatable_id);
         Ok(affected)
     }
 }
@@ -549,71 +548,57 @@ async fn load_translation_rows(
         return Ok(Vec::new());
     }
 
-    let ids = DbValue::UuidArray(uuid_array_from_ids(translatable_ids)?);
-    let rows = match shape {
-        TranslationCacheShape::Single { locale, field } => {
-            executor
-                .raw_query(
-                    "SELECT id, translatable_type, translatable_id, locale, field, value \
-                     FROM model_translations \
-                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
-                     AND locale = $3 AND field = $4 \
-                     ORDER BY translatable_id, field, locale",
-                    &[
-                        DbValue::Text(translatable_type.to_string()),
-                        ids,
-                        DbValue::Text(locale.clone()),
-                        DbValue::Text(field.clone()),
-                    ],
-                )
-                .await?
-        }
-        TranslationCacheShape::Locale { locale } => {
-            executor
-                .raw_query(
-                    "SELECT id, translatable_type, translatable_id, locale, field, value \
-                     FROM model_translations \
-                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
-                     AND locale = $3 \
-                     ORDER BY translatable_id, field, locale",
-                    &[
-                        DbValue::Text(translatable_type.to_string()),
-                        ids,
-                        DbValue::Text(locale.clone()),
-                    ],
-                )
-                .await?
-        }
-        TranslationCacheShape::Field { field } => {
-            executor
-                .raw_query(
-                    "SELECT id, translatable_type, translatable_id, locale, field, value \
-                     FROM model_translations \
-                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
-                     AND field = $3 \
-                     ORDER BY translatable_id, field, locale",
-                    &[
-                        DbValue::Text(translatable_type.to_string()),
-                        ids,
-                        DbValue::Text(field.clone()),
-                    ],
-                )
-                .await?
-        }
-        TranslationCacheShape::All => {
-            executor
-                .raw_query(
-                    "SELECT id, translatable_type, translatable_id, locale, field, value \
-                     FROM model_translations \
-                     WHERE translatable_type = $1 AND translatable_id = ANY($2::uuid[]) \
-                     ORDER BY translatable_id, field, locale",
-                    &[DbValue::Text(translatable_type.to_string()), ids],
-                )
-                .await?
-        }
+    let ids = uuid_array_from_ids(translatable_ids)?;
+    let base = translation_select_query()
+        .where_eq("translatable_type", translatable_type.to_string())
+        .where_in("translatable_id", ids);
+    let query = match shape {
+        TranslationCacheShape::Single { locale, field } => base
+            .where_eq("locale", locale.clone())
+            .where_eq("field", field.clone()),
+        TranslationCacheShape::Locale { locale } => base.where_eq("locale", locale.clone()),
+        TranslationCacheShape::Field { field } => base.where_eq("field", field.clone()),
+        TranslationCacheShape::All => base,
     };
+    let rows = get_translation_records(executor, order_translation_rows(query)).await?;
 
     rows.iter().map(row_to_model_translation).collect()
+}
+
+fn parse_translatable_uuid(id: &str) -> Result<Uuid> {
+    Uuid::parse_str(id).map_err(|error| {
+        Error::message(format!(
+            "model translation expected UUID translatable_id `{id}`: {error}"
+        ))
+    })
+}
+
+fn translation_select_query() -> Query {
+    Query::table(MODEL_TRANSLATIONS_TABLE).select([
+        "id",
+        "translatable_type",
+        "translatable_id",
+        "locale",
+        "field",
+        "value",
+    ])
+}
+
+fn order_translation_rows(query: Query) -> Query {
+    query
+        .order_by(OrderBy::asc("translatable_id"))
+        .order_by(OrderBy::asc("field"))
+        .order_by(OrderBy::asc("locale"))
+}
+
+async fn get_translation_records(
+    executor: &dyn QueryExecutor,
+    query: Query,
+) -> Result<Vec<DbRecord>> {
+    let compiled = query.to_compiled_sql()?;
+    executor
+        .query_records_with(&compiled, QueryExecutionOptions::default())
+        .await
 }
 
 fn row_to_model_translation(row: &crate::database::DbRecord) -> Result<ModelTranslation> {
@@ -687,14 +672,22 @@ mod tests {
                 DbValue::Text(value) => value.clone(),
                 _ => panic!("expected translatable_type binding"),
             };
-            let ids = match &bindings[1] {
-                DbValue::UuidArray(values) => values.clone(),
-                _ => panic!("expected translatable_id uuid array binding"),
-            };
-            let field = match &bindings[2] {
-                DbValue::Text(value) => value.clone(),
-                _ => panic!("expected field binding"),
-            };
+            let ids: Vec<Uuid> = bindings
+                .iter()
+                .filter_map(|binding| match binding {
+                    DbValue::Uuid(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            assert!(!ids.is_empty(), "expected translatable_id uuid bindings");
+            let field = bindings
+                .iter()
+                .rev()
+                .find_map(|binding| match binding {
+                    DbValue::Text(value) if value != &translatable_type => Some(value.clone()),
+                    _ => None,
+                })
+                .expect("expected field binding");
 
             Ok(ids
                 .into_iter()
@@ -807,14 +800,14 @@ mod tests {
             calls[0].1,
             vec![
                 DbValue::Text("test_translatables".to_string()),
-                DbValue::Text(translatable.id.clone()),
+                DbValue::Uuid(Uuid::parse_str(&translatable.id).unwrap()),
                 DbValue::Text("en".to_string()),
                 DbValue::Text("name".to_string()),
                 DbValue::Text("Desk".to_string()),
             ]
         );
-        assert!(calls[1].0.contains("field = $3"));
-        assert!(calls[2].0.contains("WHERE translatable_type = $1"));
+        assert!(calls[1].0.contains("\"field\" = $3::text"));
+        assert!(calls[2].0.contains("\"translatable_type\" = $1::text"));
     }
 
     #[test]

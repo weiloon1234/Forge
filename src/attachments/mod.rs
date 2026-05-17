@@ -8,17 +8,21 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::database::extensions::{
     current_extension_scope, uuid_array_from_ids, AnyModelExtension, ModelExtensionLoader,
 };
-use crate::database::{DbType, DbValue, QueryExecutor};
+use crate::database::{
+    DbRecord, DbType, DbValue, OrderBy, Query, QueryExecutionOptions, QueryExecutor,
+};
 use crate::foundation::{AppContext, Error, Result};
 use crate::imaging::ImageFormat;
 use crate::storage::{StorageConfig, UploadedFile};
 use crate::support::DateTime;
 
 const LOCALIZED_COLLECTION_SEPARATOR: &str = ":";
+const ATTACHMENTS_TABLE: &str = "attachments";
 
 pub(crate) use orphans::{
     audit_attachment_orphans_with_lock, builtin_cli_registrar, AttachmentOrphanOptions,
@@ -85,14 +89,10 @@ impl Attachment {
     where
         E: QueryExecutor,
     {
-        executor
-            .raw_execute(
-                "UPDATE attachments SET custom_properties = $1 WHERE id = $2::uuid",
-                &[
-                    DbValue::Json(custom_properties),
-                    DbValue::Text(attachment_id.to_string()),
-                ],
-            )
+        Query::update_table(ATTACHMENTS_TABLE)
+            .value("custom_properties", DbValue::Json(custom_properties))
+            .where_eq("id", parse_attachment_uuid(attachment_id, "attachment_id")?)
+            .execute(executor)
             .await
     }
 
@@ -607,24 +607,30 @@ impl AttachmentUploadBuilder {
             (stored.path, stored.name, size, ct)
         };
 
-        let rows = db.raw_query(
-            "INSERT INTO attachments \
-             (id, attachable_type, attachable_id, collection, disk, path, name, original_name, mime_type, size, sort_order, custom_properties, created_at) \
-             VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, 0, '{}', NOW()) \
-             RETURNING id",
-            &[
-                DbValue::Text(attachable_type.to_string()),
-                DbValue::Text(attachable_id.to_string()),
-                DbValue::Text(self.collection.clone()),
-                DbValue::Text(disk_name.clone()),
-                DbValue::Text(path.clone()),
-                DbValue::Text(name.clone()),
-                opt_text(&original_name),
-                opt_text(&content_type),
-                DbValue::Int64(size),
-            ],
-        )
-        .await;
+        let rows = match parse_attachment_uuid(attachable_id, "attachable_id") {
+            Ok(attachable_uuid) => Query::insert_into(ATTACHMENTS_TABLE)
+                .values([
+                    (
+                        "attachable_type",
+                        DbValue::Text(attachable_type.to_string()),
+                    ),
+                    ("attachable_id", DbValue::Uuid(attachable_uuid)),
+                    ("collection", DbValue::Text(self.collection.clone())),
+                    ("disk", DbValue::Text(disk_name.clone())),
+                    ("path", DbValue::Text(path.clone())),
+                    ("name", DbValue::Text(name.clone())),
+                    ("original_name", opt_text(&original_name)),
+                    ("mime_type", opt_text(&content_type)),
+                    ("size", DbValue::Int64(size)),
+                    ("sort_order", DbValue::Int32(0)),
+                    ("custom_properties", DbValue::Json(serde_json::json!({}))),
+                ])
+                .returning(["id"])
+                .get(&*db)
+                .await
+                .map(|rows| rows.into_vec()),
+            Err(error) => Err(error),
+        };
 
         // Clean up stored file if DB insert fails
         if let Err(e) = &rows {
@@ -819,21 +825,18 @@ pub trait HasAttachments: Send + Sync {
             return Ok(rows.into_iter().next());
         }
 
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT id, attachable_type, attachable_id, collection, disk, path, name, \
-                 original_name, mime_type, size, sort_order, custom_properties \
-                 FROM attachments \
-                 WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3 \
-                 ORDER BY sort_order, created_at LIMIT 1",
-                &[
-                    DbValue::Text(attachable_type.to_string()),
-                    DbValue::Text(attachable_id),
-                    DbValue::Text(collection.to_string()),
-                ],
-            )
-            .await?;
+        let rows = order_attachment_rows(
+            attachment_select_query()
+                .where_eq("attachable_type", attachable_type.to_string())
+                .where_eq(
+                    "attachable_id",
+                    parse_attachment_uuid(&attachable_id, "attachable_id")?,
+                )
+                .where_eq("collection", collection.to_string()),
+        )
+        .limit(1)
+        .get(&*app.database()?)
+        .await?;
         rows.first().map(row_to_attachment).transpose()
     }
 
@@ -864,28 +867,25 @@ pub trait HasAttachments: Send + Sync {
         let attachable_type = attachment_model_type::<Self>()?;
         let attachable_id = attachment_model_id(self)?;
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT disk, path FROM attachments \
-                 WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3",
-                &[
-                    DbValue::Text(attachable_type.to_string()),
-                    DbValue::Text(attachable_id.clone()),
-                    DbValue::Text(collection.to_string()),
-                ],
+        let rows = attachment_file_select_query()
+            .where_eq("attachable_type", attachable_type.to_string())
+            .where_eq(
+                "attachable_id",
+                parse_attachment_uuid(&attachable_id, "attachable_id")?,
             )
-            .await?;
+            .where_eq("collection", collection.to_string())
+            .get(&*db)
+            .await?
+            .into_vec();
 
-        let affected = db
-            .raw_execute(
-                "DELETE FROM attachments \
-             WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3",
-                &[
-                    DbValue::Text(attachable_type.to_string()),
-                    DbValue::Text(attachable_id.clone()),
-                    DbValue::Text(collection.to_string()),
-                ],
+        let affected = Query::delete_from(ATTACHMENTS_TABLE)
+            .where_eq("attachable_type", attachable_type.to_string())
+            .where_eq(
+                "attachable_id",
+                parse_attachment_uuid(&attachable_id, "attachable_id")?,
             )
+            .where_eq("collection", collection.to_string())
+            .execute(&*db)
             .await?;
 
         delete_attachment_files(app, &rows).await;
@@ -1103,21 +1103,17 @@ async fn attachments_for_identity(
         return Ok(rows);
     }
 
-    let db = app.database()?;
-    let rows = db
-        .raw_query(
-            "SELECT id, attachable_type, attachable_id, collection, disk, path, name, \
-             original_name, mime_type, size, sort_order, custom_properties \
-             FROM attachments \
-             WHERE attachable_type = $1 AND attachable_id = $2::uuid AND collection = $3 \
-             ORDER BY sort_order, created_at",
-            &[
-                DbValue::Text(attachable_type.to_string()),
-                DbValue::Text(attachable_id.to_string()),
-                DbValue::Text(collection.to_string()),
-            ],
-        )
-        .await?;
+    let rows = order_attachment_rows(
+        attachment_select_query()
+            .where_eq("attachable_type", attachable_type.to_string())
+            .where_eq(
+                "attachable_id",
+                parse_attachment_uuid(attachable_id, "attachable_id")?,
+            )
+            .where_eq("collection", collection.to_string()),
+    )
+    .get(&*app.database()?)
+    .await?;
     rows.iter().map(row_to_attachment).collect()
 }
 
@@ -1130,30 +1126,29 @@ async fn detach_attachment_by_identity(
 ) -> Result<()> {
     let db = app.database()?;
     let rows = if delete_file {
-        db.raw_query(
-            "SELECT disk, path FROM attachments \
-             WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
-            &[
-                DbValue::Text(attachment_id.to_string()),
-                DbValue::Text(attachable_type.to_string()),
-                DbValue::Text(attachable_id.to_string()),
-            ],
-        )
-        .await?
+        attachment_file_select_query()
+            .where_eq("id", parse_attachment_uuid(attachment_id, "attachment_id")?)
+            .where_eq("attachable_type", attachable_type.to_string())
+            .where_eq(
+                "attachable_id",
+                parse_attachment_uuid(attachable_id, "attachable_id")?,
+            )
+            .get(&*db)
+            .await?
+            .into_vec()
     } else {
         Vec::new()
     };
 
-    db.raw_execute(
-        "DELETE FROM attachments \
-         WHERE id = $1::uuid AND attachable_type = $2 AND attachable_id = $3::uuid",
-        &[
-            DbValue::Text(attachment_id.to_string()),
-            DbValue::Text(attachable_type.to_string()),
-            DbValue::Text(attachable_id.to_string()),
-        ],
-    )
-    .await?;
+    Query::delete_from(ATTACHMENTS_TABLE)
+        .where_eq("id", parse_attachment_uuid(attachment_id, "attachment_id")?)
+        .where_eq("attachable_type", attachable_type.to_string())
+        .where_eq(
+            "attachable_id",
+            parse_attachment_uuid(attachable_id, "attachable_id")?,
+        )
+        .execute(&*db)
+        .await?;
     if delete_file {
         delete_attachment_files(app, &rows).await;
     }
@@ -1550,21 +1545,69 @@ async fn load_attachment_rows(
         return Ok(Vec::new());
     }
 
-    let rows = executor
-        .raw_query(
-            "SELECT id, attachable_type, attachable_id, collection, disk, path, name, \
-             original_name, mime_type, size, sort_order, custom_properties \
-             FROM attachments \
-             WHERE attachable_type = $1 AND attachable_id = ANY($2::uuid[]) AND collection = $3 \
-             ORDER BY attachable_id, sort_order, created_at",
-            &[
-                DbValue::Text(attachable_type.to_string()),
-                DbValue::UuidArray(uuid_array_from_ids(attachable_ids)?),
-                DbValue::Text(collection.to_string()),
-            ],
-        )
-        .await?;
+    let rows = get_attachment_records(
+        executor,
+        order_batched_attachment_rows(
+            attachment_select_query()
+                .where_eq("attachable_type", attachable_type.to_string())
+                .where_in("attachable_id", uuid_array_from_ids(attachable_ids)?)
+                .where_eq("collection", collection.to_string()),
+        ),
+    )
+    .await?;
     rows.iter().map(row_to_attachment).collect()
+}
+
+fn parse_attachment_uuid(id: &str, label: &str) -> Result<Uuid> {
+    Uuid::parse_str(id).map_err(|error| {
+        Error::message(format!(
+            "attachment expected UUID `{label}` `{id}`: {error}"
+        ))
+    })
+}
+
+fn attachment_select_query() -> Query {
+    Query::table(ATTACHMENTS_TABLE).select([
+        "id",
+        "attachable_type",
+        "attachable_id",
+        "collection",
+        "disk",
+        "path",
+        "name",
+        "original_name",
+        "mime_type",
+        "size",
+        "sort_order",
+        "custom_properties",
+    ])
+}
+
+fn attachment_file_select_query() -> Query {
+    Query::table(ATTACHMENTS_TABLE).select(["disk", "path"])
+}
+
+fn order_attachment_rows(query: Query) -> Query {
+    query
+        .order_by(OrderBy::asc("sort_order"))
+        .order_by(OrderBy::asc("created_at"))
+}
+
+fn order_batched_attachment_rows(query: Query) -> Query {
+    query
+        .order_by(OrderBy::asc("attachable_id"))
+        .order_by(OrderBy::asc("sort_order"))
+        .order_by(OrderBy::asc("created_at"))
+}
+
+async fn get_attachment_records(
+    executor: &dyn QueryExecutor,
+    query: Query,
+) -> Result<Vec<DbRecord>> {
+    let compiled = query.to_compiled_sql()?;
+    executor
+        .query_records_with(&compiled, QueryExecutionOptions::default())
+        .await
 }
 
 fn invalidate_attachment_cache(
@@ -1765,14 +1808,22 @@ mod tests {
                 DbValue::Text(value) => value.clone(),
                 _ => panic!("expected attachable_type binding"),
             };
-            let ids = match &bindings[1] {
-                DbValue::UuidArray(values) => values.clone(),
-                _ => panic!("expected attachable_id uuid array binding"),
-            };
-            let collection = match &bindings[2] {
-                DbValue::Text(value) => value.clone(),
-                _ => panic!("expected collection binding"),
-            };
+            let ids: Vec<Uuid> = bindings
+                .iter()
+                .filter_map(|binding| match binding {
+                    DbValue::Uuid(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            assert!(!ids.is_empty(), "expected attachable_id uuid bindings");
+            let collection = bindings
+                .iter()
+                .rev()
+                .find_map(|binding| match binding {
+                    DbValue::Text(value) if value != &attachable_type => Some(value.clone()),
+                    _ => None,
+                })
+                .expect("expected collection binding");
 
             Ok(ids
                 .into_iter()
@@ -1836,12 +1887,12 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0]
             .0
-            .contains("UPDATE attachments SET custom_properties"));
+            .contains("UPDATE \"attachments\" SET \"custom_properties\""));
         assert_eq!(
             calls[0].1,
             vec![
                 DbValue::Json(serde_json::json!({ "width": 640, "height": 480 })),
-                DbValue::Text(attachment_id),
+                DbValue::Uuid(Uuid::parse_str(&attachment_id).unwrap()),
             ]
         );
     }

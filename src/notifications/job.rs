@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::database::DbValue;
 use crate::email::EmailMessage;
 use crate::foundation::Result;
 use crate::jobs::{Job, JobContext};
 use crate::support::{JobId, NotificationChannelId};
 
 use super::{
-    callback, NotificationChannelRegistry, NOTIFY_BROADCAST, NOTIFY_DATABASE, NOTIFY_EMAIL,
+    callback, store_database_notification, NotificationChannelRegistry, NOTIFY_BROADCAST,
+    NOTIFY_DATABASE, NOTIFY_EMAIL,
 };
 
 /// Job payload that carries pre-rendered notification data for async dispatch.
@@ -48,17 +48,13 @@ impl Job for SendNotificationJob {
                 }
             } else if *channel_id == NOTIFY_DATABASE {
                 if let Some(ref data) = self.database_payload {
-                    if let Err(error) = app
-                        .database()?
-                        .raw_execute(
-                            "INSERT INTO notifications (notifiable_id, type, data, created_at) VALUES ($1, $2, $3, NOW())",
-                            &[
-                                DbValue::Text(self.notifiable_id.clone()),
-                                DbValue::Text(self.notification_type.clone()),
-                                DbValue::Json(data.clone()),
-                            ],
-                        )
-                        .await
+                    if let Err(error) = store_database_notification(
+                        app,
+                        self.notifiable_id.clone(),
+                        self.notification_type.clone(),
+                        data.clone(),
+                    )
+                    .await
                     {
                         tracing::error!(
                             channel = "database",

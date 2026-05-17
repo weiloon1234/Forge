@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::database::{DbType, DbValue};
+use crate::database::{DbType, DbValue, Expr, OrderBy, Query, Sql};
 use crate::foundation::{AppContext, Result};
+
+const SETTINGS_TABLE: &str = "settings";
 
 /// The input type used to render a setting in admin forms.
 ///
@@ -182,11 +184,10 @@ impl Setting {
     /// Get a setting value by key. Returns `None` if the key doesn't exist.
     pub async fn get(app: &AppContext, key: &str) -> Result<Option<serde_json::Value>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT value FROM settings WHERE key = $1",
-                &[DbValue::Text(key.to_string())],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .select(["value"])
+            .where_eq("key", key.to_string())
+            .get(db.as_ref())
             .await?;
         Ok(rows.first().and_then(|row| match row.get("value") {
             Some(DbValue::Json(v)) => Some(v.clone()),
@@ -218,11 +219,10 @@ impl Setting {
     /// Find a setting record by key (returns full Setting with metadata).
     pub async fn find(app: &AppContext, key: &str) -> Result<Option<Setting>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT * FROM settings WHERE key = $1",
-                &[DbValue::Text(key.to_string())],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .where_eq("key", key.to_string())
+            .limit(1)
+            .get(db.as_ref())
             .await?;
         rows.first().map(row_to_setting).transpose()
     }
@@ -230,11 +230,12 @@ impl Setting {
     /// Update only the value of an existing setting.
     pub async fn set(app: &AppContext, key: &str, value: serde_json::Value) -> Result<()> {
         let db = app.database()?;
-        db.raw_execute(
-            "UPDATE settings SET value = $2, updated_at = NOW() WHERE key = $1",
-            &[DbValue::Text(key.to_string()), DbValue::Json(value)],
-        )
-        .await?;
+        Query::update_table(SETTINGS_TABLE)
+            .value("value", DbValue::Json(value))
+            .set_expr("updated_at", Sql::now())
+            .where_eq("key", key.to_string())
+            .execute(db.as_ref())
+            .await?;
         Ok(())
     }
 
@@ -250,22 +251,23 @@ impl Setting {
             Some(d) => DbValue::Text(d),
             None => DbValue::Null(DbType::Text),
         };
-        db.raw_execute(
-            "INSERT INTO settings (key, value, setting_type, parameters, group_name, label, description, sort_order, is_public, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())",
-            &[
-                DbValue::Text(new.key),
-                value_param,
-                DbValue::Text(new.setting_type.as_str().to_string()),
-                DbValue::Json(new.parameters),
-                DbValue::Text(new.group_name),
-                DbValue::Text(new.label),
-                desc_param,
-                DbValue::Int32(new.sort_order),
-                DbValue::Bool(new.is_public),
-            ],
-        )
-        .await?;
+        Query::insert_into(SETTINGS_TABLE)
+            .values([
+                ("key", DbValue::Text(new.key)),
+                ("value", value_param),
+                (
+                    "setting_type",
+                    DbValue::Text(new.setting_type.as_str().to_string()),
+                ),
+                ("parameters", DbValue::Json(new.parameters)),
+                ("group_name", DbValue::Text(new.group_name)),
+                ("label", DbValue::Text(new.label)),
+                ("description", desc_param),
+                ("sort_order", DbValue::Int32(new.sort_order)),
+                ("is_public", DbValue::Bool(new.is_public)),
+            ])
+            .execute(db.as_ref())
+            .await?;
         Ok(())
     }
 
@@ -276,24 +278,27 @@ impl Setting {
     /// `label = ""`). Use [`Setting::create`] with [`NewSetting`] for full metadata control.
     pub async fn upsert(app: &AppContext, key: &str, value: serde_json::Value) -> Result<()> {
         let db = app.database()?;
-        db.raw_execute(
-            "INSERT INTO settings (key, value, created_at) \
-             VALUES ($1, $2, NOW()) \
-             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-            &[DbValue::Text(key.to_string()), DbValue::Json(value)],
-        )
-        .await?;
+        Query::insert_into(SETTINGS_TABLE)
+            .values([
+                ("key", DbValue::Text(key.to_string())),
+                ("value", DbValue::Json(value)),
+            ])
+            .on_conflict_columns(["key"])
+            .do_update()
+            .set_excluded("value")
+            .set_expr("updated_at", Sql::now())
+            .execute(db.as_ref())
+            .await?;
         Ok(())
     }
 
     /// Delete a setting by key. Returns `true` if the key existed.
     pub async fn remove(app: &AppContext, key: &str) -> Result<bool> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "DELETE FROM settings WHERE key = $1 RETURNING id",
-                &[DbValue::Text(key.to_string())],
-            )
+        let rows = Query::delete_from(SETTINGS_TABLE)
+            .where_eq("key", key.to_string())
+            .returning(["id"])
+            .get(db.as_ref())
             .await?;
         Ok(!rows.is_empty())
     }
@@ -301,11 +306,11 @@ impl Setting {
     /// Check if a setting key exists.
     pub async fn exists(app: &AppContext, key: &str) -> Result<bool> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT 1 FROM settings WHERE key = $1",
-                &[DbValue::Text(key.to_string())],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .select(["id"])
+            .where_eq("key", key.to_string())
+            .limit(1)
+            .get(db.as_ref())
             .await?;
         Ok(!rows.is_empty())
     }
@@ -313,11 +318,11 @@ impl Setting {
     /// List all settings, ordered by group then sort_order.
     pub async fn all(app: &AppContext) -> Result<Vec<Setting>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT * FROM settings ORDER BY group_name, sort_order, key",
-                &[],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .order_by(OrderBy::asc("group_name"))
+            .order_by(OrderBy::asc("sort_order"))
+            .order_by(OrderBy::asc("key"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(row_to_setting).collect()
     }
@@ -325,11 +330,11 @@ impl Setting {
     /// List settings in a specific group, ordered by sort_order.
     pub async fn by_group(app: &AppContext, group: &str) -> Result<Vec<Setting>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT * FROM settings WHERE group_name = $1 ORDER BY sort_order, key",
-                &[DbValue::Text(group.to_string())],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .where_eq("group_name", group.to_string())
+            .order_by(OrderBy::asc("sort_order"))
+            .order_by(OrderBy::asc("key"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(row_to_setting).collect()
     }
@@ -338,11 +343,12 @@ impl Setting {
     pub async fn by_prefix(app: &AppContext, prefix: &str) -> Result<Vec<Setting>> {
         let db = app.database()?;
         let pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
-        let rows = db
-            .raw_query(
-                "SELECT * FROM settings WHERE key LIKE $1 ESCAPE '\\' ORDER BY group_name, sort_order, key",
-                &[DbValue::Text(pattern)],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .where_(Expr::column("key").like(pattern))
+            .order_by(OrderBy::asc("group_name"))
+            .order_by(OrderBy::asc("sort_order"))
+            .order_by(OrderBy::asc("key"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(row_to_setting).collect()
     }
@@ -350,11 +356,12 @@ impl Setting {
     /// List only public settings (safe to expose to frontend/unauthenticated API).
     pub async fn public(app: &AppContext) -> Result<Vec<Setting>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT * FROM settings WHERE is_public = true ORDER BY group_name, sort_order, key",
-                &[],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .where_eq("is_public", true)
+            .order_by(OrderBy::asc("group_name"))
+            .order_by(OrderBy::asc("sort_order"))
+            .order_by(OrderBy::asc("key"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(row_to_setting).collect()
     }
@@ -362,11 +369,11 @@ impl Setting {
     /// List all distinct group names, ordered alphabetically.
     pub async fn groups(app: &AppContext) -> Result<Vec<String>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT DISTINCT group_name FROM settings ORDER BY group_name",
-                &[],
-            )
+        let rows = Query::table(SETTINGS_TABLE)
+            .distinct()
+            .select(["group_name"])
+            .order_by(OrderBy::asc("group_name"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(|r| r.try_text("group_name")).collect()
     }

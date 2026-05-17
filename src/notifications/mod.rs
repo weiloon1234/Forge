@@ -5,6 +5,7 @@ pub(crate) mod job;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::database::{DbValue, Query};
 use crate::email::EmailMessage;
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::sync::lock_unpoisoned;
@@ -15,6 +16,26 @@ pub use channel::{
     NotificationChannel,
 };
 pub use job::SendNotificationJob;
+
+const NOTIFICATIONS_TABLE: &str = "notifications";
+
+pub(crate) async fn store_database_notification(
+    app: &AppContext,
+    notifiable_id: String,
+    notification_type: String,
+    data: serde_json::Value,
+) -> Result<()> {
+    let db = app.database()?;
+    Query::insert_into(NOTIFICATIONS_TABLE)
+        .values([
+            ("notifiable_id", DbValue::Text(notifiable_id)),
+            ("type", DbValue::Text(notification_type)),
+            ("data", DbValue::Json(data)),
+        ])
+        .execute(db.as_ref())
+        .await?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Core Traits

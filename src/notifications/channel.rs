@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 
-use crate::database::DbValue;
 use crate::foundation::{AppContext, Result};
 
-use super::{callback, Notifiable, Notification};
+use super::{callback, store_database_notification, Notifiable, Notification};
 
 /// Adapter trait for notification delivery channels.
 ///
@@ -55,14 +54,11 @@ impl NotificationChannel for DatabaseNotificationChannel {
         let Some(data) = callback::notification_database(notification)? else {
             return Ok(());
         };
-        let db = app.database()?;
-        db.raw_execute(
-            "INSERT INTO notifications (notifiable_id, type, data, created_at) VALUES ($1, $2, $3, NOW())",
-            &[
-                DbValue::Text(callback::notifiable_id(notifiable)?),
-                DbValue::Text(callback::notification_type(notification)?),
-                DbValue::Json(data),
-            ],
+        store_database_notification(
+            app,
+            callback::notifiable_id(notifiable)?,
+            callback::notification_type(notification)?,
+            data,
         )
         .await?;
         Ok(())

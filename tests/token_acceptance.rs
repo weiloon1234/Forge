@@ -5,11 +5,18 @@ use std::sync::OnceLock;
 use async_trait::async_trait;
 use forge::kernel::cli::CliKernel;
 use forge::prelude::*;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 
 const PAT_TABLE: &str = "personal_access_tokens";
 const RESET_TABLE: &str = "password_reset_tokens";
+const MFA_TABLE: &str = "auth_mfa_totp_factors";
+const TOTP_PERIOD_SECONDS: i64 = 30;
+const TOTP_DIGITS: u32 = 6;
+
+type HmacSha256 = Hmac<Sha256>;
 
 fn postgres_url() -> Option<String> {
     std::env::var("FORGE_TEST_POSTGRES_URL")
@@ -59,6 +66,7 @@ impl TokenTestRuntime {
 
         reset_personal_access_tokens(database.as_ref()).await;
         reset_password_reset_tokens(database.as_ref()).await;
+        reset_mfa_totp_factors(database.as_ref()).await;
 
         Some(Self {
             _dir: dir,
@@ -75,6 +83,10 @@ impl TokenTestRuntime {
         let _ = self
             .database
             .raw_execute(&format!("DROP TABLE IF EXISTS {RESET_TABLE}"), &[])
+            .await;
+        let _ = self
+            .database
+            .raw_execute(&format!("DROP TABLE IF EXISTS {MFA_TABLE}"), &[])
             .await;
     }
 
@@ -115,6 +127,46 @@ impl TokenTestRuntime {
             .unwrap()
     }
 
+    async fn mfa_state(&self, actor: &Actor) -> Option<(bool, i64)> {
+        self.database
+            .raw_query(
+                r#"
+                SELECT confirmed_at IS NOT NULL AS confirmed,
+                       jsonb_array_length(recovery_codes)::bigint AS recovery_count
+                FROM auth_mfa_totp_factors
+                WHERE guard = $1 AND actor_id = $2
+                "#,
+                &[
+                    DbValue::Text(actor.guard.to_string()),
+                    DbValue::Text(actor.id.clone()),
+                ],
+            )
+            .await
+            .unwrap()
+            .first()
+            .map(|row| {
+                (
+                    row.decode::<bool>("confirmed").unwrap(),
+                    row.decode::<i64>("recovery_count").unwrap(),
+                )
+            })
+    }
+
+    async fn mfa_count_for(&self, actor: &Actor) -> i64 {
+        self.database
+            .raw_query(
+                "SELECT COUNT(*) AS count FROM auth_mfa_totp_factors WHERE guard = $1 AND actor_id = $2",
+                &[
+                    DbValue::Text(actor.guard.to_string()),
+                    DbValue::Text(actor.id.clone()),
+                ],
+            )
+            .await
+            .unwrap()[0]
+            .decode("count")
+            .unwrap()
+    }
+
     async fn cli(&self) -> CliKernel {
         App::builder()
             .load_config_dir(self._dir.path())
@@ -130,6 +182,48 @@ impl TokenTestRuntime {
             .await
             .unwrap()
     }
+}
+
+fn current_totp_step() -> i64 {
+    chrono::Utc::now().timestamp() / TOTP_PERIOD_SECONDS
+}
+
+fn totp_code(secret: &str, step: i64) -> String {
+    let secret = decode_base32(secret);
+    let counter = (step as u64).to_be_bytes();
+    let mut mac = HmacSha256::new_from_slice(&secret).unwrap();
+    mac.update(&counter);
+    let result = mac.finalize().into_bytes();
+    let offset = (result[result.len() - 1] & 0x0f) as usize;
+    let binary = ((u32::from(result[offset]) & 0x7f) << 24)
+        | (u32::from(result[offset + 1]) << 16)
+        | (u32::from(result[offset + 2]) << 8)
+        | u32::from(result[offset + 3]);
+    format!("{:06}", binary % 10_u32.pow(TOTP_DIGITS))
+}
+
+fn decode_base32(value: &str) -> Vec<u8> {
+    let mut buffer = 0u32;
+    let mut bits_left = 0u8;
+    let mut output = Vec::new();
+
+    for byte in value.bytes().filter(|byte| *byte != b'=') {
+        let normalized = byte.to_ascii_uppercase();
+        let digit = match normalized {
+            b'A'..=b'Z' => normalized - b'A',
+            b'2'..=b'7' => normalized - b'2' + 26,
+            _ => panic!("invalid base32 test secret"),
+        };
+
+        buffer = (buffer << 5) | u32::from(digit);
+        bits_left += 5;
+        if bits_left >= 8 {
+            output.push(((buffer >> (bits_left - 8)) & 0xff) as u8);
+            bits_left -= 8;
+        }
+    }
+
+    output
 }
 
 async fn reset_personal_access_tokens(database: &DatabaseManager) {
@@ -216,6 +310,41 @@ async fn reset_password_reset_tokens(database: &DatabaseManager) {
         .unwrap();
 }
 
+async fn reset_mfa_totp_factors(database: &DatabaseManager) {
+    database
+        .raw_execute(&format!("DROP TABLE IF EXISTS {MFA_TABLE}"), &[])
+        .await
+        .unwrap();
+
+    database
+        .raw_execute(
+            r#"
+            CREATE TABLE auth_mfa_totp_factors (
+                id UUID PRIMARY KEY DEFAULT uuidv7(),
+                guard TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                secret_ciphertext TEXT NOT NULL,
+                confirmed_at TIMESTAMPTZ,
+                recovery_codes JSONB NOT NULL DEFAULT '[]',
+                last_used_step BIGINT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    database
+        .raw_execute(
+            "CREATE UNIQUE INDEX idx_auth_mfa_totp_guard_actor ON auth_mfa_totp_factors (guard, actor_id)",
+            &[],
+        )
+        .await
+        .unwrap();
+}
+
 #[derive(Clone, Debug)]
 struct DirectManagerActor;
 
@@ -290,6 +419,52 @@ async fn email_verification_token_validation_is_atomic_single_use() {
         .to_string()
         .contains("invalid or expired verification token"));
     assert_eq!(runtime.reset_count("verify:%").await, 0);
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn mfa_totp_factor_lifecycle_persists_and_consumes_recovery_codes() {
+    let _guard = token_lock().await;
+    let Some(runtime) = TokenTestRuntime::new_with_config(
+        r#"
+        [crypt]
+        key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+        [auth.mfa]
+        recovery_codes = 2
+        "#,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let actor = Actor::new("mfa-actor-1", DirectManagerActor::guard());
+    let totp = MfaManager::new(&runtime.app).unwrap().totp();
+    let challenge = totp.enroll(&actor).await.unwrap();
+    assert_eq!(runtime.mfa_state(&actor).await, Some((false, 0)));
+
+    let confirm_code = totp_code(&challenge.secret, current_totp_step());
+    totp.confirm(&actor, &confirm_code).await.unwrap();
+
+    let recovery_codes = totp
+        .regenerate_recovery_codes(
+            &actor,
+            &totp_code(&challenge.secret, current_totp_step() + 1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovery_codes.len(), 2);
+
+    totp.verify(&actor, &recovery_codes[0]).await.unwrap();
+    assert_eq!(runtime.mfa_state(&actor).await, Some((true, 1)));
+
+    let replayed = totp.verify(&actor, &recovery_codes[0]).await.unwrap_err();
+    assert!(replayed.to_string().contains("Invalid multi-factor"));
+
+    totp.disable(&actor, &recovery_codes[1]).await.unwrap();
+    assert_eq!(runtime.mfa_count_for(&actor).await, 0);
 
     runtime.cleanup().await;
 }

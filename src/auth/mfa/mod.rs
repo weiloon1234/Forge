@@ -13,7 +13,7 @@ use crate::auth::lockout::LoginThrottle;
 use crate::auth::token::TokenResponse;
 use crate::auth::{Actor, CurrentActor};
 use crate::config::MfaConfig;
-use crate::database::{DbValue, FromDbValue};
+use crate::database::{ComparisonOp, Condition, DbType, DbValue, Expr, FromDbValue, Query, Sql};
 use crate::events::Event;
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::{EventId, GuardId, HashManager, RoleId, Token};
@@ -22,6 +22,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const TOTP_PERIOD_SECONDS: i64 = 30;
 const TOTP_DIGITS: u32 = 6;
+const AUTH_MFA_TOTP_FACTORS_TABLE: &str = "auth_mfa_totp_factors";
 
 #[cfg(feature = "webauthn")]
 pub mod webauthn {}
@@ -175,15 +176,11 @@ impl TotpFactor {
     pub async fn disable(&self, actor: &Actor, response: &str) -> Result<()> {
         self.ensure_enabled()?;
         self.verify_current_code(actor, response).await?;
-        self.app
-            .database()?
-            .raw_execute(
-                "DELETE FROM auth_mfa_totp_factors WHERE guard = $1 AND actor_id = $2",
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                ],
-            )
+        let database = self.app.database()?;
+        Query::delete_from(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .where_eq("guard", actor.guard.to_string())
+            .where_eq("actor_id", actor.id.clone())
+            .execute(database.as_ref())
             .await?;
         self.dispatch_event(MfaDisabledEvent {
             actor: actor.clone(),
@@ -223,21 +220,18 @@ impl TotpFactor {
     }
 
     async fn load_record(&self, actor: &Actor) -> Result<Option<TotpRecord>> {
-        let rows = self
-            .app
-            .database()?
-            .raw_query(
-                r#"
-                SELECT secret_ciphertext, confirmed_at, recovery_codes, last_used_step
-                FROM auth_mfa_totp_factors
-                WHERE guard = $1 AND actor_id = $2
-                LIMIT 1
-                "#,
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                ],
-            )
+        let database = self.app.database()?;
+        let rows = Query::table(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .select([
+                "secret_ciphertext",
+                "confirmed_at",
+                "recovery_codes",
+                "last_used_step",
+            ])
+            .where_eq("guard", actor.guard.to_string())
+            .where_eq("actor_id", actor.id.clone())
+            .limit(1)
+            .get(database.as_ref())
             .await?;
         let Some(row) = rows.first() else {
             return Ok(None);
@@ -264,96 +258,72 @@ impl TotpFactor {
 
     async fn upsert_pending_secret(&self, actor: &Actor, secret: &str) -> Result<()> {
         let encrypted = self.app.crypt()?.encrypt_string(secret)?;
-        self.app
-            .database()?
-            .raw_execute(
-                r#"
-                INSERT INTO auth_mfa_totp_factors (
-                    guard,
-                    actor_id,
-                    secret_ciphertext,
-                    confirmed_at,
-                    recovery_codes,
-                    last_used_step,
-                    created_at,
-                    updated_at
-                )
-                VALUES ($1, $2, $3, NULL, '[]'::jsonb, NULL, NOW(), NOW())
-                ON CONFLICT (guard, actor_id)
-                DO UPDATE SET
-                    secret_ciphertext = EXCLUDED.secret_ciphertext,
-                    confirmed_at = NULL,
-                    recovery_codes = '[]'::jsonb,
-                    last_used_step = NULL,
-                    updated_at = NOW()
-                "#,
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                    DbValue::Text(encrypted),
-                ],
-            )
+        let database = self.app.database()?;
+        let empty_recovery_codes = serde_json::json!([]);
+        Query::insert_into(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .values([
+                ("guard", DbValue::Text(actor.guard.to_string())),
+                ("actor_id", DbValue::Text(actor.id.clone())),
+                ("secret_ciphertext", DbValue::Text(encrypted)),
+                (
+                    "recovery_codes",
+                    DbValue::Json(empty_recovery_codes.clone()),
+                ),
+            ])
+            .on_conflict_columns(["guard", "actor_id"])
+            .do_update()
+            .set_excluded("secret_ciphertext")
+            .set("confirmed_at", DbValue::Null(DbType::TimestampTz))
+            .set("recovery_codes", DbValue::Json(empty_recovery_codes))
+            .set("last_used_step", DbValue::Null(DbType::Int64))
+            .set_expr("updated_at", Sql::now())
+            .execute(database.as_ref())
             .await?;
         Ok(())
     }
 
     async fn mark_confirmed(&self, actor: &Actor, last_used_step: i64) -> Result<()> {
-        self.app
-            .database()?
-            .raw_execute(
-                r#"
-                UPDATE auth_mfa_totp_factors
-                SET confirmed_at = NOW(), last_used_step = $3, updated_at = NOW()
-                WHERE guard = $1 AND actor_id = $2
-                "#,
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                    DbValue::Int64(last_used_step),
-                ],
-            )
+        let database = self.app.database()?;
+        Query::update_table(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .set_expr("confirmed_at", Sql::now())
+            .value("last_used_step", last_used_step)
+            .set_expr("updated_at", Sql::now())
+            .where_eq("guard", actor.guard.to_string())
+            .where_eq("actor_id", actor.id.clone())
+            .execute(database.as_ref())
             .await?;
         Ok(())
     }
 
     async fn update_last_used_step(&self, actor: &Actor, last_used_step: i64) -> Result<bool> {
-        let affected = self
-            .app
-            .database()?
-            .raw_execute(
-                r#"
-                UPDATE auth_mfa_totp_factors
-                SET last_used_step = $3, updated_at = NOW()
-                WHERE guard = $1 AND actor_id = $2
-                  AND confirmed_at IS NOT NULL
-                  AND (last_used_step IS NULL OR last_used_step < $3)
-                "#,
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                    DbValue::Int64(last_used_step),
-                ],
-            )
+        let database = self.app.database()?;
+        let affected = Query::update_table(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .value("last_used_step", last_used_step)
+            .set_expr("updated_at", Sql::now())
+            .where_eq("guard", actor.guard.to_string())
+            .where_eq("actor_id", actor.id.clone())
+            .where_(Expr::column("confirmed_at").is_not_null())
+            .where_(Condition::or([
+                Expr::column("last_used_step").is_null(),
+                Expr::column("last_used_step").compare(
+                    ComparisonOp::Lt,
+                    Expr::value(DbValue::Int64(last_used_step)),
+                ),
+            ]))
+            .execute(database.as_ref())
             .await?;
         Ok(affected > 0)
     }
 
     async fn persist_recovery_codes(&self, actor: &Actor, hashes: &[String]) -> Result<()> {
         let recovery_codes = serde_json::to_value(hashes).map_err(Error::other)?;
-        self.app
-            .database()?
-            .raw_execute(
-                r#"
-                UPDATE auth_mfa_totp_factors
-                SET recovery_codes = $3, updated_at = NOW()
-                WHERE guard = $1 AND actor_id = $2
-                "#,
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                    DbValue::Json(recovery_codes),
-                ],
-            )
+        let database = self.app.database()?;
+        Query::update_table(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .value("recovery_codes", DbValue::Json(recovery_codes))
+            .set_expr("updated_at", Sql::now())
+            .where_eq("guard", actor.guard.to_string())
+            .where_eq("actor_id", actor.id.clone())
+            .execute(database.as_ref())
             .await?;
         Ok(())
     }
@@ -366,22 +336,14 @@ impl TotpFactor {
     ) -> Result<bool> {
         let current = serde_json::to_value(current_hashes).map_err(Error::other)?;
         let remaining = serde_json::to_value(remaining_hashes).map_err(Error::other)?;
-        let affected = self
-            .app
-            .database()?
-            .raw_execute(
-                r#"
-                UPDATE auth_mfa_totp_factors
-                SET recovery_codes = $3, updated_at = NOW()
-                WHERE guard = $1 AND actor_id = $2 AND recovery_codes = $4
-                "#,
-                &[
-                    DbValue::Text(actor.guard.to_string()),
-                    DbValue::Text(actor.id.clone()),
-                    DbValue::Json(remaining),
-                    DbValue::Json(current),
-                ],
-            )
+        let database = self.app.database()?;
+        let affected = Query::update_table(AUTH_MFA_TOTP_FACTORS_TABLE)
+            .value("recovery_codes", DbValue::Json(remaining))
+            .set_expr("updated_at", Sql::now())
+            .where_eq("guard", actor.guard.to_string())
+            .where_eq("actor_id", actor.id.clone())
+            .where_eq("recovery_codes", DbValue::Json(current))
+            .execute(database.as_ref())
             .await?;
         Ok(affected > 0)
     }

@@ -425,12 +425,16 @@ struct SeederContext
   async fn raw_execute(&self, sql: &str, bindings: &[DbValue]) -> Result<u64>
 struct SlowQueryEntry
 struct Sql
+  fn count_all() -> Expr
+  fn count(expr: impl Into<Expr>) -> Expr
+  fn count_distinct(expr: impl Into<Expr>) -> Expr
   fn function( name: impl Into<String>, args: impl IntoIterator<Item = Expr>, ) -> Expr
   fn coalesce(args: impl IntoIterator<Item = Expr>) -> Expr
   fn lower(expr: impl Into<Expr>) -> Expr
   fn upper(expr: impl Into<Expr>) -> Expr
   fn date_trunc(granularity: impl Into<String>, expr: impl Into<Expr>) -> Expr
   fn extract(field: impl Into<String>, expr: impl Into<Expr>) -> Expr
+  fn json_text_or_first( expr: impl Into<Expr>, preferred_key: impl Into<String>, ) -> Expr
   fn now() -> Expr
   fn not(expr: impl Into<Expr>) -> Expr
   fn negate(expr: impl Into<Expr>) -> Expr
@@ -669,6 +673,11 @@ struct SelectItem
   fn aliased(self, alias: impl Into<String>) -> Self
 struct SelectNode
   fn from(source: impl Into<FromItem>) -> Self
+  fn select(self, expr: impl Into<Expr>) -> Self
+  fn select_as(self, expr: impl Into<Expr>, alias: impl Into<String>) -> Self
+  fn where_(self, condition: Condition) -> Self
+  fn limit(self, limit: u64) -> Self
+  fn order_by(self, order: OrderBy) -> Self
 struct SetOperationNode
 struct TableRef
   fn new(name: impl Into<String>) -> Self

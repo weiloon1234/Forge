@@ -645,6 +645,28 @@ impl CompilerState {
             ));
         }
 
+        if name.eq_ignore_ascii_case("JSONB_TEXT_OR_FIRST") {
+            if args.len() != 2 {
+                return Err(Error::message(
+                    "JSONB_TEXT_OR_FIRST requires a JSONB expression and preferred key",
+                ));
+            }
+
+            let preferred_key = match &args[1] {
+                Expr::Value(DbValue::Text(key)) => key.as_str(),
+                _ => {
+                    return Err(Error::message(
+                        "JSONB_TEXT_OR_FIRST requires the second argument to be a text key",
+                    ));
+                }
+            };
+            let expr = self.compile_expr(&args[0])?;
+            return Ok(format!(
+                "COALESCE(({expr})->>{}, (SELECT value FROM jsonb_each_text({expr}) LIMIT 1))",
+                self.bind_text(preferred_key),
+            ));
+        }
+
         Ok(format!(
             "{}({})",
             name,
@@ -962,6 +984,11 @@ impl CompilerState {
                     .as_ref()
                     .and_then(|expr| self.expr_db_type(expr)),
             },
+            Expr::Function(function)
+                if function.name.eq_ignore_ascii_case("JSONB_TEXT_OR_FIRST") =>
+            {
+                Some(DbType::Text)
+            }
             Expr::Function(_) => None,
             Expr::Unary(expr) => self.expr_db_type(&expr.expr),
             Expr::Binary(expr) => self
@@ -1865,6 +1892,50 @@ mod tests {
         assert_eq!(
             compiled.sql,
             "SELECT COALESCE(\"payments\".\"nickname\", $1::text) AS \"display_name\", LOWER(\"payments\".\"email\") AS \"email_lower\", DATE_TRUNC($2::text, \"payments\".\"created_at\") AS \"created_day\", EXTRACT(epoch FROM \"payments\".\"created_at\") AS \"created_epoch\", ROW_NUMBER() OVER (PARTITION BY \"payments\".\"merchant_id\" ORDER BY \"payments\".\"created_at\" DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS \"row_number\", (SELECT COUNT(*) FROM \"refunds\" WHERE \"refunds\".\"payment_id\" = \"payments\".\"id\") AS \"refund_count\" FROM \"payments\""
+        );
+    }
+
+    #[test]
+    fn select_node_builder_compiles_scalar_subqueries() {
+        let compiled = compile(QueryAst::select(
+            SelectNode::from(TableRef::new("tags")).select_as(
+                Expr::subquery(
+                    SelectNode::from(TableRef::new("contact_tags"))
+                        .select(crate::database::query::Sql::count_all())
+                        .where_(Condition::compare(
+                            Expr::column(ColumnRef::new("contact_tags", "tag_id")),
+                            ComparisonOp::Eq,
+                            Expr::column(ColumnRef::new("tags", "id")),
+                        )),
+                ),
+                "contact_count",
+            ),
+        ));
+
+        assert_eq!(
+            compiled.sql,
+            "SELECT (SELECT COUNT(*) FROM \"contact_tags\" WHERE \"contact_tags\".\"tag_id\" = \"tags\".\"id\") AS \"contact_count\" FROM \"tags\""
+        );
+    }
+
+    #[test]
+    fn compiles_json_text_or_first_helper() {
+        let compiled = compile(QueryAst::select(
+            SelectNode::from(TableRef::new("voucher_claims")).select_as(
+                crate::database::query::Sql::json_text_or_first(
+                    Expr::column(ColumnRef::new("voucher_claims", "voucher_snapshot"))
+                        .json()
+                        .key("name")
+                        .as_json(),
+                    "en",
+                ),
+                "voucher_name",
+            ),
+        ));
+
+        assert_eq!(
+            compiled.sql,
+            "SELECT COALESCE(((\"voucher_claims\".\"voucher_snapshot\") -> $1::text)->>$2::text, (SELECT value FROM jsonb_each_text((\"voucher_claims\".\"voucher_snapshot\") -> $1::text) LIMIT 1)) AS \"voucher_name\" FROM \"voucher_claims\""
         );
     }
 }

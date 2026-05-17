@@ -16,12 +16,12 @@ use super::aggregate::{
     AggregateProjection,
 };
 use super::ast::{
-    BinaryOperator, CaseExpr, CaseWhen, ColumnRef, ComparisonOp, Condition, CteNode, DbValue, Expr,
-    FromItem, InsertNode, InsertSource, JoinKind, JoinNode, JsonPathExpr, JsonPathMode,
-    JsonPathSegment, JsonPredicateOp, JsonPredicateValue, LockBehavior, LockClause, LockStrength,
-    OnConflictAction, OnConflictNode, OnConflictTarget, OnConflictUpdate, OrderBy, QueryAst,
-    QueryBody, SelectItem, SelectNode, SetOperationNode, SetOperator, UpdateNode, WindowFrame,
-    WindowFrameBound, WindowFrameUnits, WindowSpec,
+    AggregateExpr, BinaryOperator, CaseExpr, CaseWhen, ColumnRef, ComparisonOp, Condition, CteNode,
+    DbValue, Expr, FromItem, InsertNode, InsertSource, JoinKind, JoinNode, JsonPathExpr,
+    JsonPathMode, JsonPathSegment, JsonPredicateOp, JsonPredicateValue, LockBehavior, LockClause,
+    LockStrength, OnConflictAction, OnConflictNode, OnConflictTarget, OnConflictUpdate, OrderBy,
+    QueryAst, QueryBody, SelectItem, SelectNode, SetOperationNode, SetOperator, UpdateNode,
+    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
 };
 use super::compiler::PostgresCompiler;
 use super::extensions::{register_model_records, AnyModelExtension};
@@ -221,6 +221,18 @@ impl Case {
 }
 
 impl Sql {
+    pub fn count_all() -> Expr {
+        Expr::from(AggregateExpr::count_all())
+    }
+
+    pub fn count(expr: impl Into<Expr>) -> Expr {
+        Expr::from(AggregateExpr::count(expr.into()))
+    }
+
+    pub fn count_distinct(expr: impl Into<Expr>) -> Expr {
+        Expr::from(AggregateExpr::count_distinct(expr.into()))
+    }
+
     pub fn function(name: impl Into<String>, args: impl IntoIterator<Item = Expr>) -> Expr {
         Expr::function(name, args)
     }
@@ -243,6 +255,13 @@ impl Sql {
 
     pub fn extract(field: impl Into<String>, expr: impl Into<Expr>) -> Expr {
         Expr::function("EXTRACT", [Expr::value(field.into()), expr.into()])
+    }
+
+    pub fn json_text_or_first(expr: impl Into<Expr>, preferred_key: impl Into<String>) -> Expr {
+        Expr::function(
+            "JSONB_TEXT_OR_FIRST",
+            [expr.into(), Expr::value(preferred_key.into())],
+        )
     }
 
     pub fn now() -> Expr {

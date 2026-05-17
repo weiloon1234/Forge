@@ -7,6 +7,22 @@ pub enum EnumKey {
     Int(i32),
 }
 
+impl EnumKey {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Int(_) => None,
+        }
+    }
+
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Self::String(_) => None,
+            Self::Int(value) => Some(*value),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumKeyKind {
     String,

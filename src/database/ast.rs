@@ -1290,6 +1290,34 @@ impl SelectNode {
             aggregates: Vec::new(),
         }
     }
+
+    pub fn select(mut self, expr: impl Into<Expr>) -> Self {
+        self.columns.push(SelectItem::new(expr));
+        self
+    }
+
+    pub fn select_as(mut self, expr: impl Into<Expr>, alias: impl Into<String>) -> Self {
+        self.columns.push(SelectItem::new(expr).aliased(alias));
+        self
+    }
+
+    pub fn where_(mut self, condition: Condition) -> Self {
+        self.condition = Some(match self.condition {
+            Some(existing) => Condition::and([existing, condition]),
+            None => condition,
+        });
+        self
+    }
+
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn order_by(mut self, order: OrderBy) -> Self {
+        self.order_by.push(order);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

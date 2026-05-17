@@ -10,7 +10,7 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | Module | Description | Size |
 |--------|-------------|------|
 | [root](root.md) | Crate root: derive macros, re-exports | 10L |
-| [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 26L |
+| [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 28L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 74L |
 | [audit](modules/audit.md) | Built-in audit logging with automatic model mutation tracking and redaction | 40L |
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 210L |
@@ -18,7 +18,7 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
 | [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 103L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
-| [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 742L |
+| [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 751L |
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 217L |
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 167L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 31L |
@@ -45,4 +45,4 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 68L |
 
-**Total: 35 modules, 3451 lines across all files.**
+**Total: 35 modules, 3462 lines across all files.**

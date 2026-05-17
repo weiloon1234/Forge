@@ -8,6 +8,8 @@ Enum metadata and serialization (ForgeAppEnum)
 
 ```rust
 enum EnumKey { String, Int }
+  fn as_str(&self) -> Option<&str>
+  fn as_i32(&self) -> Option<i32>
 enum EnumKeyKind { String, Int }
 struct EnumMeta
 struct EnumOption

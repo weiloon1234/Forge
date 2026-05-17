@@ -1,6 +1,7 @@
 use std::fs;
 use std::sync::OnceLock;
 
+use forge::countries::seed_countries;
 use forge::prelude::*;
 use forge::settings::{NewSetting, Setting};
 use tempfile::TempDir;
@@ -48,6 +49,7 @@ impl SupportStoresRuntime {
 
         reset_settings(database.as_ref()).await;
         reset_notifications(database.as_ref()).await;
+        reset_countries(database.as_ref()).await;
 
         Some(Self {
             _dir: dir,
@@ -64,6 +66,10 @@ impl SupportStoresRuntime {
         let _ = self
             .database
             .raw_execute("DROP TABLE IF EXISTS notifications", &[])
+            .await;
+        let _ = self
+            .database
+            .raw_execute("DROP TABLE IF EXISTS countries", &[])
             .await;
     }
 }
@@ -119,6 +125,48 @@ async fn reset_notifications(database: &DatabaseManager) {
                 data JSONB NOT NULL DEFAULT '{}',
                 read_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+            &[],
+        )
+        .await
+        .unwrap();
+}
+
+async fn reset_countries(database: &DatabaseManager) {
+    database
+        .raw_execute("DROP TABLE IF EXISTS countries", &[])
+        .await
+        .unwrap();
+    database
+        .raw_execute(
+            r#"
+            CREATE TABLE countries (
+                iso2 CHAR(2) PRIMARY KEY,
+                iso3 CHAR(3) NOT NULL,
+                iso_numeric TEXT,
+                name TEXT NOT NULL,
+                official_name TEXT,
+                capital TEXT,
+                region TEXT,
+                subregion TEXT,
+                currencies JSONB NOT NULL DEFAULT '[]',
+                primary_currency_code TEXT,
+                calling_code TEXT,
+                calling_root TEXT,
+                calling_suffixes JSONB NOT NULL DEFAULT '[]',
+                tlds JSONB NOT NULL DEFAULT '[]',
+                timezones JSONB NOT NULL DEFAULT '[]',
+                latitude DOUBLE PRECISION,
+                longitude DOUBLE PRECISION,
+                independent BOOLEAN,
+                un_member BOOLEAN,
+                flag_emoji TEXT,
+                conversion_rate DOUBLE PRECISION,
+                is_default BOOLEAN NOT NULL DEFAULT false,
+                status TEXT NOT NULL DEFAULT 'disabled',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ
             )
             "#,
             &[],
@@ -254,6 +302,48 @@ async fn database_notifications_are_stored_with_typed_queries() {
         rows[0].decode::<serde_json::Value>("data").unwrap(),
         serde_json::json!({ "message": "stored" })
     );
+
+    runtime.cleanup().await;
+}
+
+#[tokio::test]
+async fn countries_seed_and_read_helpers_use_typed_queries() {
+    let _guard = support_stores_lock().await;
+    let Some(runtime) = SupportStoresRuntime::new().await else {
+        return;
+    };
+
+    let seeded = seed_countries(&runtime.app).await.unwrap();
+    assert_eq!(seeded, 250);
+
+    let malaysia = Country::find(&runtime.app, "my").await.unwrap().unwrap();
+    assert_eq!(malaysia.iso2, "MY");
+    assert_eq!(malaysia.iso3, "MYS");
+    assert!(Country::exists(&runtime.app, "my").await.unwrap());
+    assert_eq!(Country::all(&runtime.app).await.unwrap().len(), 250);
+    assert_eq!(Country::enabled(&runtime.app).await.unwrap().len(), 0);
+
+    runtime
+        .database
+        .raw_execute(
+            "UPDATE countries SET status = 'enabled' WHERE iso2 = 'MY'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(Country::enabled(&runtime.app)
+        .await
+        .unwrap()
+        .iter()
+        .any(|country| country.iso2 == "MY"));
+
+    seed_countries(&runtime.app).await.unwrap();
+    assert!(Country::find(&runtime.app, "MY")
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .is_enabled());
 
     runtime.cleanup().await;
 }

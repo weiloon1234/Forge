@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::database::{DbValue, QueryExecutor};
+use crate::database::{DbType, DbValue, OrderBy, Query, QueryExecutor, Sql};
 use crate::foundation::{AppContext, Error, Result};
 
 const BUILTIN_SEED: &str = include_str!("seed.json");
+const COUNTRIES_TABLE: &str = "countries";
 
 /// Country activation status.
 #[derive(Clone, Debug, Default, PartialEq, Eq, forge_macros::AppEnum)]
@@ -73,11 +74,10 @@ impl Country {
     /// Find a country by ISO2 code.
     pub async fn find(app: &AppContext, iso2: &str) -> Result<Option<Country>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT * FROM countries WHERE iso2 = $1",
-                &[DbValue::Text(iso2.to_ascii_uppercase())],
-            )
+        let rows = Query::table(COUNTRIES_TABLE)
+            .where_eq("iso2", iso2.to_ascii_uppercase())
+            .limit(1)
+            .get(db.as_ref())
             .await?;
         rows.first().map(row_to_country).transpose()
     }
@@ -85,8 +85,9 @@ impl Country {
     /// List all countries, ordered by name.
     pub async fn all(app: &AppContext) -> Result<Vec<Country>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query("SELECT * FROM countries ORDER BY name", &[])
+        let rows = Query::table(COUNTRIES_TABLE)
+            .order_by(OrderBy::asc("name"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(row_to_country).collect()
     }
@@ -94,11 +95,10 @@ impl Country {
     /// List countries filtered by status.
     pub async fn by_status(app: &AppContext, status: CountryStatus) -> Result<Vec<Country>> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT * FROM countries WHERE status = $1 ORDER BY name",
-                &[DbValue::Text(status.as_str().to_string())],
-            )
+        let rows = Query::table(COUNTRIES_TABLE)
+            .where_eq("status", status.as_str().to_string())
+            .order_by(OrderBy::asc("name"))
+            .get(db.as_ref())
             .await?;
         rows.iter().map(row_to_country).collect()
     }
@@ -116,11 +116,11 @@ impl Country {
     /// Check if an ISO2 code is valid (exists in the table).
     pub async fn exists(app: &AppContext, iso2: &str) -> Result<bool> {
         let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT 1 FROM countries WHERE iso2 = $1",
-                &[DbValue::Text(iso2.to_ascii_uppercase())],
-            )
+        let rows = Query::table(COUNTRIES_TABLE)
+            .select(["iso2"])
+            .where_eq("iso2", iso2.to_ascii_uppercase())
+            .limit(1)
+            .get(db.as_ref())
             .await?;
         Ok(!rows.is_empty())
     }
@@ -228,21 +228,21 @@ pub async fn seed_countries_with(executor: &dyn QueryExecutor) -> Result<u64> {
 fn opt_text(value: &Option<String>) -> DbValue {
     match value {
         Some(s) if !s.trim().is_empty() => DbValue::Text(s.trim().to_string()),
-        _ => DbValue::Null(crate::database::DbType::Text),
+        _ => DbValue::Null(DbType::Text),
     }
 }
 
 fn opt_f64(value: Option<f64>) -> DbValue {
     match value {
         Some(v) => DbValue::Float64(v),
-        None => DbValue::Null(crate::database::DbType::Float64),
+        None => DbValue::Null(DbType::Float64),
     }
 }
 
 fn opt_bool(value: Option<bool>) -> DbValue {
     match value {
         Some(v) => DbValue::Bool(v),
-        None => DbValue::Null(crate::database::DbType::Bool),
+        None => DbValue::Null(DbType::Bool),
     }
 }
 
@@ -254,69 +254,73 @@ async fn upsert_country_seed(executor: &dyn QueryExecutor, seed: &CountrySeed) -
     let tlds = serde_json::to_value(&seed.tlds).unwrap_or_default();
     let timezones = serde_json::to_value(&seed.timezones).unwrap_or_default();
 
-    executor
-        .raw_execute(
-            r#"
-            INSERT INTO countries (
-                iso2, iso3, iso_numeric, name, official_name, capital, region, subregion,
-                currencies, primary_currency_code, calling_code, calling_root, calling_suffixes,
-                tlds, timezones, latitude, longitude, independent, un_member, flag_emoji,
-                conversion_rate, is_default, status, created_at
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                $18, $19, $20, $21, COALESCE($22, false), 'disabled', NOW()
-            )
-            ON CONFLICT (iso2) DO UPDATE SET
-                iso3 = $2,
-                iso_numeric = $3,
-                name = $4,
-                official_name = $5,
-                capital = $6,
-                region = $7,
-                subregion = $8,
-                currencies = $9,
-                primary_currency_code = $10,
-                calling_code = $11,
-                calling_root = $12,
-                calling_suffixes = $13,
-                tlds = $14,
-                timezones = $15,
-                latitude = $16,
-                longitude = $17,
-                independent = $18,
-                un_member = $19,
-                flag_emoji = $20,
-                conversion_rate = COALESCE($21, countries.conversion_rate),
-                is_default = COALESCE($22, countries.is_default),
-                updated_at = NOW()
-            "#,
-            &[
-                DbValue::Text(iso2),
-                DbValue::Text(iso3),
-                opt_text(&seed.iso_numeric),
-                DbValue::Text(seed.name.trim().to_string()),
-                opt_text(&seed.official_name),
-                opt_text(&seed.capital),
-                opt_text(&seed.region),
-                opt_text(&seed.subregion),
-                DbValue::Json(currencies),
+    let mut query = Query::insert_into(COUNTRIES_TABLE)
+        .values([
+            ("iso2", DbValue::Text(iso2)),
+            ("iso3", DbValue::Text(iso3)),
+            ("iso_numeric", opt_text(&seed.iso_numeric)),
+            ("name", DbValue::Text(seed.name.trim().to_string())),
+            ("official_name", opt_text(&seed.official_name)),
+            ("capital", opt_text(&seed.capital)),
+            ("region", opt_text(&seed.region)),
+            ("subregion", opt_text(&seed.subregion)),
+            ("currencies", DbValue::Json(currencies)),
+            (
+                "primary_currency_code",
                 opt_text(&seed.primary_currency_code),
-                opt_text(&seed.calling_code),
-                opt_text(&seed.calling_root),
-                DbValue::Json(calling_suffixes),
-                DbValue::Json(tlds),
-                DbValue::Json(timezones),
-                opt_f64(seed.latitude),
-                opt_f64(seed.longitude),
-                opt_bool(seed.independent),
-                opt_bool(seed.un_member),
-                opt_text(&seed.flag_emoji),
-                opt_f64(seed.conversion_rate),
-                opt_bool(seed.is_default),
-            ],
-        )
-        .await?;
+            ),
+            ("calling_code", opt_text(&seed.calling_code)),
+            ("calling_root", opt_text(&seed.calling_root)),
+            ("calling_suffixes", DbValue::Json(calling_suffixes)),
+            ("tlds", DbValue::Json(tlds)),
+            ("timezones", DbValue::Json(timezones)),
+            ("latitude", opt_f64(seed.latitude)),
+            ("longitude", opt_f64(seed.longitude)),
+            ("independent", opt_bool(seed.independent)),
+            ("un_member", opt_bool(seed.un_member)),
+            ("flag_emoji", opt_text(&seed.flag_emoji)),
+            ("conversion_rate", opt_f64(seed.conversion_rate)),
+            (
+                "is_default",
+                DbValue::Bool(seed.is_default.unwrap_or(false)),
+            ),
+            (
+                "status",
+                DbValue::Text(CountryStatus::Disabled.as_str().to_string()),
+            ),
+        ])
+        .on_conflict_columns(["iso2"])
+        .do_update()
+        .set_excluded("iso3")
+        .set_excluded("iso_numeric")
+        .set_excluded("name")
+        .set_excluded("official_name")
+        .set_excluded("capital")
+        .set_excluded("region")
+        .set_excluded("subregion")
+        .set_excluded("currencies")
+        .set_excluded("primary_currency_code")
+        .set_excluded("calling_code")
+        .set_excluded("calling_root")
+        .set_excluded("calling_suffixes")
+        .set_excluded("tlds")
+        .set_excluded("timezones")
+        .set_excluded("latitude")
+        .set_excluded("longitude")
+        .set_excluded("independent")
+        .set_excluded("un_member")
+        .set_excluded("flag_emoji")
+        .set_expr("updated_at", Sql::now());
+
+    if seed.conversion_rate.is_some() {
+        query = query.set_excluded("conversion_rate");
+    }
+
+    if seed.is_default.is_some() {
+        query = query.set_excluded("is_default");
+    }
+
+    query.execute(executor).await?;
     Ok(())
 }
 

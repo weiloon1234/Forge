@@ -49,6 +49,7 @@ struct Column
   fn lt<V>(&self, value: V) -> Condition
   fn lte<V>(&self, value: V) -> Condition
   fn in_list<I, V>(&self, values: I) -> Condition
+  fn not_in_list<I, V>(&self, values: I) -> Condition
   fn is_null(&self) -> Condition
   fn is_not_null(&self) -> Condition
   fn like(&self, value: impl Into<String>) -> Condition
@@ -210,6 +211,8 @@ struct ModelQuery
   fn with_stream_batch_size(self, batch_size: usize) -> Self
   fn with_cte(self, cte: Cte) -> Self
   fn where_(self, condition: Condition) -> Self
+  fn where_in<T, I, V>(self, column: Column<M, T>, values: I) -> Self
+  fn where_not_in<T, I, V>(self, column: Column<M, T>, values: I) -> Self
   fn group_by(self, expr: impl Into<Expr>) -> Self
   fn having(self, condition: Condition) -> Self
   fn search<T>(self, columns: &[Column<M, T>], query: &str) -> Self
@@ -368,6 +371,8 @@ struct Query
   fn where_(self, condition: Condition) -> Self
   fn where_eq( self, column: impl Into<ColumnRef>, value: impl Into<DbValue>, ) -> Self
   fn where_ieq( self, column: impl Into<ColumnRef>, value: impl Into<String>, ) -> Self
+  fn where_in<I, V>(self, column: impl Into<ColumnRef>, values: I) -> Self
+  fn where_not_in<I, V>(self, column: impl Into<ColumnRef>, values: I) -> Self
   fn group_by(self, expr: impl Into<Expr>) -> Self
   fn having(self, condition: Condition) -> Self
   fn limit(self, limit: u64) -> Self

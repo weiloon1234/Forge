@@ -704,6 +704,15 @@ impl<M, T> Column<M, T> {
         }
     }
 
+    pub fn not_in_list<I, V>(&self, values: I) -> Condition
+    where
+        I: IntoIterator<Item = V>,
+        V: IntoColumnValue<T>,
+        T: ToDbValue,
+    {
+        Condition::negate(self.in_list(values))
+    }
+
     pub fn is_null(&self) -> Condition {
         Condition::IsNull(self.column_ref())
     }

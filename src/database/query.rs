@@ -26,11 +26,11 @@ use super::ast::{
 use super::compiler::PostgresCompiler;
 use super::extensions::{register_model_records, AnyModelExtension};
 use super::model::{
-    upsert_assignment, AfterCommitSink, Column, CreateDraft, FromDbValue, IntoFieldValue, Model,
-    ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent, ModelDeletingEvent,
-    ModelFieldWriteMutator, ModelHookContext, ModelLifecycle, ModelLifecycleSnapshot,
-    ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent, ModelWriteExecutor, TableMeta,
-    ToDbValue, UpdateDraft,
+    upsert_assignment, AfterCommitSink, Column, CreateDraft, FromDbValue, IntoColumnValue,
+    IntoFieldValue, Model, ModelCreatedEvent, ModelCreatingEvent, ModelDeletedEvent,
+    ModelDeletingEvent, ModelFieldWriteMutator, ModelHookContext, ModelLifecycle,
+    ModelLifecycleSnapshot, ModelPrimaryKeyStrategy, ModelUpdatedEvent, ModelUpdatingEvent,
+    ModelWriteExecutor, TableMeta, ToDbValue, UpdateDraft,
 };
 use super::projection::{Projection, ProjectionField, ProjectionMeta};
 use super::relation::{
@@ -758,6 +758,28 @@ impl Query {
             ComparisonOp::IEq,
             Expr::value(DbValue::Text(value.into())),
         ))
+    }
+
+    pub fn where_in<I, V>(self, column: impl Into<super::ast::ColumnRef>, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<super::ast::DbValue>,
+    {
+        self.where_(Condition::InList {
+            expr: Expr::column(column.into()),
+            values: values.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    pub fn where_not_in<I, V>(self, column: impl Into<super::ast::ColumnRef>, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<super::ast::DbValue>,
+    {
+        self.where_(Condition::negate(Condition::InList {
+            expr: Expr::column(column.into()),
+            values: values.into_iter().map(Into::into).collect(),
+        }))
     }
 
     pub fn group_by(mut self, expr: impl Into<Expr>) -> Self {
@@ -1804,6 +1826,24 @@ where
     pub fn where_(mut self, condition: Condition) -> Self {
         self.select.condition = merge_condition(self.select.condition.take(), condition);
         self
+    }
+
+    pub fn where_in<T, I, V>(self, column: Column<M, T>, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: IntoColumnValue<T>,
+        T: ToDbValue,
+    {
+        self.where_(column.in_list(values))
+    }
+
+    pub fn where_not_in<T, I, V>(self, column: Column<M, T>, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: IntoColumnValue<T>,
+        T: ToDbValue,
+    {
+        self.where_(column.not_in_list(values))
     }
 
     pub fn group_by(mut self, expr: impl Into<Expr>) -> Self {
@@ -5114,6 +5154,13 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, crate::Model)]
+    #[forge(table = "query_helper_users")]
+    struct QueryHelperUser {
+        id: ModelId<Self>,
+        name: String,
+    }
+
+    #[derive(Debug, PartialEq, crate::Model)]
     #[forge(table = "iteration_users", primary_key_strategy = "manual")]
     struct IterationUser {
         id: i64,
@@ -5165,6 +5212,47 @@ mod tests {
         ) -> Result<u64> {
             Ok(0)
         }
+    }
+
+    #[test]
+    fn model_query_where_in_helpers_compile_typed_columns() {
+        let first = ModelId::<QueryHelperUser>::generate();
+        let second = ModelId::<QueryHelperUser>::generate();
+
+        let include = QueryHelperUser::model_query()
+            .where_in(QueryHelperUser::ID, [first, second])
+            .to_compiled_sql()
+            .unwrap();
+        let exclude = QueryHelperUser::model_query()
+            .where_not_in(QueryHelperUser::NAME, ["archived", "deleted"])
+            .to_compiled_sql()
+            .unwrap();
+
+        assert!(include
+            .sql
+            .contains("\"query_helper_users\".\"id\" IN ($1::uuid, $2::uuid)"));
+        assert!(exclude
+            .sql
+            .contains("NOT (\"query_helper_users\".\"name\" IN ($1::text, $2::text))"));
+    }
+
+    #[test]
+    fn generic_query_where_in_helpers_compile() {
+        let include = Query::table("users")
+            .select(["id"])
+            .where_in("id", [1_i64, 2_i64]);
+        let exclude = Query::table("users")
+            .select(["id"])
+            .where_not_in("status", ["archived", "deleted"]);
+
+        assert_eq!(
+            PostgresCompiler::compile(include.ast()).unwrap().sql,
+            "SELECT \"id\" FROM \"users\" WHERE \"id\" IN ($1::bigint, $2::bigint)"
+        );
+        assert_eq!(
+            PostgresCompiler::compile(exclude.ast()).unwrap().sql,
+            "SELECT \"id\" FROM \"users\" WHERE NOT (\"status\" IN ($1::text, $2::text))"
+        );
     }
 
     fn iteration_record(id: i64) -> DbRecord {

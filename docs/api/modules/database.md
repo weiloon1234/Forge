@@ -454,6 +454,7 @@ struct Sql
   fn json_text_or_first( expr: impl Into<Expr>, preferred_key: impl Into<String>, ) -> Expr
   fn to_timestamp_millis(millis: impl Into<Expr>) -> Expr
   fn now() -> Expr
+  fn uuid_v7() -> Expr
   fn not(expr: impl Into<Expr>) -> Expr
   fn negate(expr: impl Into<Expr>) -> Expr
   fn add(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr

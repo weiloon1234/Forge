@@ -304,6 +304,10 @@ impl Sql {
         Expr::function("NOW", std::iter::empty())
     }
 
+    pub fn uuid_v7() -> Expr {
+        Expr::function("uuidv7", std::iter::empty())
+    }
+
     pub fn not(expr: impl Into<Expr>) -> Expr {
         Expr::unary(super::ast::UnaryOperator::Not, expr)
     }
@@ -5423,6 +5427,17 @@ mod tests {
         assert!(compiled.sql.contains("TO_TIMESTAMP"));
         assert!(compiled.sql.contains("::double precision"));
         assert!(compiled.sql.contains("NOW()"));
+    }
+
+    #[test]
+    fn uuid_v7_expression_helper_compiles_for_seeders() {
+        let query = Query::insert_into("users").value_expr("id", Sql::uuid_v7());
+        let compiled = PostgresCompiler::compile(query.ast()).unwrap();
+
+        assert_eq!(
+            compiled.sql,
+            "INSERT INTO \"users\" (\"id\") VALUES (uuidv7())"
+        );
     }
 
     #[test]

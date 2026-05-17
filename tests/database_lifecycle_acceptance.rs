@@ -511,9 +511,10 @@ async fn make_seeder_generates_a_rust_file_and_refuses_overwrite_without_force()
         generated[0].file_name().unwrap().to_string_lossy(),
         "users_seed.rs"
     );
-    assert!(fs::read_to_string(&generated[0])
-        .unwrap()
-        .contains("impl SeederFile for Entry"));
+    let generated_seeder = fs::read_to_string(&generated[0]).unwrap();
+    assert!(generated_seeder.contains("impl SeederFile for Entry"));
+    assert!(generated_seeder.contains("Query::insert_into"));
+    assert!(generated_seeder.contains("Sql::uuid_v7()"));
 
     let error = run_cli(
         App::builder().load_config_dir(dir.path()),

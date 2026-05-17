@@ -252,7 +252,7 @@ fn render_migration_template() -> String {
 }
 
 fn render_seeder_template() -> String {
-    "use async_trait::async_trait;\nuse forge::prelude::*;\n\npub struct Entry;\n\n#[async_trait]\nimpl SeederFile for Entry {\n    async fn run(ctx: &SeederContext<'_>) -> Result<()> {\n        ctx.raw_execute(\n            r#\"INSERT INTO your_table (id) VALUES (uuidv7());\"#,\n            &[],\n        )\n        .await?;\n        Ok(())\n    }\n}\n"
+    "use async_trait::async_trait;\nuse forge::prelude::*;\n\npub struct Entry;\n\n#[async_trait]\nimpl SeederFile for Entry {\n    async fn run(ctx: &SeederContext<'_>) -> Result<()> {\n        Query::insert_into(\"your_table\")\n            .value_expr(\"id\", Sql::uuid_v7())\n            .execute(ctx)\n            .await?;\n        Ok(())\n    }\n}\n"
         .to_string()
 }
 

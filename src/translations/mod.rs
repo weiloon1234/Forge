@@ -163,7 +163,20 @@ pub trait HasTranslations: Send + Sync {
         value: &str,
     ) -> Result<()> {
         let db = app.database()?;
-        db.raw_execute(
+        self.set_translation_with(&*db, locale, field, value).await
+    }
+
+    async fn set_translation_with<E>(
+        &self,
+        executor: &E,
+        locale: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<()>
+    where
+        E: QueryExecutor,
+    {
+        executor.raw_execute(
             "INSERT INTO model_translations (id, translatable_type, translatable_id, locale, field, value, created_at) \
              VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, NOW()) \
              ON CONFLICT (translatable_type, translatable_id, locale, field) \
@@ -189,6 +202,22 @@ pub trait HasTranslations: Send + Sync {
     ) -> Result<()> {
         for (field, value) in values {
             self.set_translation(app, locale, field, value).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_translations_with<E>(
+        &self,
+        executor: &E,
+        locale: &str,
+        values: &[(&str, &str)],
+    ) -> Result<()>
+    where
+        E: QueryExecutor,
+    {
+        for (field, value) in values {
+            self.set_translation_with(executor, locale, field, value)
+                .await?;
         }
         Ok(())
     }
@@ -358,7 +387,14 @@ pub trait HasTranslations: Send + Sync {
 
     async fn delete_translations(&self, app: &AppContext, locale: &str) -> Result<u64> {
         let db = app.database()?;
-        let affected = db
+        self.delete_translations_with(&*db, locale).await
+    }
+
+    async fn delete_translations_with<E>(&self, executor: &E, locale: &str) -> Result<u64>
+    where
+        E: QueryExecutor,
+    {
+        let affected = executor
             .raw_execute(
                 "DELETE FROM model_translations \
              WHERE translatable_type = $1 AND translatable_id = $2::uuid AND locale = $3",
@@ -366,6 +402,53 @@ pub trait HasTranslations: Send + Sync {
                     DbValue::Text(Self::translatable_type().to_string()),
                     DbValue::Text(self.translatable_id()),
                     DbValue::Text(locale.to_string()),
+                ],
+            )
+            .await?;
+        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        Ok(affected)
+    }
+
+    async fn delete_translation_field(&self, app: &AppContext, field: &str) -> Result<u64> {
+        let db = app.database()?;
+        self.delete_translation_field_with(&*db, field).await
+    }
+
+    async fn delete_translation_field_with<E>(&self, executor: &E, field: &str) -> Result<u64>
+    where
+        E: QueryExecutor,
+    {
+        let affected = executor
+            .raw_execute(
+                "DELETE FROM model_translations \
+             WHERE translatable_type = $1 AND translatable_id = $2::uuid AND field = $3",
+                &[
+                    DbValue::Text(Self::translatable_type().to_string()),
+                    DbValue::Text(self.translatable_id()),
+                    DbValue::Text(field.to_string()),
+                ],
+            )
+            .await?;
+        invalidate_translation_cache(Self::translatable_type(), &self.translatable_id());
+        Ok(affected)
+    }
+
+    async fn delete_all_translations(&self, app: &AppContext) -> Result<u64> {
+        let db = app.database()?;
+        self.delete_all_translations_with(&*db).await
+    }
+
+    async fn delete_all_translations_with<E>(&self, executor: &E) -> Result<u64>
+    where
+        E: QueryExecutor,
+    {
+        let affected = executor
+            .raw_execute(
+                "DELETE FROM model_translations \
+             WHERE translatable_type = $1 AND translatable_id = $2::uuid",
+                &[
+                    DbValue::Text(Self::translatable_type().to_string()),
+                    DbValue::Text(self.translatable_id()),
                 ],
             )
             .await?;
@@ -520,6 +603,7 @@ fn collect_unique_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use uuid::Uuid;
@@ -605,6 +689,79 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn translation_write_helpers_use_executor_and_invalidate_scope_cache() {
+        let executor = RecordingTranslationExecutor::default();
+        let translatable = TestTranslatable {
+            id: Uuid::now_v7().to_string(),
+        };
+        let shape = TranslationCacheShape::All;
+
+        scope_model_extensions(async {
+            current_extension_scope().unwrap().store_translations(
+                TestTranslatable::translatable_type(),
+                shape.clone(),
+                &[translatable.translatable_id()],
+                vec![ModelTranslation {
+                    id: Uuid::now_v7().to_string(),
+                    translatable_type: TestTranslatable::translatable_type().to_string(),
+                    translatable_id: translatable.translatable_id(),
+                    locale: "en".to_string(),
+                    field: "name".to_string(),
+                    value: "Cached".to_string(),
+                }],
+            );
+
+            assert!(current_extension_scope()
+                .unwrap()
+                .cached_translations(
+                    TestTranslatable::translatable_type(),
+                    &shape,
+                    &translatable.translatable_id()
+                )
+                .is_some());
+
+            translatable
+                .set_translation_with(&executor, "en", "name", "Desk")
+                .await
+                .unwrap();
+            translatable
+                .delete_translation_field_with(&executor, "name")
+                .await
+                .unwrap();
+            translatable
+                .delete_all_translations_with(&executor)
+                .await
+                .unwrap();
+
+            assert!(current_extension_scope()
+                .unwrap()
+                .cached_translations(
+                    TestTranslatable::translatable_type(),
+                    &shape,
+                    &translatable.translatable_id()
+                )
+                .is_none());
+        })
+        .await;
+
+        let calls = executor.execute_calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].0.contains("ON CONFLICT"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                DbValue::Text("test_translatables".to_string()),
+                DbValue::Text(translatable.id.clone()),
+                DbValue::Text("en".to_string()),
+                DbValue::Text("name".to_string()),
+                DbValue::Text("Desk".to_string()),
+            ]
+        );
+        assert!(calls[1].0.contains("field = $3"));
+        assert!(calls[2].0.contains("WHERE translatable_type = $1"));
+    }
+
     fn translation_record(translatable_type: &str, translatable_id: Uuid, field: &str) -> DbRecord {
         let mut record = DbRecord::new();
         record.insert("id", DbValue::Uuid(Uuid::now_v7()));
@@ -617,5 +774,49 @@ mod tests {
         record.insert("field", DbValue::Text(field.to_string()));
         record.insert("value", DbValue::Text("Translated".to_string()));
         record
+    }
+
+    struct TestTranslatable {
+        id: String,
+    }
+
+    impl HasTranslations for TestTranslatable {
+        fn translatable_type() -> &'static str {
+            "test_translatables"
+        }
+
+        fn translatable_id(&self) -> String {
+            self.id.clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTranslationExecutor {
+        execute_calls: Mutex<Vec<(String, Vec<DbValue>)>>,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for RecordingTranslationExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            sql: &str,
+            bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            self.execute_calls
+                .lock()
+                .unwrap()
+                .push((sql.to_string(), bindings.to_vec()));
+            Ok(1)
+        }
     }
 }

@@ -40,9 +40,9 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 133L |
 | [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 210L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 40L |
-| [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 26L |
+| [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 33L |
 | [typescript](modules/typescript.md) |  | 14L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 68L |
 
-**Total: 35 modules, 3472 lines across all files.**
+**Total: 35 modules, 3479 lines across all files.**

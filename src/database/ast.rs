@@ -1081,8 +1081,8 @@ pub enum Condition {
     And(Vec<Condition>),
     Or(Vec<Condition>),
     Not(Box<Condition>),
-    IsNull(ColumnRef),
-    IsNotNull(ColumnRef),
+    IsNull(Expr),
+    IsNotNull(Expr),
     Exists(Box<QueryAst>),
     Raw {
         sql: String,
@@ -1126,11 +1126,19 @@ impl Condition {
     }
 
     pub fn is_null(column: impl Into<ColumnRef>) -> Self {
-        Self::IsNull(column.into())
+        Self::expr_is_null(Expr::column(column.into()))
     }
 
     pub fn is_not_null(column: impl Into<ColumnRef>) -> Self {
-        Self::IsNotNull(column.into())
+        Self::expr_is_not_null(Expr::column(column.into()))
+    }
+
+    pub fn expr_is_null(expr: impl Into<Expr>) -> Self {
+        Self::IsNull(expr.into())
+    }
+
+    pub fn expr_is_not_null(expr: impl Into<Expr>) -> Self {
+        Self::IsNotNull(expr.into())
     }
 
     pub fn false_() -> Self {

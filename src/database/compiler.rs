@@ -936,10 +936,8 @@ impl CompilerState {
             Condition::Not(condition) => {
                 Ok(format!("NOT ({})", self.compile_condition(condition)?))
             }
-            Condition::IsNull(column) => Ok(format!("{} IS NULL", self.compile_column(column))),
-            Condition::IsNotNull(column) => {
-                Ok(format!("{} IS NOT NULL", self.compile_column(column)))
-            }
+            Condition::IsNull(expr) => Ok(format!("{} IS NULL", self.compile_expr(expr)?)),
+            Condition::IsNotNull(expr) => Ok(format!("{} IS NOT NULL", self.compile_expr(expr)?)),
             Condition::Exists(query) => Ok(format!("EXISTS ({})", self.compile_query(query)?)),
             Condition::Raw { sql, bindings } => {
                 let placeholder_count = sql.matches('?').count();

@@ -233,12 +233,38 @@ impl Sql {
         Expr::from(AggregateExpr::count_distinct(expr.into()))
     }
 
+    pub fn count_when(condition: Condition) -> Expr {
+        Self::count(Case::when(condition, Expr::value(1_i64)).end())
+    }
+
+    pub fn sum(expr: impl Into<Expr>) -> Expr {
+        Expr::from(AggregateExpr::sum(expr.into()))
+    }
+
+    pub fn avg(expr: impl Into<Expr>) -> Expr {
+        Expr::from(AggregateExpr::avg(expr.into()))
+    }
+
+    pub fn min(expr: impl Into<Expr>) -> Expr {
+        Expr::from(AggregateExpr::min(expr.into()))
+    }
+
+    pub fn max(expr: impl Into<Expr>) -> Expr {
+        Expr::from(AggregateExpr::max(expr.into()))
+    }
+
     pub fn function(name: impl Into<String>, args: impl IntoIterator<Item = Expr>) -> Expr {
         Expr::function(name, args)
     }
 
     pub fn coalesce(args: impl IntoIterator<Item = Expr>) -> Expr {
         Expr::function("COALESCE", args)
+    }
+
+    pub fn concat_ws(separator: impl Into<String>, args: impl IntoIterator<Item = Expr>) -> Expr {
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        args.insert(0, Expr::text(separator));
+        Expr::function("CONCAT_WS", args)
     }
 
     pub fn lower(expr: impl Into<Expr>) -> Expr {
@@ -413,6 +439,18 @@ impl JsonExprBuilder {
         })
     }
 
+    pub fn like(self, value: impl Into<String>) -> Condition {
+        self.as_text().like(value)
+    }
+
+    pub fn not_like(self, value: impl Into<String>) -> Condition {
+        self.as_text().not_like(value)
+    }
+
+    pub fn ilike(self, value: impl Into<String>) -> Condition {
+        self.as_text().ilike(value)
+    }
+
     pub fn contains(self, value: impl Into<serde_json::Value>) -> Condition {
         Condition::json(
             self.as_json(),
@@ -465,6 +503,30 @@ impl JsonExprBuilder {
 impl Expr {
     pub fn json(self) -> JsonExprBuilder {
         JsonExprBuilder::new(self)
+    }
+
+    pub fn compare(self, op: ComparisonOp, right: impl Into<Expr>) -> Condition {
+        Condition::compare(self, op, right.into())
+    }
+
+    pub fn is_null(self) -> Condition {
+        Condition::expr_is_null(self)
+    }
+
+    pub fn is_not_null(self) -> Condition {
+        Condition::expr_is_not_null(self)
+    }
+
+    pub fn like(self, value: impl Into<String>) -> Condition {
+        self.compare(ComparisonOp::Like, Expr::text(value))
+    }
+
+    pub fn not_like(self, value: impl Into<String>) -> Condition {
+        self.compare(ComparisonOp::NotLike, Expr::text(value))
+    }
+
+    pub fn ilike(self, value: impl Into<String>) -> Condition {
+        self.compare(ComparisonOp::ILike, Expr::text(value))
     }
 }
 
@@ -2136,9 +2198,9 @@ where
             ColumnRef::new(self.table.name(), deleted_at.name).typed(deleted_at.db_type);
 
         match self.soft_delete_scope {
-            SoftDeleteScope::ActiveOnly => Some(Condition::IsNull(deleted_at_ref)),
+            SoftDeleteScope::ActiveOnly => Some(Condition::is_null(deleted_at_ref)),
             SoftDeleteScope::WithTrashed => None,
-            SoftDeleteScope::OnlyTrashed => Some(Condition::IsNotNull(deleted_at_ref)),
+            SoftDeleteScope::OnlyTrashed => Some(Condition::is_not_null(deleted_at_ref)),
         }
     }
 
@@ -5117,10 +5179,11 @@ mod tests {
 
     use super::{
         CreateManyModel, CreateRow, InsertSource, ModelQuery, PostgresCompiler, ProjectionQuery,
-        Query, QueryBody,
+        Query, QueryBody, Sql,
     };
     use crate::database::{
-        has_many, DbRecord, DbValue, Loaded, QueryExecutionOptions, QueryExecutor, RelationDef,
+        has_many, ColumnRef, DbRecord, DbValue, Expr, Loaded, QueryExecutionOptions, QueryExecutor,
+        RelationDef,
     };
     use crate::foundation::{Error, Result};
     use crate::support::sync::lock_unpoisoned;
@@ -5253,6 +5316,59 @@ mod tests {
             PostgresCompiler::compile(exclude.ast()).unwrap().sql,
             "SELECT \"id\" FROM \"users\" WHERE NOT (\"status\" IN ($1::text, $2::text))"
         );
+    }
+
+    #[test]
+    fn sql_expression_helpers_compile_common_report_patterns() {
+        let query = Query::table("users")
+            .select_expr(
+                Sql::count_when(
+                    Expr::column(ColumnRef::new("claims", "released_at")).is_not_null(),
+                ),
+                "released_count",
+            )
+            .select_expr(
+                Sql::max(ColumnRef::new("claims", "claimed_at")),
+                "last_claimed_at",
+            )
+            .where_(
+                Sql::concat_ws(
+                    " ",
+                    [
+                        Expr::column("username"),
+                        Expr::column("email"),
+                        Expr::column("name"),
+                    ],
+                )
+                .ilike("%amy%"),
+            );
+
+        let compiled = PostgresCompiler::compile(query.ast()).unwrap();
+
+        assert!(compiled.sql.contains("COUNT(CASE WHEN"));
+        assert!(compiled
+            .sql
+            .contains("\"claims\".\"released_at\" IS NOT NULL"));
+        assert!(compiled.sql.contains("MAX(\"claims\".\"claimed_at\")"));
+        assert!(compiled
+            .sql
+            .contains("CONCAT_WS($2::text, \"username\", \"email\", \"name\") ILIKE $3::text"));
+    }
+
+    #[test]
+    fn json_text_comparison_helper_compiles() {
+        let query = Query::table("voucher_claims").select(["id"]).where_(
+            Expr::column("voucher_snapshot")
+                .json()
+                .key("name")
+                .ilike("%coffee%"),
+        );
+
+        let compiled = PostgresCompiler::compile(query.ast()).unwrap();
+
+        assert!(compiled
+            .sql
+            .contains("(\"voucher_snapshot\") ->> $1::text ILIKE $2::text"));
     }
 
     fn iteration_record(id: i64) -> DbRecord {

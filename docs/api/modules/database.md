@@ -55,6 +55,7 @@ struct Column
   fn like(&self, value: impl Into<String>) -> Condition
   fn ieq(&self, value: impl Into<String>) -> Condition
   fn not_like(&self, value: impl Into<String>) -> Condition
+  fn ilike(&self, value: impl Into<String>) -> Condition
   fn json(&self) -> JsonExprBuilder
 struct ColumnInfo
   const fn new(name: &'static str, db_type: DbType) -> Self
@@ -175,6 +176,9 @@ struct JsonExprBuilder
   fn index(self, index: i64) -> Self
   fn as_json(self) -> Expr
   fn as_text(self) -> Expr
+  fn like(self, value: impl Into<String>) -> Condition
+  fn not_like(self, value: impl Into<String>) -> Condition
+  fn ilike(self, value: impl Into<String>) -> Condition
   fn contains(self, value: impl Into<Value>) -> Condition
   fn contained_by(self, value: impl Into<Value>) -> Condition
   fn has_key(self, key: impl Into<String>) -> Condition
@@ -434,8 +438,14 @@ struct Sql
   fn count_all() -> Expr
   fn count(expr: impl Into<Expr>) -> Expr
   fn count_distinct(expr: impl Into<Expr>) -> Expr
+  fn count_when(condition: Condition) -> Expr
+  fn sum(expr: impl Into<Expr>) -> Expr
+  fn avg(expr: impl Into<Expr>) -> Expr
+  fn min(expr: impl Into<Expr>) -> Expr
+  fn max(expr: impl Into<Expr>) -> Expr
   fn function( name: impl Into<String>, args: impl IntoIterator<Item = Expr>, ) -> Expr
   fn coalesce(args: impl IntoIterator<Item = Expr>) -> Expr
+  fn concat_ws( separator: impl Into<String>, args: impl IntoIterator<Item = Expr>, ) -> Expr
   fn lower(expr: impl Into<Expr>) -> Expr
   fn upper(expr: impl Into<Expr>) -> Expr
   fn date_trunc(granularity: impl Into<String>, expr: impl Into<Expr>) -> Expr
@@ -581,6 +591,8 @@ enum Condition { Comparison, InList, JsonPredicate, FullText, And, Or, Not, IsNu
   fn exists(query: impl Into<QueryAst>) -> Self
   fn is_null(column: impl Into<ColumnRef>) -> Self
   fn is_not_null(column: impl Into<ColumnRef>) -> Self
+  fn expr_is_null(expr: impl Into<Expr>) -> Self
+  fn expr_is_not_null(expr: impl Into<Expr>) -> Self
   fn false_() -> Self
   fn true_() -> Self
   fn raw(sql: impl Into<String>, bindings: Vec<DbValue>) -> Self
@@ -609,6 +621,12 @@ enum Expr { Show 13 variants    Column, Excluded, Value, Cast, Aggregate, Functi
   fn window(function: impl Into<Expr>, window: WindowSpec) -> Self
   fn raw(sql: impl Into<String>) -> Self
   fn json(self) -> JsonExprBuilder
+  fn compare(self, op: ComparisonOp, right: impl Into<Expr>) -> Condition
+  fn is_null(self) -> Condition
+  fn is_not_null(self) -> Condition
+  fn like(self, value: impl Into<String>) -> Condition
+  fn not_like(self, value: impl Into<String>) -> Condition
+  fn ilike(self, value: impl Into<String>) -> Condition
 enum FromItem { Table, Subquery }
   fn subquery(query: impl Into<QueryAst>, alias: impl Into<String>) -> Self
 enum InsertSource { Values, Select }

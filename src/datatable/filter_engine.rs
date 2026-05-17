@@ -281,7 +281,7 @@ pub(crate) fn build_filter_condition(
             ))
         }
         DatatableFilterOp::Has => match target_expr {
-            Expr::Column(col_ref) => Ok(Condition::IsNotNull(col_ref)),
+            Expr::Column(col_ref) => Ok(Condition::is_not_null(col_ref)),
             _ => Err(Error::message(
                 "Has filters require a column expression target",
             )),
@@ -290,7 +290,7 @@ pub(crate) fn build_filter_condition(
             Expr::Column(col_ref) => {
                 let text = expect_text(value)?;
                 let pattern = format!("%{text}%");
-                let not_null = Condition::IsNotNull(col_ref.clone());
+                let not_null = Condition::is_not_null(col_ref.clone());
                 let like = Condition::compare(
                     Expr::column(col_ref),
                     ComparisonOp::ILike,

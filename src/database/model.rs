@@ -714,11 +714,11 @@ impl<M, T> Column<M, T> {
     }
 
     pub fn is_null(&self) -> Condition {
-        Condition::IsNull(self.column_ref())
+        Condition::is_null(self.column_ref())
     }
 
     pub fn is_not_null(&self) -> Condition {
-        Condition::IsNotNull(self.column_ref())
+        Condition::is_not_null(self.column_ref())
     }
 
     pub fn like(&self, value: impl Into<String>) -> Condition {
@@ -741,6 +741,14 @@ impl<M, T> Column<M, T> {
         Condition::compare(
             Expr::column(self.column_ref()),
             ComparisonOp::NotLike,
+            Expr::value(DbValue::Text(value.into())),
+        )
+    }
+
+    pub fn ilike(&self, value: impl Into<String>) -> Condition {
+        Condition::compare(
+            Expr::column(self.column_ref()),
+            ComparisonOp::ILike,
             Expr::value(DbValue::Text(value.into())),
         )
     }

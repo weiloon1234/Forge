@@ -178,7 +178,7 @@ pub struct TestRequestBuilder {
     method: Method,
     path: String,
     headers: Vec<(String, String)>,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
 }
 
 impl TestRequestBuilder {
@@ -203,9 +203,21 @@ impl TestRequestBuilder {
         self.header("authorization", &format!("Bearer {token}"))
     }
 
+    /// Set a raw request body.
+    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Set a text/plain request body.
+    pub fn text(self, body: impl Into<String>) -> Self {
+        self.header("content-type", "text/plain")
+            .body(body.into().into_bytes())
+    }
+
     /// Set a JSON request body.
     pub fn json(mut self, value: &impl serde::Serialize) -> Result<Self> {
-        self.body = Some(serde_json::to_string(value).map_err(crate::foundation::Error::other)?);
+        self.body = Some(serde_json::to_vec(value).map_err(crate::foundation::Error::other)?);
         self.headers
             .push(("content-type".to_string(), "application/json".to_string()));
         Ok(self)
@@ -316,5 +328,33 @@ mod tests {
         let error = response([0xff, 0xfe]).text().unwrap_err();
 
         assert!(error.to_string().contains("invalid utf-8"));
+    }
+
+    #[test]
+    fn request_builder_accepts_raw_body_bytes() {
+        let builder = super::TestRequestBuilder::new(
+            axum::Router::new(),
+            axum::http::Method::POST,
+            "/upload",
+        )
+        .body([0xff, 0xfe]);
+
+        assert_eq!(builder.body.as_deref(), Some([0xff, 0xfe].as_slice()));
+    }
+
+    #[test]
+    fn request_builder_text_sets_plain_text_body() {
+        let builder = super::TestRequestBuilder::new(
+            axum::Router::new(),
+            axum::http::Method::POST,
+            "/message",
+        )
+        .text("hello");
+
+        assert_eq!(builder.body.as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(
+            builder.headers,
+            vec![("content-type".to_string(), "text/plain".to_string())]
+        );
     }
 }

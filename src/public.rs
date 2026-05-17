@@ -138,7 +138,8 @@ pub use crate::testing::{
     assert_safe_to_wipe, Factory, FactoryBuilder, FactoryValue, TestApp, TestClient, TestResponse,
 };
 pub use crate::translations::{
-    current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,
+    current_locale, translation_join, HasTranslations, ModelTranslation, TranslatedFields,
+    TranslationJoin, CURRENT_LOCALE, MODEL_TRANSLATIONS_TABLE,
 };
 pub use crate::validation::{
     FieldError, RequestValidator, RuleContext, ValidationError, ValidationErrors, ValidationRule,

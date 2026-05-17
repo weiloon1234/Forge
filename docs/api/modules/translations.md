@@ -7,10 +7,18 @@ Model field translations across locales (HasTranslations)
 ## forge::translations
 
 ```rust
+pub const MODEL_TRANSLATIONS_TABLE: &str;
 struct ModelTranslation
 struct TranslatedFields
   fn from_entries( entries: Vec<(String, String)>, current_locale: &str, default_locale: &str, ) -> Self
   fn get(&self, locale: &str) -> Option<&str>
+struct TranslationJoin
+  fn new(alias: impl Into<String>) -> Self
+  fn alias(&self) -> &str
+  fn table(&self) -> TableRef
+  fn column(&self, name: impl Into<String>) -> Expr
+  fn value(&self) -> Expr
+  fn on<M>( &self, translatable_id: impl Into<Expr>, field: impl Into<String>, locale: impl Into<String>, ) -> Condition
 trait HasTranslations
   fn translatable_type() -> &'static str
   fn translatable_id(&self) -> String
@@ -29,5 +37,6 @@ trait HasTranslations
   fn delete_all_translations<'life0, 'life1, 'async_trait>(
   fn delete_all_translations_with<'life0, 'life1, 'async_trait, E>(
 fn current_locale(app: &AppContext) -> String
+fn translation_join(alias: impl Into<String>) -> TranslationJoin
 ```
 

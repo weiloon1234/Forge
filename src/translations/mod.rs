@@ -8,7 +8,7 @@ use crate::database::extensions::{
     current_extension_scope, uuid_array_from_ids, AnyModelExtension, ModelExtensionLoader,
     TranslationCacheShape,
 };
-use crate::database::{DbValue, QueryExecutor};
+use crate::database::{ColumnRef, ComparisonOp, Condition, DbValue, Expr, QueryExecutor, TableRef};
 use crate::foundation::{AppContext, Result};
 
 tokio::task_local! {
@@ -50,6 +50,60 @@ pub struct TranslatedFields {
     pub values: HashMap<String, String>,
     /// The resolved translation for the current request locale (with fallback).
     pub translated: String,
+}
+
+pub const MODEL_TRANSLATIONS_TABLE: &str = "model_translations";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranslationJoin {
+    alias: String,
+}
+
+impl TranslationJoin {
+    pub fn new(alias: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+        }
+    }
+
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    pub fn table(&self) -> TableRef {
+        TableRef::new(MODEL_TRANSLATIONS_TABLE).aliased(self.alias.clone())
+    }
+
+    pub fn column(&self, name: impl Into<String>) -> Expr {
+        Expr::column(ColumnRef::new(self.alias.clone(), name.into()))
+    }
+
+    pub fn value(&self) -> Expr {
+        self.column("value")
+    }
+
+    pub fn on<M>(
+        &self,
+        translatable_id: impl Into<Expr>,
+        field: impl Into<String>,
+        locale: impl Into<String>,
+    ) -> Condition
+    where
+        M: HasTranslations,
+    {
+        Condition::and([
+            self.column("translatable_id")
+                .compare(ComparisonOp::Eq, translatable_id.into()),
+            self.column("translatable_type")
+                .eq_value(M::translatable_type()),
+            self.column("field").eq_value(field.into()),
+            self.column("locale").eq_value(locale.into()),
+        ])
+    }
+}
+
+pub fn translation_join(alias: impl Into<String>) -> TranslationJoin {
+    TranslationJoin::new(alias)
 }
 
 pub(crate) fn translated_field_extension_loader<M>(field: String) -> AnyModelExtension<M>
@@ -609,7 +663,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::database::{
-        scope_model_extensions, DbRecord, DbValue, QueryExecutionOptions, QueryExecutor,
+        scope_model_extensions, DbRecord, DbValue, PostgresCompiler, Query, QueryExecutionOptions,
+        QueryExecutor, Sql,
     };
 
     use super::*;
@@ -760,6 +815,38 @@ mod tests {
         );
         assert!(calls[1].0.contains("field = $3"));
         assert!(calls[2].0.contains("WHERE translatable_type = $1"));
+    }
+
+    #[test]
+    fn translation_join_builds_table_value_and_on_condition() {
+        let join = translation_join("product_names");
+        let query = Query::table("products")
+            .left_join(
+                join.table(),
+                join.on::<TestTranslatable>(ColumnRef::new("products", "id"), "name", "en"),
+            )
+            .select_expr(Sql::coalesce([join.value(), Expr::text("")]), "name");
+
+        let compiled = PostgresCompiler::compile(query.ast()).unwrap();
+
+        assert!(compiled
+            .sql
+            .contains("LEFT JOIN \"model_translations\" AS \"product_names\" ON"));
+        assert!(compiled
+            .sql
+            .contains("\"product_names\".\"translatable_id\" = \"products\".\"id\""));
+        assert!(compiled
+            .sql
+            .contains("\"product_names\".\"translatable_type\" = $2::text"));
+        assert!(compiled
+            .sql
+            .contains("\"product_names\".\"field\" = $3::text"));
+        assert!(compiled
+            .sql
+            .contains("\"product_names\".\"locale\" = $4::text"));
+        assert!(compiled
+            .sql
+            .contains("COALESCE(\"product_names\".\"value\", $1::text) AS \"name\""));
     }
 
     fn translation_record(translatable_type: &str, translatable_id: Uuid, field: &str) -> DbRecord {

@@ -55,9 +55,10 @@ async fn global_http_edge_config_applies_json_body_timeout_rejections_and_record
         .enable_observability()
         .register_routes(edge_routes)
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let first = app.client().get("/ok").send().await;
+    let first = app.client().get("/ok").send().await.unwrap();
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(first.header("x-frame-options"), Some("DENY"));
     assert!(first.header("strict-transport-security").is_none());
@@ -66,8 +67,10 @@ async fn global_http_edge_config_applies_json_body_timeout_rejections_and_record
         .client()
         .post("/echo")
         .json(&serde_json::json!({ "payload": "x".repeat(256) }))
+        .unwrap()
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(
         too_large.header(header::CONTENT_TYPE.as_str()),
@@ -77,7 +80,7 @@ async fn global_http_edge_config_applies_json_body_timeout_rejections_and_record
     assert_eq!(too_large_json["message"], "Payload too large");
     assert_eq!(too_large_json["status"], 413);
 
-    let timeout = app.client().get("/slow").send().await;
+    let timeout = app.client().get("/slow").send().await.unwrap();
     assert_eq!(timeout.status(), StatusCode::REQUEST_TIMEOUT);
     assert_eq!(
         timeout.header(header::CONTENT_TYPE.as_str()),
@@ -87,7 +90,7 @@ async fn global_http_edge_config_applies_json_body_timeout_rejections_and_record
     assert_eq!(timeout_json["message"], "Request timed out");
     assert_eq!(timeout_json["status"], 408);
 
-    let runtime = app.client().get("/_forge/runtime").send().await;
+    let runtime = app.client().get("/_forge/runtime").send().await.unwrap();
     assert_eq!(runtime.status(), StatusCode::OK);
     let runtime_json: Value = runtime.json();
     assert_eq!(
@@ -119,12 +122,13 @@ async fn global_rate_limit_returns_json_429_and_records_observability() {
         .enable_observability()
         .register_routes(edge_routes)
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let first = app.client().get("/ok").send().await;
+    let first = app.client().get("/ok").send().await.unwrap();
     assert_eq!(first.status(), StatusCode::OK);
 
-    let limited = app.client().get("/ok").send().await;
+    let limited = app.client().get("/ok").send().await.unwrap();
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         limited.header(header::CONTENT_TYPE.as_str()),
@@ -134,7 +138,7 @@ async fn global_rate_limit_returns_json_429_and_records_observability() {
     assert_eq!(limited_json["message"], "Rate limit exceeded");
     assert_eq!(limited_json["status"], 429);
 
-    let runtime = app.client().get("/_forge/runtime").send().await;
+    let runtime = app.client().get("/_forge/runtime").send().await.unwrap();
     assert_eq!(runtime.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         app.app()
@@ -165,9 +169,10 @@ async fn explicit_app_middleware_overrides_config_derived_duplicate_kind() {
         .register_routes(edge_routes)
         .register_middleware(SecurityHeaders::new().build())
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/ok").send().await;
+    let response = app.client().get("/ok").send().await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.header("strict-transport-security").is_some());

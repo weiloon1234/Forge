@@ -597,6 +597,18 @@ impl<M, T> Column<M, T> {
         ColumnRef::new(self.table, self.name).typed(self.db_type)
     }
 
+    pub fn expr(&self) -> Expr {
+        Expr::column(self.column_ref())
+    }
+
+    pub fn cast(&self, db_type: DbType) -> Expr {
+        Expr::cast(self.expr(), db_type)
+    }
+
+    pub fn cast_text(&self) -> Expr {
+        self.cast(DbType::Text)
+    }
+
     pub fn asc(&self) -> OrderBy {
         OrderBy::asc(self.column_ref())
     }

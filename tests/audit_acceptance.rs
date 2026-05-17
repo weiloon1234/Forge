@@ -73,6 +73,7 @@ async fn build_test_app(config_dir: &Path) -> TestApp {
         .register_routes(audit_routes)
         .build()
         .await
+        .unwrap()
 }
 
 #[derive(Clone)]
@@ -430,7 +431,8 @@ async fn audit_rows_commit_and_rollback_with_parent_transaction() {
         .post("/admin/audit-entry/rollback")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(rollback.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 302)
         .await
@@ -447,7 +449,8 @@ async fn audit_rows_commit_and_rollback_with_parent_transaction() {
         .post("/admin/audit-entry/commit")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(commit.status(), StatusCode::CREATED);
 
     let committed = audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 301).await;
@@ -480,7 +483,8 @@ async fn http_writes_capture_actor_request_origin_and_area() {
         .header("x-forwarded-for", "203.0.113.5, 10.0.0.1")
         .header("user-agent", "ForgeAuditAcceptance/1.0")
         .send()
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
@@ -514,7 +518,8 @@ async fn unmarked_and_disabled_routes_do_not_audit_but_explicit_areas_do() {
         .post("/plain/audit-entry")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(plain.status(), StatusCode::CREATED);
     assert!(audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 104)
         .await
@@ -525,7 +530,8 @@ async fn unmarked_and_disabled_routes_do_not_audit_but_explicit_areas_do() {
         .post("/admin/sensitive/audit-entry")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(disabled.status(), StatusCode::CREATED);
     assert!(audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 102)
         .await
@@ -536,7 +542,8 @@ async fn unmarked_and_disabled_routes_do_not_audit_but_explicit_areas_do() {
         .post("/admin/support/audit-entry")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(support.status(), StatusCode::CREATED);
     let support_logs = audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 103).await;
     assert_eq!(support_logs.len(), 1);
@@ -582,7 +589,8 @@ async fn admin_area_tracks_event_types_and_excludes_sensitive_fields() {
         .post("/admin/audit-entry/lifecycle")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let logs = audit_logs_for_subject(app.app(), AUDIT_ENTRIES_TABLE, 10).await;
@@ -649,7 +657,8 @@ async fn model_level_opt_out_still_suppresses_audit_inside_active_area() {
         .post("/admin/no-audit-entry")
         .bearer_auth("admin-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     assert!(audit_logs_for_subject(app.app(), NO_AUDIT_ENTRIES_TABLE, 1)
         .await

@@ -37,6 +37,9 @@ struct Column
   const fn name(&self) -> &'static str
   const fn db_type(&self) -> DbType
   fn column_ref(&self) -> ColumnRef
+  fn expr(&self) -> Expr
+  fn cast(&self, db_type: DbType) -> Expr
+  fn cast_text(&self) -> Expr
   fn asc(&self) -> OrderBy
   fn desc(&self) -> OrderBy
   fn eq<V>(&self, value: V) -> Condition
@@ -565,6 +568,10 @@ enum Condition { Comparison, InList, JsonPredicate, And, Or, Not, IsNull, IsNotN
   fn or(conditions: impl IntoIterator<Item = Condition>) -> Self
   fn negate(condition: Condition) -> Self
   fn exists(query: impl Into<QueryAst>) -> Self
+  fn is_null(column: impl Into<ColumnRef>) -> Self
+  fn is_not_null(column: impl Into<ColumnRef>) -> Self
+  fn false_() -> Self
+  fn true_() -> Self
   fn raw(sql: impl Into<String>, bindings: Vec<DbValue>) -> Self
 enum CteMaterialization { Materialized, NotMaterialized }
 enum DbType { Show 30 variants    Int16, Int32, Int64, Bool, Float32, ... +25 more }
@@ -574,10 +581,16 @@ enum DbValue { Show 31 variants    Null, Int16, Int32, Int64, Bool, ... +26 more
   fn null(db_type: DbType) -> Self
   fn db_type(&self) -> DbType
   fn relation_key(&self) -> String
-enum Expr { Column, Excluded, Value, Aggregate, Function, Unary, Binary, Subquery, Window, Case, JsonPath, Raw }
+enum Expr { Show 13 variants    Column, Excluded, Value, Cast, Aggregate, Function, Unary, Binary, Subquery, Window, Case, JsonPath, Raw }
   fn column(column: impl Into<ColumnRef>) -> Self
   fn excluded(column: impl Into<ColumnRef>) -> Self
   fn value(value: impl Into<DbValue>) -> Self
+  fn text(value: impl Into<String>) -> Self
+  fn bool(value: bool) -> Self
+  fn false_() -> Self
+  fn true_() -> Self
+  fn cast(expr: impl Into<Expr>, db_type: DbType) -> Self
+  fn cast_text(expr: impl Into<Expr>) -> Self
   fn function( name: impl Into<String>, args: impl IntoIterator<Item = Expr>, ) -> Self
   fn unary(operator: UnaryOperator, expr: impl Into<Expr>) -> Self
   fn binary( left: impl Into<Expr>, operator: BinaryOperator, right: impl Into<Expr>, ) -> Self

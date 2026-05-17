@@ -870,6 +870,7 @@ pub enum Expr {
     Column(ColumnRef),
     Excluded(ColumnRef),
     Value(DbValue),
+    Cast { expr: Box<Expr>, db_type: DbType },
     Aggregate(AggregateExpr),
     Function(Box<FunctionCall>),
     Unary(Box<UnaryExpr>),
@@ -892,6 +893,33 @@ impl Expr {
 
     pub fn value(value: impl Into<DbValue>) -> Self {
         Self::Value(value.into())
+    }
+
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Value(DbValue::Text(value.into()))
+    }
+
+    pub fn bool(value: bool) -> Self {
+        Self::Value(DbValue::Bool(value))
+    }
+
+    pub fn false_() -> Self {
+        Self::bool(false)
+    }
+
+    pub fn true_() -> Self {
+        Self::bool(true)
+    }
+
+    pub fn cast(expr: impl Into<Expr>, db_type: DbType) -> Self {
+        Self::Cast {
+            expr: Box::new(expr.into()),
+            db_type,
+        }
+    }
+
+    pub fn cast_text(expr: impl Into<Expr>) -> Self {
+        Self::cast(expr, DbType::Text)
     }
 
     pub fn function(name: impl Into<String>, args: impl IntoIterator<Item = Expr>) -> Self {
@@ -1081,6 +1109,22 @@ impl Condition {
 
     pub fn exists(query: impl Into<QueryAst>) -> Self {
         Self::Exists(Box::new(query.into()))
+    }
+
+    pub fn is_null(column: impl Into<ColumnRef>) -> Self {
+        Self::IsNull(column.into())
+    }
+
+    pub fn is_not_null(column: impl Into<ColumnRef>) -> Self {
+        Self::IsNotNull(column.into())
+    }
+
+    pub fn false_() -> Self {
+        Self::compare(Expr::false_(), ComparisonOp::Eq, Expr::true_())
+    }
+
+    pub fn true_() -> Self {
+        Self::compare(Expr::true_(), ComparisonOp::Eq, Expr::true_())
     }
 
     pub fn raw(sql: impl Into<String>, bindings: Vec<DbValue>) -> Self {

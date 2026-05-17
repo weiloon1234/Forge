@@ -201,9 +201,10 @@ async fn http_route_authorizer_runs_after_permissions_and_can_return_forbidden()
         .register_provider(app::providers::AppServiceProvider)
         .register_routes(reports_routes(counter.clone()))
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let unauthorized = app.client().get("/reports").send().await;
+    let unauthorized = app.client().get("/reports").send().await.unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
@@ -212,7 +213,8 @@ async fn http_route_authorizer_runs_after_permissions_and_can_return_forbidden()
         .get("/reports")
         .bearer_auth("guest-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(forbidden_by_permission.status(), StatusCode::FORBIDDEN);
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
@@ -221,7 +223,8 @@ async fn http_route_authorizer_runs_after_permissions_and_can_return_forbidden()
         .get("/reports")
         .bearer_auth("ops-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(forbidden_by_authorizer.status(), StatusCode::FORBIDDEN);
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 
@@ -230,7 +233,8 @@ async fn http_route_authorizer_runs_after_permissions_and_can_return_forbidden()
         .get("/reports")
         .bearer_auth("developer-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(allowed.status(), StatusCode::OK);
     assert_eq!(counter.load(Ordering::SeqCst), 2);
     let payload: Value = allowed.json();
@@ -243,14 +247,16 @@ async fn http_route_authorizer_can_return_unauthorized() {
         .register_provider(app::providers::AppServiceProvider)
         .register_routes(always_unauthorized_routes())
         .build()
-        .await;
+        .await
+        .unwrap();
 
     let response = app
         .client()
         .get("/session-check")
         .bearer_auth("developer-token")
         .send()
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let payload: Value = response.json();
@@ -263,14 +269,16 @@ async fn http_route_authorizer_panic_returns_internal_error() {
         .register_provider(app::providers::AppServiceProvider)
         .register_routes(panicking_authorizer_routes())
         .build()
-        .await;
+        .await
+        .unwrap();
 
     let response = app
         .client()
         .get("/panic-auth")
         .bearer_auth("developer-token")
         .send()
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let payload: Value = response.json();
@@ -322,9 +330,10 @@ async fn observability_authorizer_applies_to_all_routes_and_can_hide_with_not_fo
                 }),
         )
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let unauthorized = app.client().get("/_forge/health").send().await;
+    let unauthorized = app.client().get("/_forge/health").send().await.unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
@@ -334,13 +343,20 @@ async fn observability_authorizer_applies_to_all_routes_and_can_hide_with_not_fo
             .get(path)
             .bearer_auth("guest-token")
             .send()
-            .await;
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "route {path}");
     }
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
     for path in OBSERVABILITY_ROUTES {
-        let response = app.client().get(path).bearer_auth("ops-token").send().await;
+        let response = app
+            .client()
+            .get(path)
+            .bearer_auth("ops-token")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "route {path}");
     }
     assert_eq!(counter.load(Ordering::SeqCst), OBSERVABILITY_ROUTES.len());
@@ -350,7 +366,8 @@ async fn observability_authorizer_applies_to_all_routes_and_can_hide_with_not_fo
         .get("/_forge/health")
         .bearer_auth("developer-token")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(allowed.status(), StatusCode::OK);
 }
 
@@ -370,14 +387,16 @@ async fn observability_authorizer_panic_returns_internal_error() {
                 }),
         )
         .build()
-        .await;
+        .await
+        .unwrap();
 
     let response = app
         .client()
         .get("/_forge/health")
         .bearer_auth("developer-token")
         .send()
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let payload: Value = response.json();

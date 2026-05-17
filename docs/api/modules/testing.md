@@ -9,10 +9,12 @@ Test infrastructure: TestApp, TestClient, Factory
 ```rust
 struct FactoryBuilder
   fn new() -> Self
-  fn set(self, column: &str, value: impl Into<DbValue>) -> Self
+  fn set<T, V>(self, column: Column<M, T>, value: V) -> Self
   fn count(self, n: usize) -> Self
   async fn create<E>(&self, executor: &E) -> Result<Vec<M>>
   async fn create_one<E>(&self, executor: &E) -> Result<M>
+struct FactoryValue
+  fn new<T, V>(column: Column<M, T>, value: V) -> Self
 struct TestApp
   fn builder() -> TestAppBuilder
   fn app(&self) -> &AppContext
@@ -32,7 +34,7 @@ struct TestResponse
   fn text(&self) -> String
   fn bytes(&self) -> &[u8] ⓘ
 trait Factory: Model
-  fn definition() -> Vec<(&'static str, DbValue)>
+  fn definition() -> Vec<FactoryValue<Self>>
 fn assert_safe_to_wipe(db_url: &str) -> Result<()>
 ```
 

@@ -2764,6 +2764,15 @@ where
         self
     }
 
+    pub(crate) fn set_column_value(
+        mut self,
+        column: super::ast::ColumnRef,
+        value: super::ast::DbValue,
+    ) -> Self {
+        ensure_insert_row(&mut self.rows).push((column, Expr::value(value)));
+        self
+    }
+
     pub fn on_conflict_columns<I, C>(mut self, columns: I) -> Self
     where
         I: IntoIterator<Item = C>,

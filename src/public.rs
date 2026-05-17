@@ -135,7 +135,7 @@ pub use crate::support::{
     Time, Timezone, Token, ValidationRuleId,
 };
 pub use crate::testing::{
-    assert_safe_to_wipe, Factory, FactoryBuilder, TestApp, TestClient, TestResponse,
+    assert_safe_to_wipe, Factory, FactoryBuilder, FactoryValue, TestApp, TestClient, TestResponse,
 };
 pub use crate::translations::{
     current_locale, HasTranslations, ModelTranslation, TranslatedFields, CURRENT_LOCALE,

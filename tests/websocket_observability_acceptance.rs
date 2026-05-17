@@ -91,13 +91,19 @@ async fn ws_presence_endpoint_returns_members_for_presence_channel() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     app.seed_presence(&ChannelId::new("team"), "user_1", 1_713_000_000)
         .await
         .unwrap();
 
-    let response = app.client().get("/_forge/ws/presence/team").send().await;
+    let response = app
+        .client()
+        .get("/_forge/ws/presence/team")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     let body: WebSocketPresenceContract = response.json();
     assert_eq!(body.channel, "team");
@@ -116,9 +122,15 @@ async fn ws_presence_endpoint_returns_404_for_non_presence_channel() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/ws/presence/public").send().await;
+    let response = app
+        .client()
+        .get("/_forge/ws/presence/public")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 404);
 }
 
@@ -128,9 +140,15 @@ async fn ws_presence_endpoint_returns_404_for_unregistered_channel() {
         .enable_observability()
         .register_websocket_routes(|_r| Ok(()))
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/ws/presence/ghost").send().await;
+    let response = app
+        .client()
+        .get("/_forge/ws/presence/ghost")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 404);
 }
 
@@ -153,9 +171,15 @@ async fn ws_channels_endpoint_lists_registered_channels() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/ws/channels").send().await;
+    let response = app
+        .client()
+        .get("/_forge/ws/channels")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: WebSocketChannelsContract = response.json();
     assert_eq!(body.channels.len(), 2);
@@ -194,7 +218,8 @@ async fn ws_history_redacts_payloads_by_default() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     let publisher = app.app().websocket().unwrap();
     publisher
@@ -211,7 +236,8 @@ async fn ws_history_redacts_payloads_by_default() {
         .client()
         .get("/_forge/ws/history/history-redact")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     let body: WebSocketHistoryContract = response.json();
     assert_eq!(body.channel, "history-redact");
@@ -252,7 +278,8 @@ include_payloads = true
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     let publisher = app.app().websocket().unwrap();
     publisher
@@ -269,7 +296,8 @@ include_payloads = true
         .client()
         .get("/_forge/ws/history/history-full")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     let body: WebSocketHistoryContract = response.json();
     assert_eq!(body.channel, "history-full");
@@ -286,9 +314,15 @@ async fn ws_history_returns_404_for_unregistered_channel() {
         .enable_observability()
         .register_websocket_routes(|_r| Ok(()))
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/ws/history/ghost").send().await;
+    let response = app
+        .client()
+        .get("/_forge/ws/history/ghost")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 404);
 }
 
@@ -301,13 +335,15 @@ async fn ws_history_clamps_limit_to_buffer_size() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     let response = app
         .client()
         .get("/_forge/ws/history/events?limit=999")
         .send()
-        .await;
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
 }
 
@@ -321,7 +357,8 @@ async fn ws_stats_exposes_global_and_per_channel_counters() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     // Drive traffic via the diagnostics API directly.
     let diagnostics = app.app().diagnostics().unwrap();
@@ -331,7 +368,7 @@ async fn ws_stats_exposes_global_and_per_channel_counters() {
     diagnostics.record_websocket_outbound_message_on(&ChannelId::new("alpha"));
     diagnostics.record_websocket_outbound_message_on(&ChannelId::new("alpha"));
 
-    let response = app.client().get("/_forge/ws/stats").send().await;
+    let response = app.client().get("/_forge/ws/stats").send().await.unwrap();
     assert_eq!(response.status(), 200);
     let body: WebSocketStatsContract = response.json();
 
@@ -383,7 +420,8 @@ async fn publish_sets_history_ttl_by_default() {
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(
         app.history_ttl(&ChannelId::new("ttl-default"))
@@ -437,7 +475,8 @@ history_ttl_seconds = 0
             Ok(())
         })
         .build()
-        .await;
+        .await
+        .unwrap();
 
     app.app()
         .websocket()

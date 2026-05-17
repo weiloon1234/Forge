@@ -14,9 +14,9 @@ use crate::foundation::{App, AppBuilder, AppContext, Result};
 /// let app = TestApp::builder()
 ///     .register_provider(MyProvider)
 ///     .register_routes(my_routes)
-///     .build().await;
+///     .build().await?;
 ///
-/// let response = app.client().get("/health").send().await;
+/// let response = app.client().get("/health").send().await?;
 /// assert_eq!(response.status(), 200);
 /// ```
 pub struct TestApp {
@@ -134,17 +134,13 @@ impl TestAppBuilder {
     }
 
     /// Build the test application. Bootstraps all services without starting a server.
-    pub async fn build(self) -> TestApp {
-        let kernel = self
-            .inner
-            .build_http_kernel()
-            .await
-            .expect("failed to build test app");
-        let router = kernel.build_router().expect("failed to build test router");
-        TestApp {
+    pub async fn build(self) -> Result<TestApp> {
+        let kernel = self.inner.build_http_kernel().await?;
+        let router = kernel.build_router()?;
+        Ok(TestApp {
             app: kernel.app().clone(),
             router,
-        }
+        })
     }
 }
 
@@ -208,15 +204,15 @@ impl TestRequestBuilder {
     }
 
     /// Set a JSON request body.
-    pub fn json(mut self, value: &impl serde::Serialize) -> Self {
-        self.body = Some(serde_json::to_string(value).expect("failed to serialize JSON body"));
+    pub fn json(mut self, value: &impl serde::Serialize) -> Result<Self> {
+        self.body = Some(serde_json::to_string(value).map_err(crate::foundation::Error::other)?);
         self.headers
             .push(("content-type".to_string(), "application/json".to_string()));
-        self
+        Ok(self)
     }
 
     /// Send the request and return the response.
-    pub async fn send(self) -> TestResponse {
+    pub async fn send(self) -> Result<TestResponse> {
         let body = match self.body {
             Some(b) => Body::from(b),
             None => Body::empty(),
@@ -228,12 +224,14 @@ impl TestRequestBuilder {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let request = builder.body(body).expect("failed to build request");
+        let request = builder
+            .body(body)
+            .map_err(crate::foundation::Error::other)?;
         let response = self
             .router
             .oneshot(request)
             .await
-            .expect("failed to send request");
+            .map_err(crate::foundation::Error::other)?;
 
         let status = response.status();
         let headers: Vec<(String, String)> = response
@@ -243,13 +241,13 @@ impl TestRequestBuilder {
             .collect();
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("failed to read response body");
+            .map_err(crate::foundation::Error::other)?;
 
-        TestResponse {
+        Ok(TestResponse {
             status,
             headers,
             body: body_bytes.to_vec(),
-        }
+        })
     }
 }
 

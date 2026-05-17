@@ -918,6 +918,11 @@ impl CompilerState {
             Expr::Column(column) => Ok(self.compile_column(column)),
             Expr::Excluded(column) => Ok(format!("EXCLUDED.{}", quote_identifier(&column.name))),
             Expr::Value(value) => Ok(self.bind_value(value.clone())),
+            Expr::Cast { expr, db_type } => Ok(format!(
+                "({})::{}",
+                self.compile_expr(expr)?,
+                db_type.postgres_cast()
+            )),
             Expr::Aggregate(aggregate) => self.compile_aggregate_expr(aggregate),
             Expr::Function(function) => self.compile_function(&function.name, &function.args),
             Expr::Unary(expr) => self.compile_unary_expr(expr),
@@ -939,6 +944,7 @@ impl CompilerState {
             Expr::Column(column) => column.db_type,
             Expr::Excluded(column) => column.db_type,
             Expr::Value(value) => Some(value.db_type()),
+            Expr::Cast { db_type, .. } => Some(*db_type),
             Expr::Aggregate(aggregate) => match aggregate.function {
                 AggregateFn::Count => Some(DbType::Int64),
                 AggregateFn::Sum | AggregateFn::Avg => aggregate
@@ -1614,6 +1620,33 @@ mod tests {
             compiled.bindings,
             vec![DbValue::Text("Test@Example.com".into())]
         );
+    }
+
+    #[test]
+    fn compiles_typed_cast_expressions() {
+        let compiled = compile(QueryAst::select(SelectNode {
+            from: FromItem::Table(TableRef::new("users")),
+            distinct: false,
+            columns: vec![
+                SelectItem::new(Expr::cast_text(ColumnRef::new("users", "id"))).aliased("id"),
+            ],
+            joins: Vec::new(),
+            condition: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            lock: None,
+            relations: Vec::new(),
+            aggregates: Vec::new(),
+        }));
+
+        assert_eq!(
+            compiled.sql,
+            r#"SELECT ("users"."id")::text AS "id" FROM "users""#
+        );
+        assert!(compiled.bindings.is_empty());
     }
 
     #[test]

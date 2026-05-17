@@ -471,9 +471,13 @@ fn build_scheduler_app(config_dir: &Path) -> AppBuilder {
 
 #[tokio::test]
 async fn sql_observability_endpoint_exposes_typed_stats_contract() {
-    let app = TestApp::builder().enable_observability().build().await;
+    let app = TestApp::builder()
+        .enable_observability()
+        .build()
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/sql").send().await;
+    let response = app.client().get("/_forge/sql").send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: SlowQueriesContract = response.json();
 
@@ -503,9 +507,10 @@ async fn observability_enabled_false_skips_forge_routes() {
         .load_config_dir(config_dir.path())
         .enable_observability()
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/health").send().await;
+    let response = app.client().get("/_forge/health").send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
@@ -525,9 +530,10 @@ async fn observability_capture_disabled_keeps_routes_with_empty_counters() {
         .load_config_dir(config_dir.path())
         .enable_observability()
         .build()
-        .await;
+        .await
+        .unwrap();
 
-    let response = app.client().get("/_forge/runtime").send().await;
+    let response = app.client().get("/_forge/runtime").send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: RuntimeSnapshot = response.json();
     assert_eq!(body.http.requests_total, 0);
@@ -741,7 +747,8 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
         .load_config_dir(config_dir.path())
         .enable_observability()
         .build()
-        .await;
+        .await
+        .unwrap();
     let db = app.app().database().unwrap();
     recreate_job_history_table(db.as_ref()).await;
 
@@ -759,7 +766,7 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
     .await
     .unwrap();
 
-    let stats_response = app.client().get("/_forge/jobs/stats").send().await;
+    let stats_response = app.client().get("/_forge/jobs/stats").send().await.unwrap();
     assert_eq!(stats_response.status(), reqwest::StatusCode::OK);
     let stats: JobsStatsContract = stats_response.json();
     assert_eq!(
@@ -771,7 +778,12 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
         vec![("dead_lettered", 1), ("retried", 1), ("succeeded", 1)]
     );
 
-    let failed_response = app.client().get("/_forge/jobs/failed").send().await;
+    let failed_response = app
+        .client()
+        .get("/_forge/jobs/failed")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(failed_response.status(), reqwest::StatusCode::OK);
     let failed: JobsFailedContract = failed_response.json();
     assert_eq!(failed.failed_jobs.len(), 2);
@@ -805,7 +817,7 @@ async fn jobs_observability_json_endpoints_have_typed_stable_contracts() {
     DateTime::parse(failed.failed_jobs[1].completed_at.as_deref().unwrap()).unwrap();
     DateTime::parse(failed.failed_jobs[1].created_at.as_deref().unwrap()).unwrap();
 
-    let sql_response = app.client().get("/_forge/sql").send().await;
+    let sql_response = app.client().get("/_forge/sql").send().await.unwrap();
     assert_eq!(sql_response.status(), reqwest::StatusCode::OK);
     let slow_queries: SlowQueriesContract = sql_response.json();
     assert_eq!(slow_queries.stats.capacity, 100);
@@ -855,7 +867,8 @@ async fn worker_prunes_job_history_with_retention_and_distributed_lock() {
     let app = TestApp::builder()
         .load_config_dir(config_dir.path())
         .build()
-        .await;
+        .await
+        .unwrap();
     let db = app.app().database().unwrap();
     recreate_job_history_table(db.as_ref()).await;
     db.raw_execute(
@@ -933,7 +946,8 @@ async fn worker_keeps_job_history_forever_when_retention_is_zero() {
     let app = TestApp::builder()
         .load_config_dir(config_dir.path())
         .build()
-        .await;
+        .await
+        .unwrap();
     let db = app.app().database().unwrap();
     recreate_job_history_table(db.as_ref()).await;
     db.raw_execute(

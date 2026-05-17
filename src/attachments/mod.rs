@@ -68,6 +68,34 @@ impl Attachment {
             .is_some_and(|m| m.starts_with("video/"))
     }
 
+    pub async fn update_custom_properties(
+        app: &AppContext,
+        attachment_id: &str,
+        custom_properties: serde_json::Value,
+    ) -> Result<u64> {
+        let db = app.database()?;
+        Self::update_custom_properties_with(&*db, attachment_id, custom_properties).await
+    }
+
+    pub async fn update_custom_properties_with<E>(
+        executor: &E,
+        attachment_id: &str,
+        custom_properties: serde_json::Value,
+    ) -> Result<u64>
+    where
+        E: QueryExecutor,
+    {
+        executor
+            .raw_execute(
+                "UPDATE attachments SET custom_properties = $1 WHERE id = $2::uuid",
+                &[
+                    DbValue::Json(custom_properties),
+                    DbValue::Text(attachment_id.to_string()),
+                ],
+            )
+            .await
+    }
+
     pub fn is_audio(&self) -> bool {
         self.mime_type
             .as_deref()
@@ -1760,6 +1788,62 @@ mod tests {
         ) -> Result<u64> {
             Ok(0)
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingAttachmentExecutor {
+        execute_calls: Mutex<Vec<(String, Vec<DbValue>)>>,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for RecordingAttachmentExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            sql: &str,
+            bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            self.execute_calls
+                .lock()
+                .unwrap()
+                .push((sql.to_string(), bindings.to_vec()));
+            Ok(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_custom_properties_update_uses_executor() {
+        let executor = RecordingAttachmentExecutor::default();
+        let attachment_id = Uuid::now_v7().to_string();
+        let custom_properties = serde_json::json!({ "width": 640, "height": 480 });
+
+        let affected =
+            Attachment::update_custom_properties_with(&executor, &attachment_id, custom_properties)
+                .await
+                .unwrap();
+
+        assert_eq!(affected, 1);
+        let calls = executor.execute_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0]
+            .0
+            .contains("UPDATE attachments SET custom_properties"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                DbValue::Json(serde_json::json!({ "width": 640, "height": 480 })),
+                DbValue::Text(attachment_id),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ For import stability and compatibility expectations, see [Public API Contract](p
 |--------|-------------|------|
 | [root](root.md) | Crate root: derive macros, re-exports | 10L |
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 28L |
-| [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 74L |
+| [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 76L |
 | [audit](modules/audit.md) | Built-in audit logging with automatic model mutation tracking and redaction | 40L |
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 214L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 32L |
@@ -45,4 +45,4 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 68L |
 
-**Total: 35 modules, 3479 lines across all files.**
+**Total: 35 modules, 3481 lines across all files.**

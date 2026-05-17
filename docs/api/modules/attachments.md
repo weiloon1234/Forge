@@ -13,6 +13,8 @@ struct Attachment
   fn upload(file: UploadedFile) -> AttachmentUploadBuilder
   fn is_image(&self) -> bool
   fn is_video(&self) -> bool
+  async fn update_custom_properties( app: &AppContext, attachment_id: &str, custom_properties: Value, ) -> Result<u64>
+  async fn update_custom_properties_with<E>( executor: &E, attachment_id: &str, custom_properties: Value, ) -> Result<u64>
   fn is_audio(&self) -> bool
   fn is_document(&self) -> bool
   fn extension(&self) -> Option<&str>

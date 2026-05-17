@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::database::{DbRecord, DbType, DbValue, Model, QueryExecutor};
+use crate::database::{DbRecord, DbType, DbValue, Model, Query, QueryExecutor};
 use crate::foundation::{Error, Result};
 
 #[derive(Debug, Serialize, Deserialize, crate::Model)]
@@ -226,47 +226,54 @@ where
     })?;
     let actor = context.actor();
 
-    context
-        .transaction()
-        .raw_execute(
-            r#"
-            INSERT INTO audit_logs (
-                event_type,
-                subject_model,
-                subject_table,
-                subject_id,
-                area,
-                actor_guard,
-                actor_id,
-                request_id,
-                ip,
-                user_agent,
-                before_data,
-                after_data,
-                changes
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            "#,
-            &[
-                DbValue::Text(event_type.as_str().to_string()),
+    Query::insert_into("audit_logs")
+        .values([
+            ("event_type", DbValue::Text(event_type.as_str().to_string())),
+            (
+                "subject_model",
                 DbValue::Text(std::any::type_name::<M>().to_string()),
+            ),
+            (
+                "subject_table",
                 DbValue::Text(M::table_meta().name().to_string()),
+            ),
+            (
+                "subject_id",
                 DbValue::Text(subject_id_for_record::<M>(subject_source)?),
+            ),
+            (
+                "area",
                 nullable_text(request.as_ref().and_then(|value| value.audit_area.clone())),
+            ),
+            (
+                "actor_guard",
                 nullable_text(actor.map(|value| value.guard.as_ref().to_string())),
+            ),
+            (
+                "actor_id",
                 nullable_text(actor.map(|value| value.id.clone())),
+            ),
+            (
+                "request_id",
                 nullable_text(request.as_ref().and_then(|value| value.request_id.clone())),
+            ),
+            (
+                "ip",
                 nullable_text(
                     request
                         .as_ref()
                         .and_then(|value| value.ip.map(|ip| ip.to_string())),
                 ),
+            ),
+            (
+                "user_agent",
                 nullable_text(request.as_ref().and_then(|value| value.user_agent.clone())),
-                nullable_json(payload.before_data),
-                nullable_json(payload.after_data),
-                nullable_json(payload.changes),
-            ],
-        )
+            ),
+            ("before_data", nullable_json(payload.before_data)),
+            ("after_data", nullable_json(payload.after_data)),
+            ("changes", nullable_json(payload.changes)),
+        ])
+        .execute(context.transaction())
         .await?;
 
     Ok(())

@@ -6,7 +6,7 @@ use clap::{Arg, ArgAction, Command};
 use serde::Serialize;
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
-use crate::database::DbValue;
+use crate::database::{DbValue, Expr, Query};
 use crate::foundation::{AppContext, Error, Result};
 use crate::storage::{path::normalize_prefix, StorageObject};
 use crate::support::{CommandId, DateTime};
@@ -289,15 +289,12 @@ async fn referenced_attachment_paths(
     disk: &str,
     prefix: &str,
 ) -> Result<HashSet<String>> {
-    let rows = app
-        .database()?
-        .raw_query(
-            "SELECT path FROM attachments WHERE disk = $1 AND path LIKE $2 ESCAPE '\\'",
-            &[
-                DbValue::Text(disk.to_string()),
-                DbValue::Text(escaped_like_prefix(prefix)),
-            ],
-        )
+    let db = app.database()?;
+    let rows = Query::table("attachments")
+        .select(["path"])
+        .where_eq("disk", disk.to_string())
+        .where_(Expr::column("path").like(escaped_like_prefix(prefix)))
+        .get(db.as_ref())
         .await?;
 
     Ok(rows

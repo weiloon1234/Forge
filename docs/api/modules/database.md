@@ -384,6 +384,7 @@ struct Query
   fn offset(self, offset: u64) -> Self
   fn order_by(self, order: OrderBy) -> Self
   fn value( self, column: impl Into<ColumnRef>, value: impl Into<DbValue>, ) -> Self
+  fn value_expr( self, column: impl Into<ColumnRef>, expr: impl Into<Expr>, ) -> Self
   fn values<I, C, V>(self, values: I) -> Self
   fn row<I, C, V>(self, values: I) -> Self
   fn rows<R, I, C, V>(self, rows: R) -> Self
@@ -451,6 +452,7 @@ struct Sql
   fn date_trunc(granularity: impl Into<String>, expr: impl Into<Expr>) -> Expr
   fn extract(field: impl Into<String>, expr: impl Into<Expr>) -> Expr
   fn json_text_or_first( expr: impl Into<Expr>, preferred_key: impl Into<String>, ) -> Expr
+  fn to_timestamp_millis(millis: impl Into<Expr>) -> Expr
   fn now() -> Expr
   fn not(expr: impl Into<Expr>) -> Expr
   fn negate(expr: impl Into<Expr>) -> Expr

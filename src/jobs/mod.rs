@@ -14,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 use crate::config::JobsConfig;
-use crate::database::{DbType, DbValue};
+use crate::database::{DbType, DbValue, Query, Sql};
 use crate::foundation::shutdown_drain::{
     drain_tasks, ShutdownDrainMessages, ShutdownDrainTarget, ShutdownDrainTask,
 };
@@ -2061,26 +2061,34 @@ impl Worker {
             return;
         }
 
-        if let Err(error) = db
-            .raw_execute(
-                "INSERT INTO job_history (job_id, queue, status, payload, attempt, error, started_at, completed_at, duration_ms) VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::double precision / 1000), NOW(), $8)",
-                &[
-                    DbValue::Text(job_id.to_string()),
-                    DbValue::Text(queue.to_string()),
-                    DbValue::Text(status.to_string()),
+        if let Err(error) = Query::insert_into("job_history")
+            .values([
+                ("job_id", DbValue::Text(job_id.to_string())),
+                ("queue", DbValue::Text(queue.to_string())),
+                ("status", DbValue::Text(status.to_string())),
+                (
+                    "payload",
                     payload
                         .map(DbValue::Json)
                         .unwrap_or(DbValue::Null(DbType::Json)),
-                    DbValue::Int32(attempt as i32),
+                ),
+                ("attempt", DbValue::Int32(attempt as i32)),
+                (
+                    "error",
                     if let Some(e) = error {
                         DbValue::Text(e.to_string())
                     } else {
                         DbValue::Null(DbType::Text)
                     },
-                    DbValue::Int64(started_at),
-                    DbValue::Int64(duration_ms),
-                ],
+                ),
+                ("duration_ms", DbValue::Int64(duration_ms)),
+            ])
+            .value_expr(
+                "started_at",
+                Sql::to_timestamp_millis(DbValue::Int64(started_at)),
             )
+            .value_expr("completed_at", Sql::now())
+            .execute(db.as_ref())
             .await
         {
             tracing::warn!(

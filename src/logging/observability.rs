@@ -10,7 +10,7 @@ use serde::Serialize;
 use super::metrics;
 use crate::auth::AccessScope;
 use crate::config::ObservabilityConfig;
-use crate::database::DbValue;
+use crate::database::{DbValue, Expr, OrderBy, Query, Sql};
 use crate::foundation::{AppContext, Error, Result};
 use crate::http::{
     wrap_http_authorize_callback, HttpAuthorizeContext, HttpRegistrar, HttpRouteOptions,
@@ -338,11 +338,12 @@ async fn jobs_stats(State(app): State<AppContext>) -> Response {
         Err(error) => return internal_error_response(error),
     };
 
-    match db
-        .raw_query(
-            "SELECT status, COUNT(*) as count FROM job_history GROUP BY status ORDER BY status",
-            &[],
-        )
+    match Query::table("job_history")
+        .select(["status"])
+        .select_expr(Sql::count_all(), "count")
+        .group_by("status")
+        .order_by(OrderBy::asc("status"))
+        .get(db.as_ref())
         .await
     {
         Ok(rows) => {
@@ -365,37 +366,58 @@ async fn jobs_failed(State(app): State<AppContext>) -> Response {
         Err(error) => return internal_error_response(error),
     };
 
-    match db
-        .raw_query(
-            "SELECT job_id, queue, status, attempt, error, started_at, completed_at, duration_ms, created_at, payload #>> '{trace,request_id}' AS request_id, payload #>> '{trace,trace_id}' AS trace_id FROM job_history WHERE status IN ('dead_lettered', 'retried') ORDER BY created_at DESC LIMIT 50",
-            &[],
+    match Query::table("job_history")
+        .select([
+            "job_id",
+            "queue",
+            "status",
+            "attempt",
+            "error",
+            "started_at",
+            "completed_at",
+            "duration_ms",
+            "created_at",
+        ])
+        .select_expr(
+            Expr::column("payload")
+                .json()
+                .key("trace")
+                .key("request_id")
+                .as_text(),
+            "request_id",
         )
+        .select_expr(
+            Expr::column("payload")
+                .json()
+                .key("trace")
+                .key("trace_id")
+                .as_text(),
+            "trace_id",
+        )
+        .where_in("status", ["dead_lettered", "retried"])
+        .order_by(OrderBy::desc("created_at"))
+        .limit(50)
+        .get(db.as_ref())
         .await
     {
         Ok(rows) => {
             let failed_jobs = rows
                 .iter()
-                .map(|row| {
-                    FailedJobResponse {
-                        job_id: db_string(row.get("job_id")).unwrap_or_else(|| "unknown".into()),
-                        queue: db_string(row.get("queue")).unwrap_or_else(|| "unknown".into()),
-                        status: db_string(row.get("status")).unwrap_or_else(|| "unknown".into()),
-                        attempt: db_i64(row.get("attempt")),
-                        error: db_string(row.get("error")),
-                        started_at: db_string(row.get("started_at")),
-                        completed_at: db_string(row.get("completed_at")),
-                        duration_ms: db_i64(row.get("duration_ms")),
-                        created_at: db_string(row.get("created_at")),
-                        request_id: db_string(row.get("request_id")),
-                        trace_id: db_string(row.get("trace_id")),
-                    }
+                .map(|row| FailedJobResponse {
+                    job_id: db_string(row.get("job_id")).unwrap_or_else(|| "unknown".into()),
+                    queue: db_string(row.get("queue")).unwrap_or_else(|| "unknown".into()),
+                    status: db_string(row.get("status")).unwrap_or_else(|| "unknown".into()),
+                    attempt: db_i64(row.get("attempt")),
+                    error: db_string(row.get("error")),
+                    started_at: db_string(row.get("started_at")),
+                    completed_at: db_string(row.get("completed_at")),
+                    duration_ms: db_i64(row.get("duration_ms")),
+                    created_at: db_string(row.get("created_at")),
+                    request_id: db_string(row.get("request_id")),
+                    trace_id: db_string(row.get("trace_id")),
                 })
                 .collect();
-            (
-                StatusCode::OK,
-                Json(JobsFailedResponse { failed_jobs }),
-            )
-                .into_response()
+            (StatusCode::OK, Json(JobsFailedResponse { failed_jobs })).into_response()
         }
         Err(error) => internal_error_response(error),
     }

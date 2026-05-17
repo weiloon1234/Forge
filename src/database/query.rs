@@ -17,7 +17,7 @@ use super::aggregate::{
 };
 use super::ast::{
     AggregateExpr, BinaryOperator, CaseExpr, CaseWhen, ColumnRef, ComparisonOp, Condition, CteNode,
-    DbValue, Expr, FromItem, InsertNode, InsertSource, JoinKind, JoinNode, JsonPathExpr,
+    DbType, DbValue, Expr, FromItem, InsertNode, InsertSource, JoinKind, JoinNode, JsonPathExpr,
     JsonPathMode, JsonPathSegment, JsonPredicateOp, JsonPredicateValue, LockBehavior, LockClause,
     LockStrength, OnConflictAction, OnConflictNode, OnConflictTarget, OnConflictUpdate, OrderBy,
     QueryAst, QueryBody, SelectItem, SelectNode, SetOperationNode, SetOperator, UpdateNode,
@@ -287,6 +287,16 @@ impl Sql {
         Expr::function(
             "JSONB_TEXT_OR_FIRST",
             [expr.into(), Expr::value(preferred_key.into())],
+        )
+    }
+
+    pub fn to_timestamp_millis(millis: impl Into<Expr>) -> Expr {
+        Expr::function(
+            "TO_TIMESTAMP",
+            [Self::divide(
+                Expr::cast(millis, DbType::Float64),
+                Expr::value(DbValue::Float64(1000.0)),
+            )],
         )
     }
 
@@ -918,14 +928,23 @@ impl Query {
         column: impl Into<super::ast::ColumnRef>,
         value: impl Into<super::ast::DbValue>,
     ) -> Self {
+        self = self.value_expr(column, Expr::value(value.into()));
+        self
+    }
+
+    pub fn value_expr(
+        mut self,
+        column: impl Into<super::ast::ColumnRef>,
+        expr: impl Into<Expr>,
+    ) -> Self {
+        let column = column.into();
+        let expr = expr.into();
         match &mut self.ast.body {
             QueryBody::Insert(insert) => {
-                push_insert_expr_value(insert, (column.into(), Expr::value(value.into())));
+                push_insert_expr_value(insert, (column, expr));
             }
             QueryBody::Update(update) => {
-                update
-                    .values
-                    .push((column.into(), Expr::value(value.into())));
+                update.values.push((column, expr));
             }
             QueryBody::Select(_) | QueryBody::Delete(_) | QueryBody::SetOperation(_) => {}
         }
@@ -5385,6 +5404,25 @@ mod tests {
         assert!(compiled
             .sql
             .contains("CONCAT_WS($2::text, \"username\", \"email\", \"name\") ILIKE $3::text"));
+    }
+
+    #[test]
+    fn insert_value_expr_helpers_compile_operational_timestamps() {
+        let query = Query::insert_into("job_history")
+            .value("job_id", "job-1")
+            .value_expr(
+                "started_at",
+                Sql::to_timestamp_millis(DbValue::Int64(1_712_345_678_000)),
+            )
+            .value_expr("completed_at", Sql::now());
+
+        let compiled = PostgresCompiler::compile(query.ast()).unwrap();
+
+        assert!(compiled.sql.contains("INSERT INTO \"job_history\""));
+        assert!(compiled.sql.contains("\"started_at\""));
+        assert!(compiled.sql.contains("TO_TIMESTAMP"));
+        assert!(compiled.sql.contains("::double precision"));
+        assert!(compiled.sql.contains("NOW()"));
     }
 
     #[test]

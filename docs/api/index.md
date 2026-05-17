@@ -13,7 +13,7 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [app_enum](modules/app_enum.md) | Enum metadata and serialization (ForgeAppEnum) | 28L |
 | [attachments](modules/attachments.md) | File attachments with lifecycle (HasAttachments) | 74L |
 | [audit](modules/audit.md) | Built-in audit logging with automatic model mutation tracking and redaction | 40L |
-| [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 210L |
+| [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 214L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 32L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
 | [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 103L |
@@ -45,4 +45,4 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 68L |
 
-**Total: 35 modules, 3468 lines across all files.**
+**Total: 35 modules, 3472 lines across all files.**

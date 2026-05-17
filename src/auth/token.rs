@@ -329,15 +329,20 @@ impl TokenManager {
     /// Revoke all tokens for an actor under a specific guard. Returns count revoked.
     pub async fn revoke_all<M: Authenticatable>(&self, actor_id: &str) -> Result<u64> {
         let guard = M::guard();
-        self.db
-            .raw_execute(
-                "UPDATE personal_access_tokens SET revoked_at = NOW() WHERE guard = $1 AND actor_id = $2 AND revoked_at IS NULL",
-                &[
-                    DbValue::Text(guard.to_string()),
-                    DbValue::Text(actor_id.to_string()),
-                ],
-            )
-            .await
+        revoke_actor_tokens(&*self.db, &guard, actor_id).await
+    }
+
+    /// Replace all unrevoked token abilities for an actor under a specific guard.
+    ///
+    /// This is useful when an actor's permissions change and currently issued
+    /// tokens should reflect the new effective ability set without forcing a logout.
+    pub async fn sync_abilities<M: Authenticatable>(
+        &self,
+        actor_id: &str,
+        abilities: Vec<String>,
+    ) -> Result<u64> {
+        let guard = M::guard();
+        sync_actor_token_abilities(&*self.db, &guard, actor_id, abilities).await
     }
 
     /// Delete tokens that are expired or revoked older than the given age.
@@ -621,17 +626,101 @@ pub trait HasToken: super::Authenticatable {
         tokens.revoke_all::<Self>(&id).await
     }
 
+    /// Revoke all tokens for this model instance using the provided executor.
+    ///
+    /// Use this when token changes should participate in an existing transaction.
+    async fn revoke_all_tokens_with<E>(&self, executor: &E) -> Result<u64>
+    where
+        E: crate::database::QueryExecutor,
+    {
+        let id = self.token_actor_id();
+        revoke_actor_tokens(executor, &Self::guard(), &id).await
+    }
+
+    /// Replace all unrevoked token abilities for this model instance.
+    async fn sync_token_abilities(&self, app: &AppContext, abilities: Vec<String>) -> Result<u64> {
+        let tokens = app.tokens()?;
+        let id = self.token_actor_id();
+        tokens.sync_abilities::<Self>(&id, abilities).await
+    }
+
+    /// Replace all unrevoked token abilities for this model instance using the provided executor.
+    ///
+    /// Use this when permission changes and token updates should commit together.
+    async fn sync_token_abilities_with<E>(
+        &self,
+        executor: &E,
+        abilities: Vec<String>,
+    ) -> Result<u64>
+    where
+        E: crate::database::QueryExecutor,
+    {
+        let id = self.token_actor_id();
+        sync_actor_token_abilities(executor, &Self::guard(), &id, abilities).await
+    }
+
     /// The actor ID used for token operations. Override if your model's
     /// primary key field is not named `id` or needs special formatting.
     fn token_actor_id(&self) -> String;
 }
 
+async fn revoke_actor_tokens<E>(executor: &E, guard: &GuardId, actor_id: &str) -> Result<u64>
+where
+    E: crate::database::QueryExecutor,
+{
+    executor
+        .raw_execute(
+            "UPDATE personal_access_tokens SET revoked_at = NOW() WHERE guard = $1 AND actor_id = $2 AND revoked_at IS NULL",
+            &[
+                DbValue::Text(guard.to_string()),
+                DbValue::Text(actor_id.to_string()),
+            ],
+        )
+        .await
+}
+
+async fn sync_actor_token_abilities<E>(
+    executor: &E,
+    guard: &GuardId,
+    actor_id: &str,
+    abilities: Vec<String>,
+) -> Result<u64>
+where
+    E: crate::database::QueryExecutor,
+{
+    let abilities_json = serde_json::Value::Array(
+        abilities
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+
+    executor
+        .raw_execute(
+            "UPDATE personal_access_tokens SET abilities = $1 WHERE guard = $2 AND actor_id = $3 AND revoked_at IS NULL",
+            &[
+                DbValue::Json(abilities_json),
+                DbValue::Text(guard.to_string()),
+                DbValue::Text(actor_id.to_string()),
+            ],
+        )
+        .await
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
     use super::{
-        invalid_refresh_token_error, token_abilities_from_row, TokenRowMetadata, WsTokenResponse,
+        invalid_refresh_token_error, token_abilities_from_row, HasToken, TokenRowMetadata,
+        WsTokenResponse,
     };
-    use crate::database::{DbRecord, DbValue};
+    use crate::auth::Authenticatable;
+    use crate::database::{DbRecord, DbValue, QueryExecutionOptions, QueryExecutor};
+    use crate::foundation::Result;
+    use crate::support::GuardId;
 
     #[test]
     fn token_row_metadata_preserves_name_and_abilities() {
@@ -687,5 +776,99 @@ mod tests {
             WsTokenResponse::from(String::from("ws_789")).token,
             "ws_789"
         );
+    }
+
+    #[tokio::test]
+    async fn has_token_syncs_abilities_with_executor() {
+        let actor = TestTokenActor {
+            id: crate::support::ModelId::from_uuid(uuid::Uuid::nil()),
+        };
+        let executor = RecordingTokenExecutor::default();
+
+        actor
+            .sync_token_abilities_with(&executor, vec!["posts:read".into(), "posts:write".into()])
+            .await
+            .unwrap();
+
+        let calls = executor.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("SET abilities = $1"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                DbValue::Json(serde_json::json!(["posts:read", "posts:write"])),
+                DbValue::Text("admin".to_string()),
+                DbValue::Text("actor-1".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn has_token_revokes_all_with_executor() {
+        let actor = TestTokenActor {
+            id: crate::support::ModelId::from_uuid(uuid::Uuid::nil()),
+        };
+        let executor = RecordingTokenExecutor::default();
+
+        actor.revoke_all_tokens_with(&executor).await.unwrap();
+
+        let calls = executor.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("SET revoked_at = NOW()"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                DbValue::Text("admin".to_string()),
+                DbValue::Text("actor-1".to_string()),
+            ]
+        );
+    }
+
+    #[derive(serde::Serialize, crate::Model)]
+    #[forge(table = "test_token_actors")]
+    struct TestTokenActor {
+        id: crate::support::ModelId<Self>,
+    }
+
+    impl Authenticatable for TestTokenActor {
+        fn guard() -> GuardId {
+            GuardId::new("admin")
+        }
+    }
+
+    impl HasToken for TestTokenActor {
+        fn token_actor_id(&self) -> String {
+            "actor-1".to_string()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTokenExecutor {
+        calls: Mutex<Vec<(String, Vec<DbValue>)>>,
+    }
+
+    #[async_trait]
+    impl QueryExecutor for RecordingTokenExecutor {
+        async fn raw_query_with(
+            &self,
+            _sql: &str,
+            _bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<Vec<DbRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn raw_execute_with(
+            &self,
+            sql: &str,
+            bindings: &[DbValue],
+            _options: QueryExecutionOptions,
+        ) -> Result<u64> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((sql.to_string(), bindings.to_vec()));
+            Ok(1)
+        }
     }
 }

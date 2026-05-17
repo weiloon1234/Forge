@@ -190,6 +190,7 @@ struct TokenManager
   async fn refresh(&self, refresh_token: &str) -> Result<TokenPair>
   async fn revoke(&self, access_token: &str) -> Result<()>
   async fn revoke_all<M: Authenticatable>( &self, actor_id: &str, ) -> Result<u64>
+  async fn sync_abilities<M: Authenticatable>( &self, actor_id: &str, abilities: Vec<String>, ) -> Result<u64>
   async fn prune(&self, older_than_days: u64) -> Result<u64>
   async fn prune_limited( &self, older_than_days: u64, batch_size: u64, ) -> Result<u64>
 struct TokenPair
@@ -205,6 +206,9 @@ trait HasToken: Authenticatable
   fn create_token_named<'life0, 'life1, 'life2, 'async_trait>(
   fn create_token_with_abilities<'life0, 'life1, 'life2, 'async_trait>(
   fn revoke_all_tokens<'life0, 'life1, 'async_trait>(
+  fn revoke_all_tokens_with<'life0, 'life1, 'async_trait, E>(
+  fn sync_token_abilities<'life0, 'life1, 'async_trait>(
+  fn sync_token_abilities_with<'life0, 'life1, 'async_trait, E>(
 fn actor_has_mfa_pending(actor: &Actor) -> bool
 ```
 

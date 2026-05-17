@@ -390,6 +390,14 @@ impl AppTransaction {
         &self.transaction
     }
 
+    /// Set a PostgreSQL session configuration value for the current transaction.
+    ///
+    /// This delegates to [`DatabaseTransaction::set_local_config`] for apps that
+    /// use the higher-level app transaction wrapper.
+    pub async fn set_local_config(&self, name: &str, value: &str) -> Result<()> {
+        self.transaction.set_local_config(name, value).await
+    }
+
     /// Set the actor for audit trail support in lifecycle hooks.
     ///
     /// When an actor is set, it will be available via `ModelHookContext::actor()`

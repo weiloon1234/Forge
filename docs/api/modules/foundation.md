@@ -96,6 +96,7 @@ struct AppContext
 struct AppTransaction
   fn app(&self) -> &AppContext
   fn transaction(&self) -> &DatabaseTransaction
+  async fn set_local_config(&self, name: &str, value: &str) -> Result<()>
   fn set_actor(&mut self, actor: Actor)
   fn actor(&self) -> Option<&Actor>
   fn dispatch_after_commit<J: Job>(&self, job: J)

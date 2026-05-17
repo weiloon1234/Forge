@@ -22,7 +22,7 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 217L |
 | [email](modules/email.md) | Multi-driver email: SMTP, Mailgun, Postmark, Resend, SES | 167L |
 | [events](modules/events.md) | Domain event bus with typed listeners | 31L |
-| [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 136L |
+| [foundation](modules/foundation.md) | Core: App, AppBuilder, AppContext, AppTransaction, Error, ServiceProvider | 137L |
 | [http](modules/http.md) | HTTP: routes, middleware (CORS, CSRF, rate limit, etc.), cookies, resources | 306L |
 | [i18n](modules/i18n.md) | Internationalization: locale extraction, translation catalogs | 28L |
 | [imaging](modules/imaging.md) | Image processing pipeline (resize, crop, rotate, format conversion) | 36L |
@@ -45,4 +45,4 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 68L |
 
-**Total: 35 modules, 3482 lines across all files.**
+**Total: 35 modules, 3483 lines across all files.**

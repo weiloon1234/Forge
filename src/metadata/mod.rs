@@ -1,7 +1,10 @@
 use serde::{de::DeserializeOwned, Serialize};
+use uuid::Uuid;
 
-use crate::database::DbValue;
+use crate::database::{DbValue, OrderBy, Query, Sql};
 use crate::foundation::{AppContext, Error, Result};
+
+const METADATA_TABLE: &str = "metadata";
 
 /// A metadata record — polymorphic key-value store.
 #[derive(Clone, Debug)]
@@ -37,19 +40,26 @@ pub trait HasMetadata: Send + Sync {
     ) -> Result<()> {
         let db = app.database()?;
         let json_val = serde_json::to_value(value).map_err(Error::other)?;
-        db.raw_execute(
-            "INSERT INTO metadata (id, metadatable_type, metadatable_id, key, value, created_at) \
-             VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, NOW()) \
-             ON CONFLICT (metadatable_type, metadatable_id, key) \
-             DO UPDATE SET value = $4, updated_at = NOW()",
-            &[
-                DbValue::Text(Self::metadatable_type().to_string()),
-                DbValue::Text(self.metadatable_id()),
-                DbValue::Text(key.to_string()),
-                DbValue::Json(json_val),
-            ],
-        )
-        .await?;
+        let metadatable_id = self.metadatable_id();
+        Query::insert_into(METADATA_TABLE)
+            .values([
+                (
+                    "metadatable_type",
+                    DbValue::Text(Self::metadatable_type().to_string()),
+                ),
+                (
+                    "metadatable_id",
+                    DbValue::Uuid(parse_metadatable_uuid(&metadatable_id)?),
+                ),
+                ("key", DbValue::Text(key.to_string())),
+                ("value", DbValue::Json(json_val)),
+            ])
+            .on_conflict_columns(["metadatable_type", "metadatable_id", "key"])
+            .do_update()
+            .set_excluded("value")
+            .set_expr("updated_at", Sql::now())
+            .execute(&*db)
+            .await?;
         Ok(())
     }
 
@@ -65,17 +75,13 @@ pub trait HasMetadata: Send + Sync {
     }
 
     async fn get_meta_raw(&self, app: &AppContext, key: &str) -> Result<Option<serde_json::Value>> {
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT value FROM metadata \
-                 WHERE metadatable_type = $1 AND metadatable_id = $2::uuid AND key = $3",
-                &[
-                    DbValue::Text(Self::metadatable_type().to_string()),
-                    DbValue::Text(self.metadatable_id()),
-                    DbValue::Text(key.to_string()),
-                ],
-            )
+        let metadatable_id = self.metadatable_id();
+        let rows = Query::table(METADATA_TABLE)
+            .select(["value"])
+            .where_eq("metadatable_type", Self::metadatable_type())
+            .where_eq("metadatable_id", parse_metadatable_uuid(&metadatable_id)?)
+            .where_eq("key", key.to_string())
+            .get(&*app.database()?)
             .await?;
         match rows.first() {
             Some(row) => match row.get("value") {
@@ -87,48 +93,36 @@ pub trait HasMetadata: Send + Sync {
     }
 
     async fn forget_meta(&self, app: &AppContext, key: &str) -> Result<bool> {
-        let db = app.database()?;
-        let affected = db
-            .raw_execute(
-                "DELETE FROM metadata \
-                 WHERE metadatable_type = $1 AND metadatable_id = $2::uuid AND key = $3",
-                &[
-                    DbValue::Text(Self::metadatable_type().to_string()),
-                    DbValue::Text(self.metadatable_id()),
-                    DbValue::Text(key.to_string()),
-                ],
-            )
+        let metadatable_id = self.metadatable_id();
+        let affected = Query::delete_from(METADATA_TABLE)
+            .where_eq("metadatable_type", Self::metadatable_type())
+            .where_eq("metadatable_id", parse_metadatable_uuid(&metadatable_id)?)
+            .where_eq("key", key.to_string())
+            .execute(&*app.database()?)
             .await?;
         Ok(affected > 0)
     }
 
     async fn has_meta(&self, app: &AppContext, key: &str) -> Result<bool> {
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT 1 FROM metadata \
-                 WHERE metadatable_type = $1 AND metadatable_id = $2::uuid AND key = $3",
-                &[
-                    DbValue::Text(Self::metadatable_type().to_string()),
-                    DbValue::Text(self.metadatable_id()),
-                    DbValue::Text(key.to_string()),
-                ],
-            )
+        let metadatable_id = self.metadatable_id();
+        let row = Query::table(METADATA_TABLE)
+            .select(["id"])
+            .where_eq("metadatable_type", Self::metadatable_type())
+            .where_eq("metadatable_id", parse_metadatable_uuid(&metadatable_id)?)
+            .where_eq("key", key.to_string())
+            .first(&*app.database()?)
             .await?;
-        Ok(!rows.is_empty())
+        Ok(row.is_some())
     }
 
     async fn all_meta(&self, app: &AppContext) -> Result<Vec<ModelMeta>> {
-        let db = app.database()?;
-        let rows = db
-            .raw_query(
-                "SELECT id, metadatable_type, metadatable_id, key, value FROM metadata \
-                 WHERE metadatable_type = $1 AND metadatable_id = $2::uuid ORDER BY key",
-                &[
-                    DbValue::Text(Self::metadatable_type().to_string()),
-                    DbValue::Text(self.metadatable_id()),
-                ],
-            )
+        let metadatable_id = self.metadatable_id();
+        let rows = Query::table(METADATA_TABLE)
+            .select(["id", "metadatable_type", "metadatable_id", "key", "value"])
+            .where_eq("metadatable_type", Self::metadatable_type())
+            .where_eq("metadatable_id", parse_metadatable_uuid(&metadatable_id)?)
+            .order_by(OrderBy::asc("key"))
+            .get(&*app.database()?)
             .await?;
         rows.iter()
             .map(|row| {
@@ -145,4 +139,12 @@ pub trait HasMetadata: Send + Sync {
             })
             .collect()
     }
+}
+
+fn parse_metadatable_uuid(id: &str) -> Result<Uuid> {
+    Uuid::parse_str(id).map_err(|error| {
+        Error::message(format!(
+            "metadata expected UUID metadatable_id `{id}`: {error}"
+        ))
+    })
 }

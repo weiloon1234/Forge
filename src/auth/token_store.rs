@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::database::{DatabaseManager, DbValue};
+use crate::database::{DatabaseManager, DbValue, Query, Sql};
 use crate::foundation::{Error, Result};
 use crate::support::{DateTime, Token};
+
+const PASSWORD_RESET_TOKENS_TABLE: &str = "password_reset_tokens";
 
 /// Shared token storage for password resets and email verification.
 ///
@@ -34,17 +36,17 @@ impl TokenStore {
         let plaintext = Token::base64(32)?;
         let hash = crate::support::sha256_hex_str(&plaintext);
 
-        self.database
-            .raw_execute(
-                "INSERT INTO password_reset_tokens (email, guard, token_hash, created_at) \
-                 VALUES ($1, $2, $3, NOW()) \
-                 ON CONFLICT (email, guard) DO UPDATE SET token_hash = $3, created_at = NOW()",
-                &[
-                    DbValue::Text(email.to_string()),
-                    DbValue::Text(guard),
-                    DbValue::Text(hash),
-                ],
-            )
+        Query::insert_into(PASSWORD_RESET_TOKENS_TABLE)
+            .values([
+                ("email", DbValue::Text(email.to_string())),
+                ("guard", DbValue::Text(guard)),
+                ("token_hash", DbValue::Text(hash)),
+            ])
+            .on_conflict_columns(["email", "guard"])
+            .do_update()
+            .set_excluded("token_hash")
+            .set_expr("created_at", Sql::now())
+            .execute(&*self.database)
             .await?;
 
         Ok(plaintext)
@@ -55,18 +57,12 @@ impl TokenStore {
         let expiry_seconds = self.expiry.as_secs() as i64;
 
         let invalid_msg = format!("invalid or expired {} token", self.kind);
-        let rows = self
-            .database
-            .raw_query(
-                "DELETE FROM password_reset_tokens \
-                 WHERE email = $1 AND guard = $2 AND token_hash = $3 \
-                 RETURNING created_at",
-                &[
-                    DbValue::Text(email.to_string()),
-                    DbValue::Text(guard),
-                    DbValue::Text(hash),
-                ],
-            )
+        let rows = Query::delete_from(PASSWORD_RESET_TOKENS_TABLE)
+            .where_eq("email", email.to_string())
+            .where_eq("guard", guard)
+            .where_eq("token_hash", hash)
+            .returning(["created_at"])
+            .get(&*self.database)
             .await?;
 
         let row = rows.first().ok_or_else(|| Error::message(&invalid_msg))?;

@@ -7,14 +7,17 @@ use clap::{Arg, Command};
 
 use crate::cli::{CommandInvocation, CommandRegistrar};
 use crate::config::TokenConfig;
-use crate::database::{DatabaseManager, DbRecord, DbValue, FromDbValue};
+use crate::database::{
+    ComparisonOp, DatabaseManager, DbRecord, DbValue, Expr, FromDbValue, Query, Sql,
+};
 use crate::foundation::{AppContext, Error, Result};
-use crate::support::{sha256_hex_str, CommandId, GuardId, PermissionId, Token};
+use crate::support::{sha256_hex_str, CommandId, DateTime, GuardId, PermissionId, Token};
 
 use super::{Actor, AuthError, AuthErrorCode, Authenticatable, BearerAuthenticator};
 
 const TOKEN_PRUNE_COMMAND: CommandId = CommandId::new("token:prune");
 pub const MFA_PENDING_ABILITY: &str = "auth:mfa_pending";
+const PERSONAL_ACCESS_TOKENS_TABLE: &str = "personal_access_tokens";
 
 /// A pair of access + refresh tokens returned to the client after login.
 #[derive(
@@ -211,18 +214,12 @@ impl TokenManager {
     pub async fn validate(&self, access_token: &str) -> Result<Option<Actor>> {
         let hash = sha256_hex_str(access_token);
 
-        let rows = self
-            .db
-            .raw_query(
-                r#"
-                SELECT guard, actor_id, abilities
-                FROM personal_access_tokens
-                WHERE access_token_hash = $1
-                  AND revoked_at IS NULL
-                  AND expires_at > NOW()
-                "#,
-                &[DbValue::Text(hash)],
-            )
+        let rows = Query::table(PERSONAL_ACCESS_TOKENS_TABLE)
+            .select(["guard", "actor_id", "abilities"])
+            .where_eq("access_token_hash", hash)
+            .where_(Expr::column("revoked_at").is_null())
+            .where_(Expr::column("expires_at").compare(ComparisonOp::Gt, Sql::now()))
+            .get(&*self.db)
             .await?;
 
         let Some(row) = rows.first() else {
@@ -253,11 +250,11 @@ impl TokenManager {
     /// usage tracking — it is not called automatically on every request.
     pub async fn touch(&self, access_token: &str) -> Result<()> {
         let hash = sha256_hex_str(access_token);
-        self.db
-            .raw_execute(
-                "UPDATE personal_access_tokens SET last_used_at = NOW() WHERE access_token_hash = $1 AND revoked_at IS NULL",
-                &[DbValue::Text(hash)],
-            )
+        Query::update_table(PERSONAL_ACCESS_TOKENS_TABLE)
+            .set_expr("last_used_at", Sql::now())
+            .where_eq("access_token_hash", hash)
+            .where_(Expr::column("revoked_at").is_null())
+            .execute(&*self.db)
             .await?;
         Ok(())
     }
@@ -272,33 +269,21 @@ impl TokenManager {
 
         // Atomic: revoke + return in one query to prevent concurrent reuse
         let rows = if self.config.rotate_refresh_tokens {
-            self.db
-                .raw_query(
-                    r#"
-                    UPDATE personal_access_tokens
-                    SET revoked_at = NOW()
-                    WHERE refresh_token_hash = $1
-                      AND revoked_at IS NULL
-                      AND refresh_expires_at > NOW()
-                    RETURNING guard, actor_id, name, abilities
-                    "#,
-                    &[DbValue::Text(hash)],
-                )
+            Query::update_table(PERSONAL_ACCESS_TOKENS_TABLE)
+                .set_expr("revoked_at", Sql::now())
+                .where_eq("refresh_token_hash", hash)
+                .where_(Expr::column("revoked_at").is_null())
+                .where_(Expr::column("refresh_expires_at").compare(ComparisonOp::Gt, Sql::now()))
+                .returning(["guard", "actor_id", "name", "abilities"])
+                .get(&*self.db)
                 .await?
         } else {
-            self.db
-                .raw_query(
-                    r#"
-                    SELECT guard, actor_id
-                         , name
-                         , abilities
-                    FROM personal_access_tokens
-                    WHERE refresh_token_hash = $1
-                      AND revoked_at IS NULL
-                      AND refresh_expires_at > NOW()
-                    "#,
-                    &[DbValue::Text(hash)],
-                )
+            Query::table(PERSONAL_ACCESS_TOKENS_TABLE)
+                .select(["guard", "actor_id", "name", "abilities"])
+                .where_eq("refresh_token_hash", hash)
+                .where_(Expr::column("revoked_at").is_null())
+                .where_(Expr::column("refresh_expires_at").compare(ComparisonOp::Gt, Sql::now()))
+                .get(&*self.db)
                 .await?
         };
 
@@ -317,11 +302,11 @@ impl TokenManager {
     /// Revoke a specific access token.
     pub async fn revoke(&self, access_token: &str) -> Result<()> {
         let hash = sha256_hex_str(access_token);
-        self.db
-            .raw_execute(
-                "UPDATE personal_access_tokens SET revoked_at = NOW() WHERE access_token_hash = $1 AND revoked_at IS NULL",
-                &[DbValue::Text(hash)],
-            )
+        Query::update_table(PERSONAL_ACCESS_TOKENS_TABLE)
+            .set_expr("revoked_at", Sql::now())
+            .where_eq("access_token_hash", hash)
+            .where_(Expr::column("revoked_at").is_null())
+            .execute(&*self.db)
             .await?;
         Ok(())
     }
@@ -439,25 +424,21 @@ impl TokenManager {
                 .collect(),
         );
 
-        self.db
-            .raw_execute(
-                r#"
-                INSERT INTO personal_access_tokens
-                    (guard, actor_id, name, access_token_hash, refresh_token_hash, abilities, expires_at, refresh_expires_at)
-                VALUES
-                    ($1, $2, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 second', NOW() + $8 * INTERVAL '1 second')
-                "#,
-                &[
-                    DbValue::Text(guard.to_string()),
-                    DbValue::Text(actor_id.to_string()),
-                    DbValue::Text(name.to_string()),
-                    DbValue::Text(access_hash),
-                    DbValue::Text(refresh_hash),
-                    DbValue::Json(abilities_json),
-                    DbValue::Int64(expires_in_secs as i64),
-                    DbValue::Int64(refresh_expires_in_secs as i64),
-                ],
-            )
+        Query::insert_into(PERSONAL_ACCESS_TOKENS_TABLE)
+            .values([
+                ("guard", DbValue::Text(guard.to_string())),
+                ("actor_id", DbValue::Text(actor_id.to_string())),
+                ("name", DbValue::Text(name.to_string())),
+                ("access_token_hash", DbValue::Text(access_hash)),
+                ("refresh_token_hash", DbValue::Text(refresh_hash)),
+                ("abilities", DbValue::Json(abilities_json)),
+                ("expires_at", expires_at_after(expires_in_secs).into()),
+                (
+                    "refresh_expires_at",
+                    expires_at_after(refresh_expires_in_secs).into(),
+                ),
+            ])
+            .execute(&*self.db)
             .await?;
 
         Ok(TokenPair {
@@ -668,14 +649,12 @@ async fn revoke_actor_tokens<E>(executor: &E, guard: &GuardId, actor_id: &str) -
 where
     E: crate::database::QueryExecutor,
 {
-    executor
-        .raw_execute(
-            "UPDATE personal_access_tokens SET revoked_at = NOW() WHERE guard = $1 AND actor_id = $2 AND revoked_at IS NULL",
-            &[
-                DbValue::Text(guard.to_string()),
-                DbValue::Text(actor_id.to_string()),
-            ],
-        )
+    Query::update_table(PERSONAL_ACCESS_TOKENS_TABLE)
+        .set_expr("revoked_at", Sql::now())
+        .where_eq("guard", guard.to_string())
+        .where_eq("actor_id", actor_id.to_string())
+        .where_(Expr::column("revoked_at").is_null())
+        .execute(executor)
         .await
 }
 
@@ -695,16 +674,17 @@ where
             .collect(),
     );
 
-    executor
-        .raw_execute(
-            "UPDATE personal_access_tokens SET abilities = $1 WHERE guard = $2 AND actor_id = $3 AND revoked_at IS NULL",
-            &[
-                DbValue::Json(abilities_json),
-                DbValue::Text(guard.to_string()),
-                DbValue::Text(actor_id.to_string()),
-            ],
-        )
+    Query::update_table(PERSONAL_ACCESS_TOKENS_TABLE)
+        .value("abilities", DbValue::Json(abilities_json))
+        .where_eq("guard", guard.to_string())
+        .where_eq("actor_id", actor_id.to_string())
+        .where_(Expr::column("revoked_at").is_null())
+        .execute(executor)
         .await
+}
+
+fn expires_at_after(seconds: u64) -> DateTime {
+    DateTime::now().add_seconds(seconds.min(i64::MAX as u64) as i64)
 }
 
 #[cfg(test)]
@@ -792,7 +772,7 @@ mod tests {
 
         let calls = executor.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("SET abilities = $1"));
+        assert!(calls[0].0.contains("SET \"abilities\" = $1::jsonb"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -814,7 +794,7 @@ mod tests {
 
         let calls = executor.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("SET revoked_at = NOW()"));
+        assert!(calls[0].0.contains("SET \"revoked_at\" = NOW()"));
         assert_eq!(
             calls[0].1,
             vec![

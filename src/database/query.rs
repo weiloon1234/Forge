@@ -1829,23 +1829,10 @@ where
     /// Without a matching index, PostgreSQL performs a full sequential scan.
     /// The index expression must match the columns passed to `search()` exactly.
     pub fn search<T>(self, columns: &[Column<M, T>], query: &str) -> Self {
-        let tsvector_parts: Vec<String> = columns
-            .iter()
-            .map(|c| {
-                let col_ref = c.column_ref();
-                let qualified = match &col_ref.table {
-                    Some(table) => format!("\"{}\".\"{}\"", table, col_ref.name),
-                    None => format!("\"{}\"", col_ref.name),
-                };
-                format!("COALESCE({}, '')", qualified)
-            })
-            .collect();
-        let tsvector = tsvector_parts.join(" || ' ' || ");
-        let sql = format!(
-            "to_tsvector('english', {}) @@ plainto_tsquery('english', ?)",
-            tsvector
-        );
-        self.where_(Condition::raw(sql, vec![DbValue::Text(query.to_string())]))
+        self.where_(Condition::full_text(
+            columns.iter().map(|column| column.column_ref()),
+            query,
+        ))
     }
 
     pub fn with_trashed(mut self) -> Self {

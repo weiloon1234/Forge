@@ -887,6 +887,24 @@ impl CompilerState {
                     }
                 })
             }
+            Condition::FullText { columns, query } => {
+                if columns.is_empty() {
+                    return Ok("FALSE".to_string());
+                }
+
+                let document = columns
+                    .iter()
+                    .map(|column| {
+                        format!("COALESCE({}::text, '')", self.compile_column_name(column))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" || ' ' || ");
+
+                Ok(format!(
+                    "to_tsvector('english'::regconfig, {document}) @@ plainto_tsquery('english'::regconfig, {})",
+                    self.bind_text(query),
+                ))
+            }
             Condition::And(conditions) => Ok(format!(
                 "({})",
                 conditions
@@ -1221,6 +1239,40 @@ mod tests {
         assert!(error
             .to_string()
             .contains("raw condition placeholder count mismatch: expected 1 bindings, got 2"));
+    }
+
+    #[test]
+    fn compiles_full_text_condition() {
+        let compiled = compile(QueryAst::select(
+            SelectNode::from(TableRef::new("users"))
+                .select(Expr::column(ColumnRef::new("users", "id")))
+                .where_(Condition::full_text(
+                    [
+                        ColumnRef::new("users", "name"),
+                        ColumnRef::new("users", "email"),
+                    ],
+                    "alice",
+                )),
+        ));
+
+        assert_eq!(
+            compiled.sql,
+            "SELECT \"users\".\"id\" FROM \"users\" WHERE to_tsvector('english'::regconfig, COALESCE(\"users\".\"name\"::text, '') || ' ' || COALESCE(\"users\".\"email\"::text, '')) @@ plainto_tsquery('english'::regconfig, $1::text)"
+        );
+    }
+
+    #[test]
+    fn full_text_condition_with_no_columns_compiles_false() {
+        let compiled = compile(QueryAst::select(
+            SelectNode::from(TableRef::new("users"))
+                .select(Expr::column(ColumnRef::new("users", "id")))
+                .where_(Condition::full_text(Vec::<ColumnRef>::new(), "alice")),
+        ));
+
+        assert_eq!(
+            compiled.sql,
+            "SELECT \"users\".\"id\" FROM \"users\" WHERE FALSE"
+        );
     }
 
     #[test]

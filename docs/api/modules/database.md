@@ -565,9 +565,10 @@ async fn scope_model_extensions<F, T>(future: F) -> T
 enum AggregateFn { Count, Sum, Avg, Min, Max }
 enum BinaryOperator { Add, Subtract, Multiply, Divide, Concat, Custom }
 enum ComparisonOp { Eq, IEq, NotEq, Gt, Gte, Lt, Lte, Like, NotLike, ILike }
-enum Condition { Comparison, InList, JsonPredicate, And, Or, Not, IsNull, IsNotNull, Exists, Raw }
+enum Condition { Comparison, InList, JsonPredicate, FullText, And, Or, Not, IsNull, IsNotNull, Exists, Raw }
   fn compare(left: Expr, op: ComparisonOp, right: Expr) -> Self
   fn json(expr: Expr, op: JsonPredicateOp, value: JsonPredicateValue) -> Self
+  fn full_text( columns: impl IntoIterator<Item = ColumnRef>, query: impl Into<String>, ) -> Self
   fn and(conditions: impl IntoIterator<Item = Condition>) -> Self
   fn or(conditions: impl IntoIterator<Item = Condition>) -> Self
   fn negate(condition: Condition) -> Self

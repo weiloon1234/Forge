@@ -1074,6 +1074,10 @@ pub enum Condition {
         op: JsonPredicateOp,
         value: JsonPredicateValue,
     },
+    FullText {
+        columns: Vec<ColumnRef>,
+        query: String,
+    },
     And(Vec<Condition>),
     Or(Vec<Condition>),
     Not(Box<Condition>),
@@ -1093,6 +1097,16 @@ impl Condition {
 
     pub fn json(expr: Expr, op: JsonPredicateOp, value: JsonPredicateValue) -> Self {
         Self::JsonPredicate { expr, op, value }
+    }
+
+    pub fn full_text(
+        columns: impl IntoIterator<Item = ColumnRef>,
+        query: impl Into<String>,
+    ) -> Self {
+        Self::FullText {
+            columns: columns.into_iter().collect(),
+            query: query.into(),
+        }
     }
 
     pub fn and(conditions: impl IntoIterator<Item = Condition>) -> Self {

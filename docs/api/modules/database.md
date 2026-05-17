@@ -622,6 +622,13 @@ enum Expr { Show 13 variants    Column, Excluded, Value, Cast, Aggregate, Functi
   fn raw(sql: impl Into<String>) -> Self
   fn json(self) -> JsonExprBuilder
   fn compare(self, op: ComparisonOp, right: impl Into<Expr>) -> Condition
+  fn compare_value( self, op: ComparisonOp, value: impl Into<DbValue>, ) -> Condition
+  fn eq_value(self, value: impl Into<DbValue>) -> Condition
+  fn not_eq_value(self, value: impl Into<DbValue>) -> Condition
+  fn gt_value(self, value: impl Into<DbValue>) -> Condition
+  fn gte_value(self, value: impl Into<DbValue>) -> Condition
+  fn lt_value(self, value: impl Into<DbValue>) -> Condition
+  fn lte_value(self, value: impl Into<DbValue>) -> Condition
   fn is_null(self) -> Condition
   fn is_not_null(self) -> Condition
   fn like(self, value: impl Into<String>) -> Condition

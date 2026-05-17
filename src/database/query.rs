@@ -509,6 +509,34 @@ impl Expr {
         Condition::compare(self, op, right.into())
     }
 
+    pub fn compare_value(self, op: ComparisonOp, value: impl Into<DbValue>) -> Condition {
+        self.compare(op, Expr::value(value.into()))
+    }
+
+    pub fn eq_value(self, value: impl Into<DbValue>) -> Condition {
+        self.compare_value(ComparisonOp::Eq, value)
+    }
+
+    pub fn not_eq_value(self, value: impl Into<DbValue>) -> Condition {
+        self.compare_value(ComparisonOp::NotEq, value)
+    }
+
+    pub fn gt_value(self, value: impl Into<DbValue>) -> Condition {
+        self.compare_value(ComparisonOp::Gt, value)
+    }
+
+    pub fn gte_value(self, value: impl Into<DbValue>) -> Condition {
+        self.compare_value(ComparisonOp::Gte, value)
+    }
+
+    pub fn lt_value(self, value: impl Into<DbValue>) -> Condition {
+        self.compare_value(ComparisonOp::Lt, value)
+    }
+
+    pub fn lte_value(self, value: impl Into<DbValue>) -> Condition {
+        self.compare_value(ComparisonOp::Lte, value)
+    }
+
     pub fn is_null(self) -> Condition {
         Condition::expr_is_null(self)
     }
@@ -5331,6 +5359,7 @@ mod tests {
                 Sql::max(ColumnRef::new("claims", "claimed_at")),
                 "last_claimed_at",
             )
+            .having(Sql::count(ColumnRef::new("claims", "id")).gt_value(0_i64))
             .where_(
                 Sql::concat_ws(
                     " ",
@@ -5350,6 +5379,9 @@ mod tests {
             .sql
             .contains("\"claims\".\"released_at\" IS NOT NULL"));
         assert!(compiled.sql.contains("MAX(\"claims\".\"claimed_at\")"));
+        assert!(compiled
+            .sql
+            .contains("COUNT(\"claims\".\"id\") > $4::bigint"));
         assert!(compiled
             .sql
             .contains("CONCAT_WS($2::text, \"username\", \"email\", \"name\") ILIKE $3::text"));

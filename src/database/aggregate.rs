@@ -108,7 +108,7 @@ where
 
 pub(crate) async fn count_query_ast<E>(executor: &E, ast: &QueryAst) -> Result<u64>
 where
-    E: QueryExecutor,
+    E: QueryExecutor + ?Sized,
 {
     let aggregate_ast = if can_aggregate_directly(ast) {
         direct_aggregate_query(ast, AggregateProjection::<i64>::internal_count().node())?
@@ -149,7 +149,7 @@ pub(crate) async fn execute_scalar_projection_on_ast<E, T>(
     projection: AggregateProjection<T>,
 ) -> Result<T>
 where
-    E: QueryExecutor,
+    E: QueryExecutor + ?Sized,
     T: FromDbValue,
 {
     let aggregate_ast = if can_aggregate_directly(ast) {

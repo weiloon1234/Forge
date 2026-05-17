@@ -13,9 +13,7 @@ use uuid::Uuid;
 use crate::database::extensions::{
     current_extension_scope, uuid_array_from_ids, AnyModelExtension, ModelExtensionLoader,
 };
-use crate::database::{
-    DbRecord, DbType, DbValue, OrderBy, Query, QueryExecutionOptions, QueryExecutor,
-};
+use crate::database::{DbType, DbValue, OrderBy, Query, QueryExecutor};
 use crate::foundation::{AppContext, Error, Result};
 use crate::imaging::ImageFormat;
 use crate::storage::{StorageConfig, UploadedFile};
@@ -1545,15 +1543,13 @@ async fn load_attachment_rows(
         return Ok(Vec::new());
     }
 
-    let rows = get_attachment_records(
-        executor,
-        order_batched_attachment_rows(
-            attachment_select_query()
-                .where_eq("attachable_type", attachable_type.to_string())
-                .where_in("attachable_id", uuid_array_from_ids(attachable_ids)?)
-                .where_eq("collection", collection.to_string()),
-        ),
+    let rows = order_batched_attachment_rows(
+        attachment_select_query()
+            .where_eq("attachable_type", attachable_type.to_string())
+            .where_in("attachable_id", uuid_array_from_ids(attachable_ids)?)
+            .where_eq("collection", collection.to_string()),
     )
+    .get(executor)
     .await?;
     rows.iter().map(row_to_attachment).collect()
 }
@@ -1598,16 +1594,6 @@ fn order_batched_attachment_rows(query: Query) -> Query {
         .order_by(OrderBy::asc("attachable_id"))
         .order_by(OrderBy::asc("sort_order"))
         .order_by(OrderBy::asc("created_at"))
-}
-
-async fn get_attachment_records(
-    executor: &dyn QueryExecutor,
-    query: Query,
-) -> Result<Vec<DbRecord>> {
-    let compiled = query.to_compiled_sql()?;
-    executor
-        .query_records_with(&compiled, QueryExecutionOptions::default())
-        .await
 }
 
 fn invalidate_attachment_cache(

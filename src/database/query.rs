@@ -1215,7 +1215,7 @@ impl Query {
 
     pub async fn get<E>(&self, executor: &E) -> Result<Collection<DbRecord>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         let compiled = self.compile()?;
         executor
@@ -1226,14 +1226,14 @@ impl Query {
 
     pub async fn all<E>(&self, executor: &E) -> Result<Collection<DbRecord>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         self.get(executor).await
     }
 
     pub async fn first<E>(&self, executor: &E) -> Result<Option<DbRecord>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         let query = match &self.ast.body {
             QueryBody::Select(_) | QueryBody::SetOperation(_) => self.clone().limit(1),
@@ -1244,7 +1244,7 @@ impl Query {
 
     pub async fn execute<E>(&self, executor: &E) -> Result<u64>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         match &self.ast.body {
             QueryBody::Select(_) | QueryBody::SetOperation(_) => Err(Error::message(
@@ -1273,7 +1273,7 @@ impl Query {
         pagination: Pagination,
     ) -> Result<Paginated<DbRecord>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         self.deferred_result()?;
         let total = count_query_ast(executor, &self.ast).await?;
@@ -1293,7 +1293,7 @@ impl Query {
 
     pub async fn count<E>(&self, executor: &E) -> Result<u64>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         self.deferred_result()?;
         count_query_ast(executor, &self.ast).await
@@ -1301,7 +1301,7 @@ impl Query {
 
     pub async fn count_distinct<E>(&self, executor: &E, expr: impl Into<Expr>) -> Result<u64>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         self.deferred_result()?;
         Ok(execute_scalar_projection_on_ast(
@@ -1314,7 +1314,7 @@ impl Query {
 
     pub async fn sum<E, T>(&self, executor: &E, expr: impl Into<Expr>) -> Result<Option<T>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
         T: FromDbValue,
     {
         self.deferred_result()?;
@@ -1328,7 +1328,7 @@ impl Query {
 
     pub async fn avg<E, T>(&self, executor: &E, expr: impl Into<Expr>) -> Result<Option<T>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
         T: FromDbValue,
     {
         self.deferred_result()?;
@@ -1342,7 +1342,7 @@ impl Query {
 
     pub async fn min<E, T>(&self, executor: &E, expr: impl Into<Expr>) -> Result<Option<T>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
         T: FromDbValue,
     {
         self.deferred_result()?;
@@ -1356,7 +1356,7 @@ impl Query {
 
     pub async fn max<E, T>(&self, executor: &E, expr: impl Into<Expr>) -> Result<Option<T>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
         T: FromDbValue,
     {
         self.deferred_result()?;
@@ -1375,7 +1375,7 @@ impl Query {
         projection: AggregateProjection<T>,
     ) -> Result<T>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
         T: FromDbValue,
     {
         self.deferred_result()?;
@@ -1397,14 +1397,14 @@ impl Query {
 
     pub async fn explain<E>(&self, executor: &E) -> Result<Vec<String>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         explain_query(executor, &self.compile()?, false, self.options.clone()).await
     }
 
     pub async fn explain_analyze<E>(&self, executor: &E) -> Result<Vec<String>>
     where
-        E: QueryExecutor,
+        E: QueryExecutor + ?Sized,
     {
         explain_query(executor, &self.compile()?, true, self.options.clone()).await
     }
@@ -5013,7 +5013,7 @@ async fn explain_query<E>(
     options: QueryExecutionOptions,
 ) -> Result<Vec<String>>
 where
-    E: QueryExecutor,
+    E: QueryExecutor + ?Sized,
 {
     let sql = if analyze {
         format!("EXPLAIN ANALYZE {}", compiled.sql)

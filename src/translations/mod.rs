@@ -10,8 +10,7 @@ use crate::database::extensions::{
     TranslationCacheShape,
 };
 use crate::database::{
-    ColumnRef, ComparisonOp, Condition, DbRecord, DbValue, Expr, OrderBy, Query,
-    QueryExecutionOptions, QueryExecutor, Sql, TableRef,
+    ColumnRef, ComparisonOp, Condition, DbValue, Expr, OrderBy, Query, QueryExecutor, Sql, TableRef,
 };
 use crate::foundation::{AppContext, Error, Result};
 
@@ -560,7 +559,7 @@ async fn load_translation_rows(
         TranslationCacheShape::Field { field } => base.where_eq("field", field.clone()),
         TranslationCacheShape::All => base,
     };
-    let rows = get_translation_records(executor, order_translation_rows(query)).await?;
+    let rows = order_translation_rows(query).get(executor).await?;
 
     rows.iter().map(row_to_model_translation).collect()
 }
@@ -589,16 +588,6 @@ fn order_translation_rows(query: Query) -> Query {
         .order_by(OrderBy::asc("translatable_id"))
         .order_by(OrderBy::asc("field"))
         .order_by(OrderBy::asc("locale"))
-}
-
-async fn get_translation_records(
-    executor: &dyn QueryExecutor,
-    query: Query,
-) -> Result<Vec<DbRecord>> {
-    let compiled = query.to_compiled_sql()?;
-    executor
-        .query_records_with(&compiled, QueryExecutionOptions::default())
-        .await
 }
 
 fn row_to_model_translation(row: &crate::database::DbRecord) -> Result<ModelTranslation> {

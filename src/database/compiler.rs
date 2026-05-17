@@ -905,22 +905,34 @@ impl CompilerState {
                     self.bind_text(query),
                 ))
             }
-            Condition::And(conditions) => Ok(format!(
-                "({})",
-                conditions
-                    .iter()
-                    .map(|condition| self.compile_condition(condition))
-                    .collect::<Result<Vec<_>>>()?
-                    .join(" AND "),
-            )),
-            Condition::Or(conditions) => Ok(format!(
-                "({})",
-                conditions
-                    .iter()
-                    .map(|condition| self.compile_condition(condition))
-                    .collect::<Result<Vec<_>>>()?
-                    .join(" OR "),
-            )),
+            Condition::And(conditions) => {
+                if conditions.is_empty() {
+                    return Ok("TRUE".to_string());
+                }
+
+                Ok(format!(
+                    "({})",
+                    conditions
+                        .iter()
+                        .map(|condition| self.compile_condition(condition))
+                        .collect::<Result<Vec<_>>>()?
+                        .join(" AND "),
+                ))
+            }
+            Condition::Or(conditions) => {
+                if conditions.is_empty() {
+                    return Ok("FALSE".to_string());
+                }
+
+                Ok(format!(
+                    "({})",
+                    conditions
+                        .iter()
+                        .map(|condition| self.compile_condition(condition))
+                        .collect::<Result<Vec<_>>>()?
+                        .join(" OR "),
+                ))
+            }
             Condition::Not(condition) => {
                 Ok(format!("NOT ({})", self.compile_condition(condition)?))
             }
@@ -1271,6 +1283,29 @@ mod tests {
 
         assert_eq!(
             compiled.sql,
+            "SELECT \"users\".\"id\" FROM \"users\" WHERE FALSE"
+        );
+    }
+
+    #[test]
+    fn empty_boolean_condition_groups_compile_to_identity_values() {
+        let and_compiled = compile(QueryAst::select(
+            SelectNode::from(TableRef::new("users"))
+                .select(Expr::column(ColumnRef::new("users", "id")))
+                .where_(Condition::and(Vec::<Condition>::new())),
+        ));
+        let or_compiled = compile(QueryAst::select(
+            SelectNode::from(TableRef::new("users"))
+                .select(Expr::column(ColumnRef::new("users", "id")))
+                .where_(Condition::or(Vec::<Condition>::new())),
+        ));
+
+        assert_eq!(
+            and_compiled.sql,
+            "SELECT \"users\".\"id\" FROM \"users\" WHERE TRUE"
+        );
+        assert_eq!(
+            or_compiled.sql,
             "SELECT \"users\".\"id\" FROM \"users\" WHERE FALSE"
         );
     }

@@ -136,6 +136,7 @@ struct DatabaseManager
   async fn raw_query_with( &self, sql: &str, bindings: &[DbValue], options: QueryExecutionOptions, ) -> Result<Vec<DbRecord>>
   async fn raw_execute(&self, sql: &str, bindings: &[DbValue]) -> Result<u64>
   async fn raw_execute_with( &self, sql: &str, bindings: &[DbValue], options: QueryExecutionOptions, ) -> Result<u64>
+  async fn set_local_config(&self, name: &str, value: &str) -> Result<()>
   fn raw_stream<'a>( &'a self, sql: &'a str, bindings: &'a [DbValue], options: QueryExecutionOptions, ) -> DbRecordStream<'a>
 struct DatabaseTransaction
   async fn raw_query( &self, sql: &str, bindings: &[DbValue], ) -> Result<Vec<DbRecord>>

@@ -1087,6 +1087,22 @@ impl DatabaseManager {
         <Self as QueryExecutor>::raw_execute_with(self, sql, bindings, options).await
     }
 
+    /// Set a PostgreSQL session configuration value for the current transaction.
+    ///
+    /// This wraps `set_config(name, value, true)` so domain code can communicate
+    /// transaction-scoped context to database triggers without hand-writing SQL.
+    pub async fn set_local_config(&self, name: &str, value: &str) -> Result<()> {
+        self.raw_execute(
+            "SELECT set_config($1, $2, true)",
+            &[
+                DbValue::Text(name.to_string()),
+                DbValue::Text(value.to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub fn raw_stream<'a>(
         &'a self,
         sql: &'a str,

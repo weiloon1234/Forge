@@ -171,6 +171,13 @@ impl AppConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    pub worker_threads: usize,
+    pub max_blocking_threads: usize,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -1128,6 +1135,10 @@ impl ConfigRepository {
         self.section("jobs")
     }
 
+    pub fn runtime(&self) -> Result<RuntimeConfig> {
+        self.section("runtime")
+    }
+
     pub fn auth(&self) -> Result<AuthConfig> {
         let auth: AuthConfig = self.section("auth")?;
         if auth.tokens.token_length < MIN_AUTH_TOKEN_LENGTH {
@@ -1289,7 +1300,8 @@ mod tests {
         AppConfig, AuditConfig, AuthConfig, CacheConfig, CacheDriver, CacheErrorMode,
         ConfigRepository, DatabaseConfig, DatatableConfig, Environment, HttpConfig,
         HttpRateLimitByConfig, JobsConfig, LoggingConfig, ObservabilityConfig, RedisConfig,
-        SchedulerConfig, TypeScriptConfig, WebSocketConfig, CLOUDFLARE_TRUSTED_CIDRS,
+        RuntimeConfig, SchedulerConfig, TypeScriptConfig, WebSocketConfig,
+        CLOUDFLARE_TRUSTED_CIDRS,
     };
     use crate::logging::{LogFormat, LogLevel};
     use crate::support::{GuardId, QueueId};
@@ -1602,6 +1614,10 @@ mod tests {
                 history_prune_interval_ms = 60000
                 history_prune_batch_size = 250
 
+                [runtime]
+                worker_threads = 4
+                max_blocking_threads = 64
+
                 [scheduler]
                 tick_interval_ms = 250
                 leader_lease_ttl_ms = 7000
@@ -1615,6 +1631,7 @@ mod tests {
         let redis: RedisConfig = config.redis().unwrap();
         let websocket: WebSocketConfig = config.websocket().unwrap();
         let jobs: JobsConfig = config.jobs().unwrap();
+        let runtime: RuntimeConfig = config.runtime().unwrap();
         let scheduler: SchedulerConfig = config.scheduler().unwrap();
 
         assert_eq!(database.url, "postgres://forge:secret@127.0.0.1:5432/forge");
@@ -1657,6 +1674,8 @@ mod tests {
         assert_eq!(jobs.history_retention_days, 45);
         assert_eq!(jobs.history_prune_interval_ms, 60_000);
         assert_eq!(jobs.history_prune_batch_size, 250);
+        assert_eq!(runtime.worker_threads, 4);
+        assert_eq!(runtime.max_blocking_threads, 64);
         assert_eq!(scheduler.tick_interval_ms, 250);
         assert_eq!(scheduler.leader_lease_ttl_ms, 7_000);
         assert_eq!(scheduler.shutdown_timeout_ms, 15_000);
@@ -1670,6 +1689,29 @@ mod tests {
         assert_eq!(jobs.history_retention_days, 30);
         assert_eq!(jobs.history_prune_interval_ms, 3_600_000);
         assert_eq!(jobs.history_prune_batch_size, 1_000);
+    }
+
+    #[test]
+    fn runtime_config_defaults_to_tokio_runtime_defaults() {
+        let runtime: RuntimeConfig = ConfigRepository::empty().runtime().unwrap();
+
+        assert_eq!(runtime.worker_threads, 0);
+        assert_eq!(runtime.max_blocking_threads, 0);
+    }
+
+    #[test]
+    fn overlays_runtime_config_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("RUNTIME__WORKER_THREADS", "8");
+        std::env::set_var("RUNTIME__MAX_BLOCKING_THREADS", "128");
+
+        let config = ConfigRepository::with_env_overlay_only().unwrap();
+        let runtime = config.runtime().unwrap();
+
+        std::env::remove_var("RUNTIME__WORKER_THREADS");
+        std::env::remove_var("RUNTIME__MAX_BLOCKING_THREADS");
+        assert_eq!(runtime.worker_threads, 8);
+        assert_eq!(runtime.max_blocking_threads, 128);
     }
 
     #[test]

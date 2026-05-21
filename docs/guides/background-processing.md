@@ -267,7 +267,11 @@ same lease-expiry path.
 [app]
 background_shutdown_timeout_ms = 30000  # 0 = abort managed background tasks immediately
 
-# config/jobs.toml
+# config/40-runtime.toml
+[runtime]
+worker_threads = 0        # 0 = Tokio default for Forge-owned sync runners
+max_blocking_threads = 0  # 0 = Tokio default blocking pool cap
+
 [jobs]
 queue = "default"              # default queue name
 max_retries = 5                # global retry limit

@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+mod blocking;
 mod collection;
 mod crypt;
 mod datetime;
@@ -17,6 +18,7 @@ pub(crate) mod sha256;
 pub(crate) mod sync;
 mod token;
 
+pub use blocking::run_blocking;
 pub use collection::Collection;
 pub use crypt::CryptManager;
 pub use datetime::{Clock, Date, DateTime, LocalDateTime, Time, Timezone};

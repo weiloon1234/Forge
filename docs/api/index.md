@@ -16,7 +16,7 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [auth](modules/auth.md) | Auth: guards, policies, tokens, sessions, password reset, email verification | 214L |
 | [cache](modules/cache.md) | In-memory and Redis-backed caching (CacheManager) | 32L |
 | [cli](modules/cli.md) | CLI command registration (CommandRegistry) | 19L |
-| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 103L |
+| [config](modules/config.md) | TOML-based configuration (ConfigRepository, AppConfig, etc.) | 106L |
 | [countries](modules/countries.md) | Built-in country data (250 countries) | 27L |
 | [database](modules/database.md) | AST-first query system: models, relations, projections, compiler | 786L |
 | [datatable](modules/datatable.md) | Server-side datatables: filtering, sorting, pagination, XLSX export | 217L |
@@ -38,11 +38,11 @@ For import stability and compatibility expectations, see [Public API Contract](p
 | [scheduler](modules/scheduler.md) | Cron + interval scheduling with Redis-safe leadership | 54L |
 | [settings](modules/settings.md) |  | 37L |
 | [storage](modules/storage.md) | File storage: local + S3, multipart uploads, file validation | 133L |
-| [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 210L |
+| [support](modules/support.md) | Utilities: typed IDs, datetime/clock, Collection<T>, crypto, hashing, locks | 216L |
 | [testing](modules/testing.md) | Test infrastructure: TestApp, TestClient, Factory | 40L |
 | [translations](modules/translations.md) | Model field translations across locales (HasTranslations) | 42L |
 | [typescript](modules/typescript.md) |  | 14L |
 | [validation](modules/validation.md) | Validation: 38+ rules, custom rules, request validation extractor | 149L |
 | [websocket](modules/websocket.md) | Channel-based WebSocket with presence and typed messages | 68L |
 
-**Total: 35 modules, 3520 lines across all files.**
+**Total: 35 modules, 3529 lines across all files.**

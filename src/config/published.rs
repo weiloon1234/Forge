@@ -642,6 +642,25 @@ const AUDIT_FIELDS: &[PublishedField] = &[
     ),
 ];
 
+const RUNTIME_FIELDS: &[PublishedField] = &[
+    field(
+        "worker_threads",
+        "0",
+        "0",
+        false,
+        false,
+        Some("Tokio worker thread count for sync runners (0 = Tokio default)"),
+    ),
+    field(
+        "max_blocking_threads",
+        "0",
+        "0",
+        false,
+        false,
+        Some("Tokio blocking thread cap for sync runners (0 = Tokio default)"),
+    ),
+];
+
 const JOBS_FIELDS: &[PublishedField] = &[
     field("queue", "\"default\"", "default", false, false, None),
     field("max_retries", "5", "5", false, false, None),
@@ -1349,6 +1368,11 @@ const PUBLISHED_SECTIONS: &[PublishedSection] = &[
     ),
     section(
         "40-runtime.toml",
+        "Runtime",
+        &[table(&["runtime"], None, false, RUNTIME_FIELDS)],
+    ),
+    section(
+        "40-runtime.toml",
         "Jobs (Background Queue)",
         &[
             table(&["jobs"], None, false, JOBS_FIELDS),
@@ -2010,6 +2034,22 @@ mod tests {
         assert!(output.contains("\"refresh_token\""));
         assert!(env.contains("# AUDIT__REDACT_SENSITIVE_FIELDS=true"));
         assert!(env.contains("\"password_hash\""));
+    }
+
+    #[test]
+    fn published_runtime_config_includes_tokio_sizing_knobs() {
+        let output = render_sample_config();
+        let env = render_sample_env();
+
+        assert!(output.contains("[runtime]"));
+        assert!(output.contains(
+            "# worker_threads = 0  # Tokio worker thread count for sync runners (0 = Tokio default)"
+        ));
+        assert!(output.contains(
+            "# max_blocking_threads = 0  # Tokio blocking thread cap for sync runners (0 = Tokio default)"
+        ));
+        assert!(env.contains("# RUNTIME__WORKER_THREADS=0"));
+        assert!(env.contains("# RUNTIME__MAX_BLOCKING_THREADS=0"));
     }
 
     #[test]

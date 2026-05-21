@@ -269,7 +269,9 @@ async fn login(
         .ok_or_else(|| Error::not_found("invalid credentials"))?;
 
     let hash = app.hash()?;
-    if !hash.check(&body.password, &user.password_hash)? {
+    let password = body.password.clone();
+    let password_hash = user.password_hash.clone();
+    if !run_blocking("password check", move || hash.check(&password, &password_hash)).await? {
         return Err(Error::http(401, "invalid credentials"));
     }
 
@@ -395,7 +397,9 @@ async fn login(
         .ok_or_else(|| Error::http_with_code(401, "Invalid credentials", "invalid_credentials"))?;
 
     let hash = app.hash()?;
-    if !hash.check(&body.password, &user.password_hash)? {
+    let password = body.password.clone();
+    let password_hash = user.password_hash.clone();
+    if !run_blocking("password check", move || hash.check(&password, &password_hash)).await? {
         throttle.record_failure(&body.email).await?;
         return Err(Error::http_with_code(
             401,

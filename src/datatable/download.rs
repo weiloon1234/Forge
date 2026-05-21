@@ -64,24 +64,40 @@ where
     let data = query.get(db.as_ref()).await?;
     ensure_export_row_count(D::ID, data.len(), config.max_export_rows)?;
 
-    let exportable_columns: Vec<&DatatableColumn<D::Row>> =
-        columns.iter().filter(|c| c.exportable).collect();
+    let exportable_columns: Vec<DatatableColumn<D::Row>> =
+        columns.into_iter().filter(|c| c.exportable).collect();
     let mappings = datatable_mappings::<D>()?;
+    let app = app.clone();
+    let actor = actor.cloned();
+    let request = request.clone();
 
-    build_xlsx(&data, &exportable_columns, &mappings, &ctx)
+    crate::support::run_blocking(format!("datatable `{}` XLSX build", D::ID), move || {
+        build_xlsx(
+            &data,
+            &exportable_columns,
+            &mappings,
+            &app,
+            actor.as_ref(),
+            &request,
+        )
+    })
+    .await
 }
 
 fn build_xlsx<Row>(
     data: &crate::support::Collection<Row>,
-    columns: &[&DatatableColumn<Row>],
+    columns: &[DatatableColumn<Row>],
     mappings: &[DatatableMapping<Row>],
-    ctx: &DatatableContext,
+    app: &AppContext,
+    actor: Option<&crate::auth::Actor>,
+    request: &super::request::DatatableRequest,
 ) -> Result<Vec<u8>>
 where
     Row: Serialize,
 {
     use rust_xlsxwriter::{Format, Workbook};
 
+    let ctx = DatatableContext::new(app, actor, request);
     let mapping_index: HashMap<&str, &DatatableMapping<Row>> =
         mappings.iter().map(|m| (m.name.as_str(), m)).collect();
 
@@ -110,7 +126,7 @@ where
             let col_pos = col_idx as u16;
 
             let value = if let Some(mapping) = mapping_index.get(col.name.as_str()) {
-                mapping.try_compute(row, ctx)?.into()
+                mapping.try_compute(row, &ctx)?.into()
             } else {
                 obj.get(&col.name)
                     .cloned()

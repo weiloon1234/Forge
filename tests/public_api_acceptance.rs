@@ -138,6 +138,9 @@ async fn blessed_public_surface_composes_for_consumer_apps() {
     .unwrap();
     validator.finish().unwrap();
 
+    let blocking_result = run_blocking("public surface", || Ok(42)).await.unwrap();
+    assert_eq!(blocking_result, 42);
+
     kernel
         .run_with_args(vec![String::from("forge"), String::from("surface:ping")])
         .await

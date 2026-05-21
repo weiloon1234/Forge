@@ -40,6 +40,7 @@ struct ConfigRepository
   fn database(&self) -> Result<DatabaseConfig>
   fn websocket(&self) -> Result<WebSocketConfig>
   fn jobs(&self) -> Result<JobsConfig>
+  fn runtime(&self) -> Result<RuntimeConfig>
   fn auth(&self) -> Result<AuthConfig>
   fn audit(&self) -> Result<AuditConfig>
   fn scheduler(&self) -> Result<SchedulerConfig>
@@ -74,6 +75,7 @@ struct MfaConfig
 struct ObservabilityConfig
 struct PasswordResetConfig
 struct RedisConfig
+struct RuntimeConfig
 struct SchedulerConfig
 struct ServerConfig
 struct SessionConfig
@@ -98,6 +100,7 @@ struct WebSocketObservabilityConfig
 - `JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.
 - `JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.
 - `ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.
+- `RuntimeConfig.worker_threads` and `max_blocking_threads` default to `0`, which keeps Tokio defaults for Forge-owned sync runners.
 - `SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.
 - `WebSocketConfig` bounds inbound message/frame sizes, query auth token length, and client-supplied channel, room, event, ack, and subscription cardinality.
 

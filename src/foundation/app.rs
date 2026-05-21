@@ -12,7 +12,7 @@ use crate::auth::{
     GuardRegistryBuilder, PolicyRegistryBuilder,
 };
 use crate::cli::CommandRegistrar;
-use crate::config::ConfigRepository;
+use crate::config::{ConfigRepository, RuntimeConfig};
 use crate::database::{
     set_runtime_model_defaults, AfterCommitCallback, AfterCommitSink, DatabaseManager,
     DatabaseTransaction, MigrationRegistryBuilder, ModelWriteExecutor, QueryExecutionOptions,
@@ -1332,10 +1332,8 @@ impl AppBuilder {
             return Err(app_runner_active_runtime_error());
         }
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(Error::other)?;
+        let runtime_config = self.sync_runtime_config()?;
+        let runtime = build_tokio_runtime(&runtime_config)?;
         let future = match catch_sync_panic(|| runner(self)) {
             Ok(future) => future,
             Err(panic) => return Err(app_runner_panic_error("factory", panic)),
@@ -1349,6 +1347,14 @@ impl AppBuilder {
                 Err(app_runner_panic_error("runtime", panic))
             }
         }
+    }
+
+    fn sync_runtime_config(&self) -> Result<RuntimeConfig> {
+        if self.load_env {
+            dotenvy::dotenv().ok();
+        }
+
+        load_boot_config(self.config_dir.clone(), Vec::new())?.runtime()
     }
 }
 
@@ -1425,6 +1431,18 @@ fn load_boot_config(
         Some(path) => ConfigRepository::from_dir_with_defaults(path, defaults),
         None => ConfigRepository::with_env_overlay_and_defaults(defaults),
     }
+}
+
+fn build_tokio_runtime(config: &RuntimeConfig) -> Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if config.worker_threads > 0 {
+        builder.worker_threads(config.worker_threads);
+    }
+    if config.max_blocking_threads > 0 {
+        builder.max_blocking_threads(config.max_blocking_threads);
+    }
+    builder.build().map_err(Error::other)
 }
 
 fn build_rule_registry(

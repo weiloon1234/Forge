@@ -189,6 +189,7 @@ struct ValidationRuleId
   fn owned(value: impl Into<String>) -> Self
   fn as_str(&self) -> &str
 fn boxed<F, T>(future: F) -> BoxFuture<T>
+async fn run_blocking<T, F>(label: impl Into<String>, work: F) -> Result<T>
 fn sanitize_html(input: &str, allowed_tags: &[&str]) -> String
 fn sha256_hex(data: &[u8]) -> String
 fn sha256_hex_str(s: &str) -> String
@@ -207,4 +208,9 @@ struct LockGuard
   fn start_heartbeat( &self, ttl: Duration, interval: Duration, ) -> LockHeartbeat
 struct LockHeartbeat
 ```
+
+## Notes
+
+- `run_blocking(label, work)` isolates CPU-heavy or blocking synchronous work on Tokio's blocking pool and maps task panics into Forge errors.
+- `HashManager::hash()` and `HashManager::check()` remain synchronous; wrap password hashing or checking in `run_blocking` inside async handlers or model mutators.
 

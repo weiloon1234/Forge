@@ -128,9 +128,9 @@ pub use crate::storage::{
 };
 pub use crate::support::lock::{DistributedLock, LockGuard, LockHeartbeat};
 pub use crate::support::{
-    sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId, Clock,
-    Collection, CommandId, CryptManager, Date, DateTime, EventId, GuardId, HashManager, JobId,
-    LocalDateTime, MigrationId, ModelId, NotificationChannelId, PermissionId, PluginAssetId,
+    run_blocking, sanitize_html, sha256_hex, sha256_hex_str, strip_tags, ChannelEventId, ChannelId,
+    Clock, Collection, CommandId, CryptManager, Date, DateTime, EventId, GuardId, HashManager,
+    JobId, LocalDateTime, MigrationId, ModelId, NotificationChannelId, PermissionId, PluginAssetId,
     PluginId, PluginScaffoldId, PolicyId, ProbeId, QueueId, RoleId, RouteId, ScheduleId, SeederId,
     Time, Timezone, Token, ValidationRuleId,
 };

@@ -570,18 +570,19 @@ impl AttachmentUploadBuilder {
             let bytes = tokio::fs::read(&self.file.temp_path)
                 .await
                 .map_err(Error::other)?;
-            process_image_bytes(
-                &bytes,
-                self.file.original_name.as_deref(),
-                &ImageProcessingOptions {
-                    transforms: &self.image_transforms,
+            process_image_bytes_blocking(
+                bytes,
+                self.file.original_name.clone(),
+                OwnedImageProcessingOptions {
+                    transforms: self.image_transforms.clone(),
                     output_format: self.output_format,
                     quality: self.quality,
                     allow_upscale: self.allow_upscale,
                     require_image: self.require_image,
                     safety_limits: ImageSafetyLimits::from_storage_config(&app.config().storage()?),
                 },
-            )?
+            )
+            .await?
         } else {
             None
         };
@@ -1006,6 +1007,15 @@ struct ImageProcessingOptions<'a> {
     safety_limits: ImageSafetyLimits,
 }
 
+struct OwnedImageProcessingOptions {
+    transforms: Vec<ImageTransform>,
+    output_format: Option<ImageFormat>,
+    quality: Option<u8>,
+    allow_upscale: bool,
+    require_image: bool,
+    safety_limits: ImageSafetyLimits,
+}
+
 impl ImageProcessingOptions<'_> {
     fn should_process(&self) -> bool {
         self.require_image
@@ -1013,6 +1023,25 @@ impl ImageProcessingOptions<'_> {
             || self.output_format.is_some()
             || self.quality.is_some()
     }
+}
+
+async fn process_image_bytes_blocking(
+    bytes: Vec<u8>,
+    original_name: Option<String>,
+    owned_options: OwnedImageProcessingOptions,
+) -> Result<Option<ProcessedImage>> {
+    crate::support::run_blocking("attachment image processing", move || {
+        let options = ImageProcessingOptions {
+            transforms: &owned_options.transforms,
+            output_format: owned_options.output_format,
+            quality: owned_options.quality,
+            allow_upscale: owned_options.allow_upscale,
+            require_image: owned_options.require_image,
+            safety_limits: owned_options.safety_limits,
+        };
+        process_image_bytes(&bytes, original_name.as_deref(), &options)
+    })
+    .await
 }
 
 async fn store_model_attachment<M>(
@@ -2272,6 +2301,30 @@ mod tests {
         let processed = process_image_bytes(&input, Some("voucher.png"), &options)
             .unwrap()
             .unwrap();
+
+        assert_eq!(processed.format, ImageFormat::WebP);
+        let image = crate::imaging::ImageProcessor::from_bytes(&processed.bytes).unwrap();
+        assert_eq!((image.width(), image.height()), (1200, 630));
+    }
+
+    #[tokio::test]
+    async fn image_policy_blocking_wrapper_resizes_and_converts_output_format() {
+        let input = test_image_bytes(640, 360, ImageFormat::Png);
+        let processed = process_image_bytes_blocking(
+            input,
+            Some("voucher.png".to_string()),
+            OwnedImageProcessingOptions {
+                transforms: vec![ImageTransform::ResizeToFill(1200, 630)],
+                output_format: Some(ImageFormat::WebP),
+                quality: Some(85),
+                allow_upscale: true,
+                require_image: true,
+                safety_limits: ImageSafetyLimits::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert_eq!(processed.format, ImageFormat::WebP);
         let image = crate::imaging::ImageProcessor::from_bytes(&processed.bytes).unwrap();

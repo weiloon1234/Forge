@@ -66,8 +66,13 @@ fn module_notes(group_key: &str) -> &'static [&'static str] {
             "`JobsConfig` includes `shutdown_timeout_ms` for active worker job draining; `0` aborts active jobs immediately.",
             "`JobsConfig.history_retention_days` defaults to `30`; `0` keeps `job_history` forever.",
             "`ObservabilityConfig.enabled` gates `/_forge/*` route registration; `capture_enabled` gates passive runtime capture.",
+            "`RuntimeConfig.worker_threads` and `max_blocking_threads` default to `0`, which keeps Tokio defaults for Forge-owned sync runners.",
             "`SchedulerConfig` includes `shutdown_timeout_ms` for active schedule task draining; `0` aborts active schedules immediately.",
             "`WebSocketConfig` bounds inbound message/frame sizes, query auth token length, and client-supplied channel, room, event, ack, and subscription cardinality.",
+        ],
+        "support" => &[
+            "`run_blocking(label, work)` isolates CPU-heavy or blocking synchronous work on Tokio's blocking pool and maps task panics into Forge errors.",
+            "`HashManager::hash()` and `HashManager::check()` remain synchronous; wrap password hashing or checking in `run_blocking` inside async handlers or model mutators.",
         ],
         "cache" => &[
             "Cache keys are validated before backend access; Redis nil/missing keys are distinct from backend failures.",
@@ -150,9 +155,15 @@ mod tests {
         assert!(config.contains("redact_sql_literals"));
         assert!(config.contains("history_retention_days"));
         assert!(config.contains("ObservabilityConfig.enabled"));
+        assert!(config.contains("RuntimeConfig"));
         assert!(config.contains("SchedulerConfig"));
         assert!(config.contains("WebSocketConfig"));
         assert!(config.contains("0` aborts"));
+
+        let mut support = String::new();
+        append_module_notes("support", &mut support);
+        assert!(support.contains("run_blocking"));
+        assert!(support.contains("HashManager::hash()"));
 
         let mut jobs = String::new();
         append_module_notes("jobs", &mut jobs);

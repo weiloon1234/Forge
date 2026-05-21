@@ -344,6 +344,7 @@ TOML-based configuration with environment overlay.
 | `LoggingConfig` | `level`, `format`, `directory`, `retention` |
 | `I18nConfig` | `locales`, `resource_path` |
 | `ObservabilityConfig` | route/capture switches, sample retention, tracing, OTLP |
+| `RuntimeConfig` | Tokio worker/blocking thread sizing for Forge-owned sync runners |
 | `HashingConfig` | `driver`, memory/time costs, parallelism |
 | `CryptConfig` | `key` |
 | `CacheConfig` | `driver`, `error_mode`, key bounds, TTL, memory size, `remember()` stampede controls |
@@ -374,6 +375,7 @@ fn database(&self) -> Result<DatabaseConfig>
 fn redis(&self) -> Result<RedisConfig>
 fn websocket(&self) -> Result<WebSocketConfig>
 fn jobs(&self) -> Result<JobsConfig>
+fn runtime(&self) -> Result<RuntimeConfig>
 fn auth(&self) -> Result<AuthConfig>
 fn scheduler(&self) -> Result<SchedulerConfig>
 fn logging(&self) -> Result<LoggingConfig>
@@ -399,6 +401,8 @@ fn is_testing(&self) -> bool
 ```
 
 `Environment` accepts `development`, `production`, `staging`, `testing`, and custom labels. Use `is_production_like` for checks where staging should follow production behavior.
+
+`RuntimeConfig.worker_threads` and `max_blocking_threads` default to `0`, which keeps Tokio defaults. Nonzero values apply only to Forge-created sync runners such as `run_http`, `run_worker`, `run_scheduler`, `run_websocket`, and `run_cli`; async runners keep using the caller-owned runtime.
 
 ### Constants
 
@@ -558,6 +562,8 @@ fn check(&self, password: &str, hash: &str) -> Result<bool>
 fn random_string(length: usize) -> Result<String>  // static
 ```
 
+`HashManager::hash()` and `HashManager::check()` stay synchronous for compatibility. In async handlers or model mutators, wrap password hashing/checking with `run_blocking` so Argon2 work does not occupy Tokio worker threads.
+
 ### Token
 
 ```rust
@@ -592,6 +598,7 @@ fn sha256_hex_str(s: &str) -> String
 fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool
 fn boxed<F, T>(future: F) -> BoxFuture<T>
+async fn run_blocking<T, F>(label: impl Into<String>, work: F) -> Result<T>
 ```
 
 ### Type Aliases

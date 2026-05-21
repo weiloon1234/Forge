@@ -155,6 +155,10 @@ App::builder()
 ```
 
 ```toml
+[runtime]
+worker_threads = 0        # 0 = Tokio default for Forge-owned sync runners
+max_blocking_threads = 0  # 0 = Tokio default blocking pool cap
+
 [jobs]
 queue = "default"
 poll_interval_ms = 100

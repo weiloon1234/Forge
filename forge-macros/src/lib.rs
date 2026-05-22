@@ -61,13 +61,15 @@ fn expand_with_ts(
 ) -> TokenStream {
     match syn::parse::<syn::DeriveInput>(input) {
         Ok(parsed) => {
-            let ts_tokens = typescript::expand(parsed.clone());
+            let ts_tokens = match typescript::expand(parsed.clone()) {
+                Ok(tokens) => tokens,
+                Err(error) => return error.to_compile_error().into(),
+            };
             match f(parsed) {
                 Ok(main_tokens) => {
-                    let ts = ts_tokens.unwrap_or_default();
                     let combined = quote::quote! {
                         #main_tokens
-                        #ts
+                        #ts_tokens
                     };
                     combined.into()
                 }

@@ -11,7 +11,6 @@ use super::request::{DatatableFilterInput, DatatableSortInput};
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableJsonResponse {
     #[ts(type = "Array<Record<string, unknown>>")]
     pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
@@ -27,7 +26,6 @@ pub struct DatatableJsonResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableColumnMeta {
     pub name: String,
     pub label: String,
@@ -40,7 +38,6 @@ pub struct DatatableColumnMeta {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatablePaginationMeta {
     #[ts(type = "number")]
     pub page: u64,
@@ -73,7 +70,6 @@ impl DatatablePaginationMeta {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableExportAccepted {
     pub datatable_id: String,
     pub recipient: String,
@@ -85,7 +81,6 @@ pub struct DatatableExportAccepted {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableActorSnapshot {
     pub id: String,
     pub guard: String,

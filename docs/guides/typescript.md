@@ -22,7 +22,6 @@ Request/response DTOs already derive `ApiSchema` — they're auto-included:
 
 ```rust
 #[derive(Debug, Deserialize, ts_rs::TS, forge::ApiSchema)]
-#[ts(export)]
 pub struct CreateOrderRequest {
     pub product_id: String,
     pub quantity: u32,
@@ -93,7 +92,6 @@ Auto-registers for TypeScript export. Must also derive `ts_rs::TS`:
 
 ```rust
 #[derive(Debug, Deserialize, ts_rs::TS, forge::ApiSchema)]
-#[ts(export)]
 pub struct MyRequest { ... }
 ```
 
@@ -217,7 +215,6 @@ For any type that isn't a DTO or AppEnum but needs TypeScript export:
 
 ```rust
 #[derive(Serialize, ts_rs::TS, forge::TS)]
-#[ts(export)]
 pub struct SomeCustomType {
     pub name: String,
     pub value: f64,
@@ -232,7 +229,6 @@ Control TypeScript output with `#[ts(...)]` attributes:
 
 ```rust
 #[derive(Serialize, ts_rs::TS, forge::ApiSchema)]
-#[ts(export)]
 pub struct Example {
     pub name: String,
 
@@ -248,10 +244,15 @@ pub struct Example {
 ```
 
 Common attributes:
-- `#[ts(export)]` — mark DTO / `forge::TS` types for export
 - `#[ts(type = "...")]` — override generated TypeScript type
 - `#[ts(optional)]` — make field optional (`T | undefined`)
 - `#[ts(rename = "...")]` — rename in TypeScript output
+- `#[ts(export_to = "...")]` — rare filename/subdirectory override inside `typescript.output_dir`
+
+Do not use `#[ts(export)]` on types deriving `forge::ApiSchema` or
+`forge::TS`. Forge registers those types automatically and `types:export`
+writes them to the configured `typescript.output_dir`; direct ts-rs export
+creates unmanaged files such as root `bindings/*.ts`.
 
 ---
 

@@ -13,7 +13,6 @@ use super::request::DatatableFilterOp;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum DatatableFilterKind {
     Text,
     Number,
@@ -25,7 +24,6 @@ pub enum DatatableFilterKind {
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum DatatableFilterValueKind {
     Text,
     Boolean,
@@ -37,7 +35,6 @@ pub enum DatatableFilterValueKind {
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableFilterBinding {
     pub field: String,
     pub op: DatatableFilterOp,
@@ -63,7 +60,6 @@ impl DatatableFilterBinding {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableFilterOption {
     pub value: String,
     /// For AppEnum-backed filters this carries the translation key.
@@ -71,7 +67,6 @@ pub struct DatatableFilterOption {
 }
 
 #[derive(Serialize, Clone, Debug, Default, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 struct DatatableFilterOptions {
     pub items: Vec<DatatableFilterOption>,
 }
@@ -110,7 +105,6 @@ impl From<Collection<EnumOption>> for Collection<DatatableFilterOption> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableFilterField {
     pub name: String,
     pub kind: DatatableFilterKind,
@@ -427,7 +421,6 @@ where
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableFilterRow {
     pub fields: Vec<DatatableFilterField>,
 }

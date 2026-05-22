@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
     forge_macros::TS,
     forge_macros::ApiSchema,
 )]
-#[ts(export)]
 pub struct MessageResponse {
     pub message: String,
 }

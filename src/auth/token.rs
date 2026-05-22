@@ -23,7 +23,6 @@ const PERSONAL_ACCESS_TOKENS_TABLE: &str = "personal_access_tokens";
 #[derive(
     Debug, Clone, Serialize, Deserialize, ts_rs::TS, forge_macros::TS, forge_macros::ApiSchema,
 )]
-#[ts(export)]
 pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
@@ -43,7 +42,6 @@ pub struct TokenPair {
     forge_macros::ApiSchema,
     forge_macros::Validate,
 )]
-#[ts(export)]
 pub struct RefreshTokenRequest {
     #[validate(required)]
     pub refresh_token: String,
@@ -53,7 +51,6 @@ pub struct RefreshTokenRequest {
 #[derive(
     Debug, Clone, Serialize, Deserialize, ts_rs::TS, forge_macros::TS, forge_macros::ApiSchema,
 )]
-#[ts(export)]
 pub struct TokenResponse {
     pub tokens: TokenPair,
 }
@@ -90,7 +87,6 @@ impl From<TokenPair> for TokenResponse {
     forge_macros::TS,
     forge_macros::ApiSchema,
 )]
-#[ts(export)]
 pub struct WsTokenResponse {
     pub token: String,
 }

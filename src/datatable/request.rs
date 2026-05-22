@@ -11,7 +11,6 @@ use crate::support::{Collection, Date, DateTime};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum DatatableFilterOp {
     Eq,
     NotEq,
@@ -34,7 +33,6 @@ pub enum DatatableFilterOp {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, ts_rs::TS, forge_macros::TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum DatatableFilterValue {
     Text(String),
     Bool(bool),
@@ -43,7 +41,6 @@ pub enum DatatableFilterValue {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableFilterInput {
     pub field: String,
     pub op: DatatableFilterOp,
@@ -55,7 +52,6 @@ pub struct DatatableFilterInput {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableSortInput {
     pub field: String,
     #[ts(type = "\"asc\" | \"desc\"")]
@@ -75,7 +71,6 @@ const fn default_per_page() -> u64 {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ts_rs::TS, forge_macros::TS)]
-#[ts(export)]
 pub struct DatatableRequest {
     #[serde(default = "default_page")]
     #[ts(type = "number")]

@@ -34,6 +34,7 @@ const TYPES_EXPORT_MANIFEST: &str = ".forge-types-manifest.json";
 pub struct TsType {
     pub name: &'static str,
     pub export_fn: fn(&Path) -> std::result::Result<(), ts_rs::ExportError>,
+    pub output_path_fn: fn() -> Option<&'static Path>,
 }
 
 inventory::collect!(TsType);
@@ -632,14 +633,19 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
 
     let ts_types: Vec<&TsType> = inventory::iter::<TsType>.into_iter().collect();
     let app_enums: Vec<&TsAppEnum> = inventory::iter::<TsAppEnum>.into_iter().collect();
-    let output_files = planned_output_files(&ts_types, &app_enums);
+    let ts_type_files = planned_ts_type_files(&ts_types)?;
+    let output_files = planned_output_files(&ts_type_files, &app_enums);
     clean_manifest_files(dir, &output_files)?;
 
-    let mut names: Vec<&str> = Vec::new();
+    let mut type_exports = BTreeMap::new();
     for ts_type in ts_types {
         (ts_type.export_fn)(dir)
             .map_err(|e| Error::message(format!("ts export `{}`: {e}", ts_type.name)))?;
-        names.push(ts_type.name);
+        let file = ts_type_files
+            .get(ts_type.name)
+            .expect("planned TypeScript file should exist")
+            .clone();
+        type_exports.insert(ts_type.name, file);
     }
 
     // Rewrite AppEnum files entirely — if ts-rs also emitted an enum file,
@@ -654,9 +660,13 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
         }
         write_generated_file(&file_path, rendered.content)?;
         enum_names.insert(app_enum.name);
-        names.push(app_enum.name);
     }
 
+    let mut names: Vec<&str> = type_exports
+        .keys()
+        .copied()
+        .chain(enum_names.iter().copied())
+        .collect();
     names.sort();
     names.dedup();
 
@@ -677,7 +687,11 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
                 "export {{ type {name}, {name}Values, {name}Options, {name}Meta{groups_export} }} from \"./{name}\";\n"
             ));
         } else {
-            barrel.push_str(&format!("export type {{ {name} }} from \"./{name}\";\n"));
+            let file = type_exports
+                .get(name)
+                .expect("planned TypeScript export should exist");
+            let module = ts_module_specifier(file)?;
+            barrel.push_str(&format!("export type {{ {name} }} from \"{module}\";\n"));
         }
     }
     barrel.push_str(
@@ -691,10 +705,29 @@ pub fn export_all_with_routes(dir: &Path, routes: &[RouteManifestEntry]) -> Resu
     Ok(())
 }
 
-fn planned_output_files(ts_types: &[&TsType], app_enums: &[&TsAppEnum]) -> BTreeSet<String> {
-    let mut files = BTreeSet::new();
+fn planned_ts_type_files(ts_types: &[&TsType]) -> Result<BTreeMap<&'static str, String>> {
+    let mut files = BTreeMap::new();
     for ts_type in ts_types {
-        files.insert(format!("{}.ts", ts_type.name));
+        let file = ts_type_output_file(ts_type)?;
+        if let Some(existing) = files.insert(ts_type.name, file.clone()) {
+            if existing != file {
+                return Err(Error::message(format!(
+                    "TypeScript export `{}` registered multiple output paths: `{existing}` and `{file}`",
+                    ts_type.name
+                )));
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn planned_output_files(
+    ts_type_files: &BTreeMap<&'static str, String>,
+    app_enums: &[&TsAppEnum],
+) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for file in ts_type_files.values() {
+        files.insert(file.clone());
     }
     for app_enum in app_enums {
         files.insert(format!("{}.ts", app_enum.name));
@@ -704,13 +737,46 @@ fn planned_output_files(ts_types: &[&TsType], app_enums: &[&TsAppEnum]) -> BTree
     files
 }
 
+fn ts_type_output_file(ts_type: &TsType) -> Result<String> {
+    let path = (ts_type.output_path_fn)().ok_or_else(|| {
+        Error::message(format!(
+            "TypeScript export `{}` does not expose an output path",
+            ts_type.name
+        ))
+    })?;
+    let file = path.to_str().ok_or_else(|| {
+        Error::message(format!(
+            "TypeScript export `{}` output path must be valid UTF-8",
+            ts_type.name
+        ))
+    })?;
+
+    let Some(path) = safe_manifest_path_with_extension(file, "ts", true) else {
+        return Err(Error::message(format!(
+            "TypeScript export `{}` output path `{file}` must be a relative .ts path inside the generated types directory",
+            ts_type.name
+        )));
+    };
+
+    Ok(path.to_string_lossy().replace('\\', "/"))
+}
+
+fn ts_module_specifier(file: &str) -> Result<String> {
+    let module = file.strip_suffix(".ts").ok_or_else(|| {
+        Error::message(format!(
+            "TypeScript barrel export path `{file}` must end with .ts"
+        ))
+    })?;
+    Ok(format!("./{module}"))
+}
+
 fn clean_manifest_files(dir: &Path, output_files: &BTreeSet<String>) -> Result<()> {
     clean_generated_manifest_files(
         dir,
         TYPES_EXPORT_MANIFEST,
         output_files,
         "forge.typescript",
-        |file| safe_manifest_path_with_extension(file, "ts", false),
+        |file| safe_manifest_path_with_extension(file, "ts", true),
     )
 }
 
@@ -806,6 +872,13 @@ mod tests {
         permissions: Vec<MinimalExportPermission>,
     }
 
+    #[allow(dead_code)]
+    #[derive(Clone, Debug, serde::Serialize, ts_rs::TS, crate::TS)]
+    #[ts(export_to = "custom/CustomExportPathDto.ts")]
+    struct CustomExportPathDto {
+        value: String,
+    }
+
     fn string_meta(values: &[&str]) -> EnumMeta {
         EnumMeta {
             id: "permission".to_string(),
@@ -863,6 +936,10 @@ mod tests {
                 "expected generated TypeScript file: {file}"
             );
         }
+        assert!(
+            dir.path().join("custom/CustomExportPathDto.ts").exists(),
+            "expected custom export_to TypeScript file"
+        );
 
         let datatable_filter_field =
             fs::read_to_string(dir.path().join("DatatableFilterField.ts")).unwrap();
@@ -1056,6 +1133,12 @@ mod tests {
         assert!(
             index.contains("export type { WsTokenResponse } from \"./WsTokenResponse\";"),
             "expected index.ts to re-export WsTokenResponse:\n{index}"
+        );
+        assert!(
+            index.contains(
+                "export type { CustomExportPathDto } from \"./custom/CustomExportPathDto\";"
+            ),
+            "expected index.ts to respect export_to paths:\n{index}"
         );
         assert!(
             index.contains(

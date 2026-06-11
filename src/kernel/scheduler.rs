@@ -252,21 +252,23 @@ impl SchedulerKernel {
     }
 
     async fn ensure_leadership(&self) -> Result<bool> {
-        let leader_active = self.leader_active.load(Ordering::Relaxed);
+        // Acquire/Release: this flag gates job-execution authority, so reads
+        // must observe the writes that accompanied the leadership change.
+        let leader_active = self.leader_active.load(Ordering::Acquire);
         if leader_active {
             if self
                 .backend
                 .renew_scheduler_leadership(&self.owner_id, self.leader_lease_ttl)
                 .await?
             {
-                self.leader_active.store(true, Ordering::Relaxed);
+                self.leader_active.store(true, Ordering::Release);
                 if let Ok(diagnostics) = self.app.diagnostics() {
                     diagnostics.set_scheduler_leader_active(true);
                 }
                 return Ok(true);
             }
 
-            self.leader_active.store(false, Ordering::Relaxed);
+            self.leader_active.store(false, Ordering::Release);
             tracing::warn!(
                 target: "forge.scheduler",
                 state = "lost",
@@ -284,7 +286,7 @@ impl SchedulerKernel {
             .try_acquire_scheduler_leadership(&self.owner_id, self.leader_lease_ttl)
             .await?
         {
-            self.leader_active.store(true, Ordering::Relaxed);
+            self.leader_active.store(true, Ordering::Release);
             tracing::info!(
                 target: "forge.scheduler",
                 state = "acquired",
@@ -297,7 +299,7 @@ impl SchedulerKernel {
             return Ok(true);
         }
 
-        self.leader_active.store(false, Ordering::Relaxed);
+        self.leader_active.store(false, Ordering::Release);
         if let Ok(diagnostics) = self.app.diagnostics() {
             diagnostics.set_scheduler_leader_active(false);
         }
@@ -430,6 +432,12 @@ impl Drop for SchedulerKernel {
             handle.spawn(async move {
                 let _ = backend.release_scheduler_leadership(&owner_id).await;
             });
+        } else {
+            tracing::warn!(
+                target: "forge.scheduler",
+                owner = %owner_id,
+                "scheduler dropped outside a tokio runtime; leadership lease will only lapse via TTL"
+            );
         }
     }
 }
@@ -512,6 +520,12 @@ impl Drop for ScheduleLockGuard {
                 handle.spawn(async move {
                     let _ = backend.del_key(&key).await;
                 });
+            } else {
+                tracing::warn!(
+                    target: "forge.scheduler",
+                    key = %key,
+                    "schedule lock guard dropped outside a tokio runtime; overlap lock will only lapse via TTL"
+                );
             }
         }
     }

@@ -279,6 +279,9 @@ impl Sql {
         Expr::function("DATE_TRUNC", [Expr::value(granularity.into()), expr.into()])
     }
 
+    /// `EXTRACT(<field> FROM expr)`. The field is written into the SQL text
+    /// (it is a keyword, not a bindable value), so the compiler validates it
+    /// against the known Postgres date/time fields and rejects anything else.
     pub fn extract(field: impl Into<String>, expr: impl Into<Expr>) -> Expr {
         Expr::function("EXTRACT", [Expr::value(field.into()), expr.into()])
     }
@@ -336,6 +339,10 @@ impl Sql {
         Expr::binary(left, BinaryOperator::Concat, right)
     }
 
+    /// Binary expression with a custom SQL operator (e.g. `->>`, `@>`,
+    /// `ILIKE`). The operator is written into the SQL text, so the compiler
+    /// restricts it to legal operator characters and keyword operators; it
+    /// must never be built from untrusted input.
     pub fn op(left: impl Into<Expr>, operator: impl Into<String>, right: impl Into<Expr>) -> Expr {
         Expr::binary(left, BinaryOperator::Custom(operator.into()), right)
     }

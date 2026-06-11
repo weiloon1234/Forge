@@ -822,6 +822,49 @@ async fn plugin_shutdown_called_in_reverse_dependency_order() {
     assert_eq!(log.lock().unwrap().as_slice(), &["booted", "shutdown"]);
 }
 
+const BOOT_FAIL_DEPENDENT_PLUGIN_ID: PluginId = PluginId::new("forge.plugin.boot_fail_dependent");
+
+struct BootFailDependentPlugin;
+
+#[async_trait]
+impl forge::plugin::Plugin for BootFailDependentPlugin {
+    fn manifest(&self) -> forge::plugin::PluginManifest {
+        forge::plugin::PluginManifest::new(
+            BOOT_FAIL_DEPENDENT_PLUGIN_ID,
+            Version::new(1, 0, 0),
+            VersionReq::parse(">=0.1.0").unwrap(),
+        )
+        .depends_on(SHUTDOWN_PLUGIN_ID, VersionReq::parse(">=1.0.0").unwrap())
+    }
+
+    fn register(&self, _registrar: &mut forge::plugin::PluginRegistrar) -> Result<()> {
+        Ok(())
+    }
+
+    async fn boot(&self, _app: &AppContext) -> Result<()> {
+        Err(forge::foundation::Error::message("dependent boot failed"))
+    }
+}
+
+#[tokio::test]
+async fn plugins_booted_before_a_boot_failure_are_shut_down() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let error = match App::builder()
+        .register_plugin(ShutdownPlugin { log: log.clone() })
+        .register_plugin(BootFailDependentPlugin)
+        .build_cli_kernel()
+        .await
+    {
+        Ok(_) => panic!("expected dependent plugin boot failure to fail bootstrap"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("dependent boot failed"));
+    // ShutdownPlugin booted before the failure, so its shutdown must run as
+    // part of the bootstrap rollback.
+    assert_eq!(log.lock().unwrap().as_slice(), &["booted", "shutdown"]);
+}
+
 #[tokio::test]
 async fn plugin_boot_panic_becomes_bootstrap_error() {
     let error = match App::builder()

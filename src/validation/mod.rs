@@ -736,6 +736,44 @@ mod tests {
         assert_eq!(errors.errors[0].code, "min_numeric");
     }
 
+    #[tokio::test]
+    async fn numeric_bounds_reject_unparseable_and_non_finite_input() {
+        // Non-numeric, NaN, and infinity must not slip past bound checks:
+        // NaN compares false against everything, and unparseable input
+        // previously skipped the rule entirely.
+        for value in ["abc", "NaN", "inf", "-inf", "1.2.3", ""] {
+            let app = test_app();
+            let mut v = Validator::new(app);
+            v.field("age", value)
+                .min_numeric(0.0)
+                .apply()
+                .await
+                .unwrap();
+            let errors = v.finish().unwrap_err();
+            assert_eq!(errors.errors[0].code, "min_numeric", "value: {value:?}");
+
+            let app = test_app();
+            let mut v = Validator::new(app);
+            v.field("age", value)
+                .max_numeric(10.0)
+                .apply()
+                .await
+                .unwrap();
+            let errors = v.finish().unwrap_err();
+            assert_eq!(errors.errors[0].code, "max_numeric", "value: {value:?}");
+
+            let app = test_app();
+            let mut v = Validator::new(app);
+            v.field("age", value)
+                .between(0.0, 10.0)
+                .apply()
+                .await
+                .unwrap();
+            let errors = v.finish().unwrap_err();
+            assert_eq!(errors.errors[0].code, "between", "value: {value:?}");
+        }
+    }
+
     // --- MaxNumeric rule tests ---
 
     #[tokio::test]

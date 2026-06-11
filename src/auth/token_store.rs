@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::database::{DatabaseManager, DbValue, Query, Sql};
+use crate::database::{Condition, DatabaseManager, DbValue, Query, Sql};
 use crate::foundation::{Error, Result};
-use crate::support::{DateTime, Token};
+use crate::support::Token;
 
 const PASSWORD_RESET_TOKENS_TABLE: &str = "password_reset_tokens";
 
@@ -57,26 +57,25 @@ impl TokenStore {
         let expiry_seconds = self.expiry.as_secs() as i64;
 
         let invalid_msg = format!("invalid or expired {} token", self.kind);
-        let rows = Query::delete_from(PASSWORD_RESET_TOKENS_TABLE)
+        let mut query = Query::delete_from(PASSWORD_RESET_TOKENS_TABLE)
             .where_eq("email", email.to_string())
             .where_eq("guard", guard)
-            .where_eq("token_hash", hash)
-            .returning(["created_at"])
-            .get(&*self.database)
-            .await?;
+            .where_eq("token_hash", hash);
 
-        let row = rows.first().ok_or_else(|| Error::message(&invalid_msg))?;
+        if expiry_seconds > 0 {
+            // Enforce the TTL inside the DELETE so an expired token is never
+            // consumed; deleting first and checking expiry afterwards made
+            // every expired attempt destructive.
+            query = query.where_(Condition::raw(
+                "created_at >= NOW() - (? * INTERVAL '1 second')",
+                vec![DbValue::Float64(expiry_seconds as f64)],
+            ));
+        }
 
-        let created_at = match row.get("created_at") {
-            Some(DbValue::TimestampTz(ts)) => *ts,
-            _ => return Err(Error::message(&invalid_msg)),
-        };
+        let rows = query.returning(["created_at"]).get(&*self.database).await?;
 
-        let now = DateTime::now();
-        if expiry_seconds > 0
-            && (now.as_chrono() - created_at.as_chrono()).num_seconds() > expiry_seconds
-        {
-            return Err(Error::message(format!("{} token has expired", self.kind)));
+        if rows.is_empty() {
+            return Err(Error::message(&invalid_msg));
         }
 
         Ok(())

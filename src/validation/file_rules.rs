@@ -19,16 +19,21 @@ pub fn check_max_size(file: &UploadedFile, max_kb: u64) -> bool {
 /// Check if image dimensions are within limits.
 /// Returns (width, height) if the file is a valid image.
 pub async fn get_image_dimensions(file: &UploadedFile) -> Result<(u32, u32)> {
-    let bytes = tokio::fs::read(&file.temp_path)
-        .await
-        .map_err(|e| Error::message(format!("failed to read uploaded file: {e}")))?;
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| Error::message(format!("failed to detect image format: {e}")))?;
-    let dims = reader
-        .into_dimensions()
-        .map_err(|e| Error::message(format!("failed to read image dimensions: {e}")))?;
-    Ok(dims)
+    // Stream from disk on the blocking pool instead of slurping the whole
+    // upload into memory: dimension extraction only needs the image header,
+    // and a large upload would otherwise allocate its full size per check.
+    let path = file.temp_path.clone();
+    crate::support::run_blocking("validation.image_dimensions", move || {
+        let handle = std::fs::File::open(&path)
+            .map_err(|e| Error::message(format!("failed to read uploaded file: {e}")))?;
+        let reader = image::ImageReader::new(std::io::BufReader::new(handle))
+            .with_guessed_format()
+            .map_err(|e| Error::message(format!("failed to detect image format: {e}")))?;
+        reader
+            .into_dimensions()
+            .map_err(|e| Error::message(format!("failed to read image dimensions: {e}")))
+    })
+    .await
 }
 
 /// Check if MIME type is in allowed list.

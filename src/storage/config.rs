@@ -89,7 +89,7 @@ impl ResolvedLocalConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolvedS3Config {
     pub bucket: String,
     pub region: String,
@@ -99,6 +99,21 @@ pub struct ResolvedS3Config {
     pub url: Option<String>,
     pub use_path_style: bool,
     pub visibility: StorageVisibility,
+}
+
+impl std::fmt::Debug for ResolvedS3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedS3Config")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("key", &self.key)
+            .field("secret", &crate::support::redaction::REDACTED)
+            .field("url", &self.url)
+            .field("use_path_style", &self.use_path_style)
+            .field("visibility", &self.visibility)
+            .finish()
+    }
 }
 
 impl ResolvedS3Config {

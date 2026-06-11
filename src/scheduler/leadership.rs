@@ -164,8 +164,11 @@ async fn renew_scheduler_leadership_memory(
             Ok(true)
         }
         Some(existing) if existing.owner_id == owner_id => {
-            existing.expires_at_millis = now + ttl.as_millis() as i64;
-            Ok(true)
+            // Expired lease: mirror Redis, where the key is gone and renewal
+            // fails. The previous holder must win a fresh election instead of
+            // silently re-asserting leadership another instance may now hold.
+            *leader = None;
+            Ok(false)
         }
         _ => Ok(false),
     }
@@ -212,6 +215,28 @@ mod tests {
             .release_scheduler_leadership("leader-a")
             .await
             .unwrap();
+        assert!(backend
+            .try_acquire_scheduler_leadership("leader-b", Duration::from_millis(50))
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn memory_backend_rejects_renewal_of_expired_lease() {
+        let backend = RuntimeBackend::memory("scheduler-leader-expiry-unit");
+
+        assert!(backend
+            .try_acquire_scheduler_leadership("leader-a", Duration::from_millis(10))
+            .await
+            .unwrap());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // The lease expired, so the old holder must not be able to renew it;
+        // it has to win a fresh election like any other instance.
+        assert!(!backend
+            .renew_scheduler_leadership("leader-a", Duration::from_millis(50))
+            .await
+            .unwrap());
         assert!(backend
             .try_acquire_scheduler_leadership("leader-b", Duration::from_millis(50))
             .await

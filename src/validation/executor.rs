@@ -60,6 +60,17 @@ pub(crate) fn compare_temporal_values(
     ))
 }
 
+/// Parses a value for numeric rules, rejecting NaN/infinity: every IEEE 754
+/// comparison against NaN is false, so a bare `parse` would let "NaN" sail
+/// through min/max/between bound checks.
+pub(crate) fn parse_finite_number(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|num| num.is_finite())
+}
+
 pub(crate) fn interpolate_message(template: &str, values: &[(&str, &str)]) -> String {
     let mut result = template.to_string();
     for (key, value) in values {
@@ -282,12 +293,7 @@ pub(crate) async fn execute_steps(
                 rule: FieldRule::Numeric,
                 message,
             } => {
-                let s = value.trim();
-                if s.is_empty()
-                    || !s
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+')
-                {
+                if parse_finite_number(value).is_none() {
                     let msg = validator.resolve_message(field, "numeric", &[], message.as_deref());
                     validator.push_error(field.to_string(), ValidationError::new("numeric", msg));
                 }
@@ -531,38 +537,30 @@ pub(crate) async fn execute_steps(
                 rule: FieldRule::MinNumeric(min),
                 message,
             } => {
-                if let Ok(num) = value.parse::<f64>() {
-                    if num < min {
-                        let msg = validator.resolve_message(
-                            field,
-                            "min_numeric",
-                            &[("min", &min.to_string())],
-                            message.as_deref(),
-                        );
-                        validator.push_error(
-                            field.to_string(),
-                            ValidationError::new("min_numeric", msg),
-                        );
-                    }
+                if !matches!(parse_finite_number(value), Some(num) if num >= min) {
+                    let msg = validator.resolve_message(
+                        field,
+                        "min_numeric",
+                        &[("min", &min.to_string())],
+                        message.as_deref(),
+                    );
+                    validator
+                        .push_error(field.to_string(), ValidationError::new("min_numeric", msg));
                 }
             }
             FieldStep {
                 rule: FieldRule::MaxNumeric(max),
                 message,
             } => {
-                if let Ok(num) = value.parse::<f64>() {
-                    if num > max {
-                        let msg = validator.resolve_message(
-                            field,
-                            "max_numeric",
-                            &[("max", &max.to_string())],
-                            message.as_deref(),
-                        );
-                        validator.push_error(
-                            field.to_string(),
-                            ValidationError::new("max_numeric", msg),
-                        );
-                    }
+                if !matches!(parse_finite_number(value), Some(num) if num <= max) {
+                    let msg = validator.resolve_message(
+                        field,
+                        "max_numeric",
+                        &[("max", &max.to_string())],
+                        message.as_deref(),
+                    );
+                    validator
+                        .push_error(field.to_string(), ValidationError::new("max_numeric", msg));
                 }
             }
             FieldStep {
@@ -578,17 +576,14 @@ pub(crate) async fn execute_steps(
                 rule: FieldRule::Between { min, max },
                 message,
             } => {
-                if let Ok(num) = value.parse::<f64>() {
-                    if num < min || num > max {
-                        let msg = validator.resolve_message(
-                            field,
-                            "between",
-                            &[("min", &min.to_string()), ("max", &max.to_string())],
-                            message.as_deref(),
-                        );
-                        validator
-                            .push_error(field.to_string(), ValidationError::new("between", msg));
-                    }
+                if !matches!(parse_finite_number(value), Some(num) if num >= min && num <= max) {
+                    let msg = validator.resolve_message(
+                        field,
+                        "between",
+                        &[("min", &min.to_string()), ("max", &max.to_string())],
+                        message.as_deref(),
+                    );
+                    validator.push_error(field.to_string(), ValidationError::new("between", msg));
                 }
             }
             FieldStep {

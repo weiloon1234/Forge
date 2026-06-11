@@ -1260,8 +1260,24 @@ impl AppBuilder {
         for provider in &prepared_plugins.providers {
             boot_service_provider(provider.as_ref(), &app).await?;
         }
+        let mut booted_plugins = Vec::with_capacity(prepared_plugins.instances.len());
         for plugin in &prepared_plugins.instances {
-            crate::plugin::boot_plugin(plugin, &app).await?;
+            if let Err(error) = crate::plugin::boot_plugin(plugin, &app).await {
+                // Shut down already-booted plugins in reverse order so
+                // resources acquired by earlier boot() calls don't leak; the
+                // shutdown list below is only registered on full success.
+                for booted in booted_plugins.iter().rev() {
+                    if let Err(shutdown_error) = crate::plugin::shutdown_plugin(booted, &app).await
+                    {
+                        tracing::warn!(
+                            error = %shutdown_error,
+                            "plugin shutdown failed while rolling back boot failure"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+            booted_plugins.push(plugin.clone());
         }
         // Store plugin instances in reverse dependency order for shutdown
         let mut shutdown_order = prepared_plugins.instances.clone();

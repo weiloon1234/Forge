@@ -143,7 +143,11 @@ impl Drop for WebSocketPubSubTask {
         {
             let _ = shutdown.send(());
         }
-        let _ = lock_unpoisoned(&self.handle, "websocket pubsub task").take();
+        if let Some(handle) = lock_unpoisoned(&self.handle, "websocket pubsub task").take() {
+            // Dropping a JoinHandle detaches the task; abort so a task stuck
+            // in a backend call cannot outlive the server.
+            handle.abort();
+        }
     }
 }
 
@@ -205,52 +209,79 @@ impl WebSocketServerState {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             let task = async move {
-                let mut subscription = tokio::select! {
-                    _ = &mut shutdown_rx => return,
-                    subscription = backend.subscribe_ws(&topics) => match subscription {
-                        Ok(subscription) => subscription,
-                        Err(error) => {
-                            tracing::error!("forge websocket pubsub startup failed: {error}");
-                            return;
-                        }
-                    }
-                };
+                const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+                const MAX_BACKOFF: Duration = Duration::from_secs(30);
+                let mut backoff = INITIAL_BACKOFF;
 
-                loop {
-                    let message = tokio::select! {
-                        _ = &mut shutdown_rx => break,
-                        message = subscription.recv() => message,
-                    };
-                    let Some(message) = message else {
-                        break;
-                    };
-
-                    // Handle force-disconnect commands on the system topic.
-                    if message.topic == "__system:disconnect" {
-                        #[derive(serde::Deserialize)]
-                        struct DisconnectCommand {
-                            actor_id: String,
+                'resubscribe: loop {
+                    let mut subscription = tokio::select! {
+                        _ = &mut shutdown_rx => return,
+                        subscription = backend.subscribe_ws(&topics) => match subscription {
+                            Ok(subscription) => subscription,
+                            Err(error) => {
+                                tracing::error!(
+                                    target: "forge.websocket",
+                                    error = %error,
+                                    retry_in_ms = backoff.as_millis() as u64,
+                                    "websocket pubsub subscribe failed; retrying"
+                                );
+                                tokio::select! {
+                                    _ = &mut shutdown_rx => return,
+                                    _ = tokio::time::sleep(backoff) => {}
+                                }
+                                backoff = (backoff * 2).min(MAX_BACKOFF);
+                                continue 'resubscribe;
+                            }
                         }
-                        if let Ok(cmd) = serde_json::from_str::<DisconnectCommand>(&message.payload)
-                        {
-                            let closed = server_state.hub.disconnect_by_actor(&cmd.actor_id).await;
-                            server_state.cleanup_closed_connections(closed).await;
-                        } else {
-                            tracing::error!(
-                                "forge websocket pubsub: invalid disconnect command payload"
+                    };
+                    backoff = INITIAL_BACKOFF;
+
+                    loop {
+                        let message = tokio::select! {
+                            _ = &mut shutdown_rx => return,
+                            message = subscription.recv() => message,
+                        };
+                        let Some(message) = message else {
+                            // The subscription ended (e.g. the backend connection
+                            // dropped). Resubscribe instead of going silent while
+                            // publishes keep succeeding with no one listening.
+                            tracing::warn!(
+                                target: "forge.websocket",
+                                "websocket pubsub subscription ended; resubscribing"
                             );
-                        }
-                        continue;
-                    }
+                            continue 'resubscribe;
+                        };
 
-                    let envelope = match serde_json::from_str::<ServerMessage>(&message.payload) {
-                        Ok(envelope) => envelope,
-                        Err(error) => {
-                            tracing::error!("forge websocket pubsub decode failed: {error}");
+                        // Handle force-disconnect commands on the system topic.
+                        if message.topic == "__system:disconnect" {
+                            #[derive(serde::Deserialize)]
+                            struct DisconnectCommand {
+                                actor_id: String,
+                            }
+                            if let Ok(cmd) =
+                                serde_json::from_str::<DisconnectCommand>(&message.payload)
+                            {
+                                let closed =
+                                    server_state.hub.disconnect_by_actor(&cmd.actor_id).await;
+                                server_state.cleanup_closed_connections(closed).await;
+                            } else {
+                                tracing::error!(
+                                    "forge websocket pubsub: invalid disconnect command payload"
+                                );
+                            }
                             continue;
                         }
-                    };
-                    server_state.broadcast(&envelope).await;
+
+                        let envelope = match serde_json::from_str::<ServerMessage>(&message.payload)
+                        {
+                            Ok(envelope) => envelope,
+                            Err(error) => {
+                                tracing::error!("forge websocket pubsub decode failed: {error}");
+                                continue;
+                            }
+                        };
+                        server_state.broadcast(&envelope).await;
+                    }
                 }
             };
 

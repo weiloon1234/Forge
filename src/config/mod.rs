@@ -123,7 +123,7 @@ impl std::fmt::Display for Environment {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub name: String,
@@ -132,6 +132,21 @@ pub struct AppConfig {
     #[serde(default)]
     pub signing_key: String,
     pub background_shutdown_timeout_ms: u64,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("name", &self.name)
+            .field("environment", &self.environment)
+            .field("timezone", &self.timezone)
+            .field("signing_key", &crate::support::redaction::REDACTED)
+            .field(
+                "background_shutdown_timeout_ms",
+                &self.background_shutdown_timeout_ms,
+            )
+            .finish()
+    }
 }
 
 impl Default for AppConfig {
@@ -346,11 +361,23 @@ impl Default for HttpRateLimitConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct RedisConfig {
     pub url: String,
     pub namespace: String,
+}
+
+impl std::fmt::Debug for RedisConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisConfig")
+            .field(
+                "url",
+                &crate::support::redaction::redact_url_credentials(&self.url),
+            )
+            .field("namespace", &self.namespace)
+            .finish()
+    }
 }
 
 impl Default for RedisConfig {
@@ -378,7 +405,7 @@ impl Default for DatabaseModelConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
     pub url: String,
@@ -403,6 +430,40 @@ pub struct DatabaseConfig {
     pub idle_timeout_seconds: u64,
     pub max_lifetime_seconds: u64,
     pub models: DatabaseModelConfig,
+}
+
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::support::redaction::redact_url_credentials;
+
+        f.debug_struct("DatabaseConfig")
+            .field("url", &redact_url_credentials(&self.url))
+            .field(
+                "read_url",
+                &self.read_url.as_deref().map(redact_url_credentials),
+            )
+            .field("schema", &self.schema)
+            .field("migration_table", &self.migration_table)
+            .field("migration_lock_timeout_ms", &self.migration_lock_timeout_ms)
+            .field("migrations_path", &self.migrations_path)
+            .field("seeders_path", &self.seeders_path)
+            .field("min_connections", &self.min_connections)
+            .field("max_connections", &self.max_connections)
+            .field("acquire_timeout_ms", &self.acquire_timeout_ms)
+            .field("default_per_page", &self.default_per_page)
+            .field("log_queries", &self.log_queries)
+            .field("log_query_bindings", &self.log_query_bindings)
+            .field("redact_sql_literals", &self.redact_sql_literals)
+            .field("slow_query_threshold_ms", &self.slow_query_threshold_ms)
+            .field("slow_query_retention", &self.slow_query_retention)
+            .field("n_plus_one_detection", &self.n_plus_one_detection)
+            .field("n_plus_one_min_repeats", &self.n_plus_one_min_repeats)
+            .field("n_plus_one_retention", &self.n_plus_one_retention)
+            .field("idle_timeout_seconds", &self.idle_timeout_seconds)
+            .field("max_lifetime_seconds", &self.max_lifetime_seconds)
+            .field("models", &self.models)
+            .finish()
+    }
 }
 
 impl Default for DatabaseConfig {
@@ -522,6 +583,8 @@ impl Default for WebSocketConfig {
 #[serde(default)]
 pub struct JobsConfig {
     pub queue: QueueId,
+    /// Maximum number of *total attempts* per job before dead-lettering
+    /// (like Laravel's `tries`); `1` means no retry after the first failure.
     pub max_retries: u32,
     pub poll_interval_ms: u64,
     pub lease_ttl_ms: u64,
@@ -1227,26 +1290,46 @@ fn merge_value(target: &mut Value, source: Value) {
     }
 }
 
+/// Explicit namespace for config env overrides (e.g. `FORGE__SERVER__PORT`).
+/// Unprefixed `__`-delimited variables are still honored for compatibility,
+/// but any ambient process variable containing `__` can collide with them;
+/// the prefix is the collision-proof form and wins when both are set.
+const ENV_OVERLAY_PREFIX: &str = "FORGE__";
+
 fn overlay_env_vars(root: &mut Value) -> Result<()> {
+    let mut prefixed = Vec::new();
     for (key, raw_value) in std::env::vars() {
+        if let Some(stripped) = key.strip_prefix(ENV_OVERLAY_PREFIX) {
+            prefixed.push((stripped.to_string(), raw_value));
+            continue;
+        }
         if !key.contains("__") {
             continue;
         }
-
-        let segments = key
-            .split("__")
-            .filter(|segment| !segment.is_empty())
-            .map(|segment| segment.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-
-        if segments.is_empty() {
-            continue;
-        }
-
-        let value = parse_env_value(&raw_value)?;
-        set_value(root, &segments, value);
+        apply_env_overlay(root, &key, &raw_value)?;
     }
 
+    // Applied last so the explicit namespace overrides unprefixed variables.
+    for (key, raw_value) in prefixed {
+        apply_env_overlay(root, &key, &raw_value)?;
+    }
+
+    Ok(())
+}
+
+fn apply_env_overlay(root: &mut Value, key: &str, raw_value: &str) -> Result<()> {
+    let segments = key
+        .split("__")
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if segments.is_empty() {
+        return Ok(());
+    }
+
+    let value = parse_env_value(raw_value)?;
+    set_value(root, &segments, value);
     Ok(())
 }
 
@@ -1385,6 +1468,24 @@ mod tests {
 
         std::env::remove_var("SERVER__PORT");
         assert_eq!(server.port, 4123);
+    }
+
+    #[test]
+    fn forge_prefixed_env_overlay_wins_over_unprefixed() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("SERVER__PORT", "4123");
+        std::env::set_var("FORGE__SERVER__PORT", "5123");
+        let directory = tempdir().unwrap();
+        for (filename, content) in super::published::render_sample_config_files() {
+            fs::write(directory.path().join(filename), content).unwrap();
+        }
+
+        let config = ConfigRepository::from_dir(directory.path()).unwrap();
+        let server = config.server().unwrap();
+
+        std::env::remove_var("SERVER__PORT");
+        std::env::remove_var("FORGE__SERVER__PORT");
+        assert_eq!(server.port, 5123);
     }
 
     #[test]

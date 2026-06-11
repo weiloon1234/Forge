@@ -246,6 +246,10 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + Debug + 'static {
 
     async fn handle(&self, context: JobContext) -> Result<()>;
 
+    /// Maximum number of *total attempts* before the job is dead-lettered
+    /// (like Laravel's `tries`): `Some(1)` dead-letters on the first failure
+    /// with no retry, `Some(3)` allows two retries after the initial attempt.
+    /// `None` falls back to the `jobs.max_retries` config value.
     fn max_retries(&self) -> Option<u32> {
         None
     }
@@ -1212,12 +1216,30 @@ impl Worker {
     }
 
     async fn process_claimed_job(&self, lease: ClaimedJobLease) -> Result<()> {
-        let heartbeat = self.spawn_lease_heartbeat(lease.queue.clone(), lease.token.clone());
-        let result = self.process_claimed_job_with_active_lease(lease).await;
+        let queue = lease.queue.clone();
+        let token = lease.token.clone();
+        let heartbeat = self.spawn_lease_heartbeat(queue.clone(), token.clone());
+        let lost_signal = heartbeat.lease_lost_signal();
+        // Cancel the job future the moment the lease can no longer be proven:
+        // letting it run past lease expiry means another worker can claim the
+        // redelivered job and execute it concurrently.
+        let result = tokio::select! {
+            result = self.process_claimed_job_with_active_lease(lease) => Some(result),
+            _ = lease_lost(lost_signal) => None,
+        };
         heartbeat.shutdown().await;
         match result {
-            Ok(()) => Ok(()),
-            Err(error) => {
+            None => {
+                tracing::warn!(
+                    target: "forge.worker",
+                    queue = %queue,
+                    token = %token,
+                    "Job execution cancelled after lease loss; the job will be redelivered"
+                );
+                Ok(())
+            }
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => {
                 error.log_recovery();
                 let ClaimedJobInfraError { error, .. } = *error;
                 Err(error)
@@ -1938,30 +1960,63 @@ impl Drop for WorkerJobTask {
 struct LeaseHeartbeat {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
+    lease_lost: tokio::sync::watch::Receiver<bool>,
 }
 
 impl LeaseHeartbeat {
     fn spawn(runtime: Arc<JobRuntime>, queue: QueueId, token: String) -> Self {
         let heartbeat_every = runtime.lease_heartbeat_interval();
+        let lease_ttl = runtime.lease_ttl();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let (lost_tx, lost_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_every);
+            let mut last_renewed = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     _ = interval.tick() => {
                         match runtime.renew_job_lease(&queue, &token).await {
-                            Ok(true) => {}
-                            Ok(false) => break,
+                            Ok(true) => {
+                                last_renewed = tokio::time::Instant::now();
+                            }
+                            Ok(false) => {
+                                // The lease is definitively gone (expired or
+                                // claimed elsewhere). Signal the executor so
+                                // the job stops instead of running
+                                // concurrently with its redelivery.
+                                tracing::warn!(
+                                    target: "forge.worker",
+                                    queue = %queue,
+                                    token = %token,
+                                    "Job lease no longer held; cancelling execution"
+                                );
+                                let _ = lost_tx.send(true);
+                                break;
+                            }
                             Err(error) => {
+                                // Transient backend error: keep retrying while
+                                // the last successful renewal still covers the
+                                // lease TTL; past that we can no longer prove
+                                // ownership and must stop the job.
+                                if last_renewed.elapsed() >= lease_ttl {
+                                    tracing::warn!(
+                                        target: "forge.worker",
+                                        queue = %queue,
+                                        token = %token,
+                                        error = %error,
+                                        "Job lease presumed expired after repeated renewal failures; cancelling execution"
+                                    );
+                                    let _ = lost_tx.send(true);
+                                    break;
+                                }
                                 tracing::warn!(
                                     target: "forge.worker",
                                     queue = %queue,
                                     token = %token,
                                     error = %error,
-                                    "Failed to renew lease"
+                                    "Failed to renew lease; will retry"
                                 );
-                                break;
                             }
                         }
                     }
@@ -1972,7 +2027,12 @@ impl LeaseHeartbeat {
         Self {
             shutdown: Some(shutdown_tx),
             handle: Some(handle),
+            lease_lost: lost_rx,
         }
+    }
+
+    fn lease_lost_signal(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.lease_lost.clone()
     }
 
     async fn shutdown(mut self) {
@@ -1982,6 +2042,19 @@ impl LeaseHeartbeat {
         if let Some(handle) = self.handle.take() {
             handle.abort();
             let _ = handle.await;
+        }
+    }
+}
+
+/// Resolves once the heartbeat reports the lease as lost. Never resolves if
+/// the heartbeat ends without signalling loss (e.g. normal shutdown).
+async fn lease_lost(mut signal: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *signal.borrow() {
+            return;
+        }
+        if signal.changed().await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 }

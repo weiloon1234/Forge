@@ -188,6 +188,13 @@ impl EventBus {
         }
     }
 
+    /// Dispatch an event to its registered listeners, in registration order.
+    ///
+    /// Listeners run sequentially and the first listener error (or panic,
+    /// surfaced as an error) stops dispatch: listeners registered after the
+    /// failing one are not invoked, mirroring Laravel's synchronous listener
+    /// semantics. Listeners that must run independently of each other should
+    /// not propagate errors, or should be modeled as queued jobs instead.
     pub async fn dispatch<E>(&self, event: E) -> Result<()>
     where
         E: Event,

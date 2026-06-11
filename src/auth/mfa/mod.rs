@@ -7,7 +7,7 @@ use axum::Json;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha1::Sha1;
 
 use crate::auth::lockout::LoginThrottle;
 use crate::auth::token::TokenResponse;
@@ -18,7 +18,10 @@ use crate::events::Event;
 use crate::foundation::{AppContext, Error, Result};
 use crate::support::{EventId, GuardId, HashManager, RoleId, Token};
 
-type HmacSha256 = Hmac<Sha256>;
+// RFC 6238 TOTP uses HMAC-SHA1; mainstream authenticator apps (Google
+// Authenticator, Authy, etc.) ignore the otpauth `algorithm` parameter and
+// always compute SHA1, so any other hash breaks code verification.
+type HmacSha1 = Hmac<Sha1>;
 
 const TOTP_PERIOD_SECONDS: i64 = 30;
 const TOTP_DIGITS: u32 = 6;
@@ -436,7 +439,7 @@ impl MfaFactor for TotpFactor {
         Ok(EnrollChallenge {
             secret: secret.clone(),
             otpauth_url: format!(
-                "otpauth://totp/{}?secret={}&issuer={}&algorithm=SHA256&digits={}&period={}",
+                "otpauth://totp/{}?secret={}&issuer={}&algorithm=SHA1&digits={}&period={}",
                 percent_encode(&label),
                 secret,
                 percent_encode(&issuer),
@@ -638,7 +641,7 @@ fn current_totp_step(now: chrono::DateTime<Utc>) -> i64 {
 
 fn totp_code(secret: &[u8], step: i64) -> Result<String> {
     let counter = (step as u64).to_be_bytes();
-    let mut mac = HmacSha256::new_from_slice(secret).map_err(Error::other)?;
+    let mut mac = HmacSha1::new_from_slice(secret).map_err(Error::other)?;
     mac.update(&counter);
     let result = mac.finalize().into_bytes();
     let offset = (result[result.len() - 1] & 0x0f) as usize;
@@ -759,6 +762,24 @@ mod tests {
         let code = totp_code(&secret, 1_000).unwrap();
         assert_eq!(code.len(), 6);
         assert!(code.chars().all(|ch| ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn totp_code_matches_rfc_6238_sha1_vectors() {
+        // RFC 6238 Appendix B vectors (SHA1 secret, 8-digit codes truncated
+        // to the framework's 6 digits). Guards against drifting off the
+        // algorithm that real authenticator apps implement.
+        let secret = b"12345678901234567890";
+        for (time, expected) in [
+            (59i64, "287082"),
+            (1_111_111_109, "081804"),
+            (1_111_111_111, "050471"),
+            (1_234_567_890, "005924"),
+            (2_000_000_000, "279037"),
+        ] {
+            let step = time / TOTP_PERIOD_SECONDS;
+            assert_eq!(totp_code(secret, step).unwrap(), expected);
+        }
     }
 
     #[test]

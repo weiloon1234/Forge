@@ -89,16 +89,17 @@ impl EmailMessage {
     ///     .template("welcome", "templates/emails", json!({
     ///         "name": user.name,
     ///         "app_name": "MyApp",
-    ///     }))?;
+    ///     }))
+    ///     .await?;
     /// ```
-    pub fn template(
+    pub async fn template(
         self,
         template_name: &str,
         template_path: &str,
         variables: serde_json::Value,
     ) -> crate::foundation::Result<Self> {
         let renderer = crate::email::template::TemplateRenderer::new(template_path);
-        let rendered = renderer.render(template_name, &variables)?;
+        let rendered = renderer.render_async(template_name, &variables).await?;
         let mut msg = self;
         if let Some(html) = rendered.html {
             msg = msg.html_body(html);

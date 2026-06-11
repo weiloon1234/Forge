@@ -896,6 +896,8 @@ fn auth_policy_panic_error(policy: &PolicyId, panic: Box<dyn Any + Send>) -> Err
 
 #[derive(Clone, Default)]
 pub struct StaticBearerAuthenticator {
+    // Keyed by SHA-256 of the token: hashing the presented token before the
+    // lookup keeps plaintext comparison timing out of reach of callers.
     actors: Arc<HashMap<String, Actor>>,
 }
 
@@ -905,7 +907,8 @@ impl StaticBearerAuthenticator {
     }
 
     pub fn token(mut self, token: impl Into<String>, actor: Actor) -> Self {
-        Arc::make_mut(&mut self.actors).insert(token.into(), actor);
+        let hash = crate::support::sha256_hex_str(&token.into());
+        Arc::make_mut(&mut self.actors).insert(hash, actor);
         self
     }
 }
@@ -913,7 +916,8 @@ impl StaticBearerAuthenticator {
 #[async_trait]
 impl BearerAuthenticator for StaticBearerAuthenticator {
     async fn authenticate(&self, token: &str) -> Result<Option<Actor>> {
-        Ok(self.actors.get(token).cloned())
+        let hash = crate::support::sha256_hex_str(token);
+        Ok(self.actors.get(&hash).cloned())
     }
 }
 

@@ -39,7 +39,7 @@ pub(crate) fn is_sensitive_key(key: &str) -> bool {
         || normalized.contains("-key")
 }
 
-fn redact_url_credentials(input: &str) -> String {
+pub(crate) fn redact_url_credentials(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
 

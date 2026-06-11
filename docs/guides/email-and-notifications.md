@@ -47,7 +47,8 @@ let msg = EmailMessage::new("Your order shipped")
     .template("order_shipped", "templates/emails", json!({
         "order_id": "ORD-123",
         "tracking": { "number": "TRK-456" }
-    }))?;
+    }))
+    .await?;
 ```
 
 Dot-notation works for nested values: `{{tracking.number}}`.

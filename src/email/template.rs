@@ -73,6 +73,26 @@ impl TemplateRenderer {
         Ok(RenderedTemplate { html, text })
     }
 
+    /// Render a template on Tokio's blocking thread pool.
+    ///
+    /// Use this from async contexts: [`render`](Self::render) reads template
+    /// files synchronously, which would stall the async runtime under load.
+    pub async fn render_async(
+        &self,
+        template_name: &str,
+        variables: &serde_json::Value,
+    ) -> Result<RenderedTemplate> {
+        let renderer = Self {
+            base_path: self.base_path.clone(),
+        };
+        let template_name = template_name.to_string();
+        let variables = variables.clone();
+        crate::support::run_blocking("email.template_render", move || {
+            renderer.render(&template_name, &variables)
+        })
+        .await
+    }
+
     /// Check if a template exists (either .html or .txt variant).
     pub fn exists(&self, template_name: &str) -> bool {
         if validate_template_name(template_name).is_err() {

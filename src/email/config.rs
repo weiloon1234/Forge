@@ -56,7 +56,7 @@ pub struct EmailFromConfig {
     pub name: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolvedSmtpConfig {
     pub host: String,
     pub port: u16,
@@ -64,6 +64,19 @@ pub struct ResolvedSmtpConfig {
     pub password: String,
     pub encryption: SmtpEncryption,
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for ResolvedSmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &crate::support::redaction::REDACTED)
+            .field("encryption", &self.encryption)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,10 +149,19 @@ impl ResolvedLogConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolvedResendConfig {
     pub api_key: String,
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for ResolvedResendConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedResendConfig")
+            .field("api_key", &crate::support::redaction::REDACTED)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl ResolvedResendConfig {
@@ -157,10 +179,19 @@ impl ResolvedResendConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolvedPostmarkConfig {
     pub server_token: String,
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for ResolvedPostmarkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedPostmarkConfig")
+            .field("server_token", &crate::support::redaction::REDACTED)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl ResolvedPostmarkConfig {
@@ -180,12 +211,23 @@ impl ResolvedPostmarkConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolvedMailgunConfig {
     pub domain: String,
     pub api_key: String,
     pub region: MailgunRegion,
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for ResolvedMailgunConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedMailgunConfig")
+            .field("domain", &self.domain)
+            .field("api_key", &crate::support::redaction::REDACTED)
+            .field("region", &self.region)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -228,12 +270,23 @@ impl ResolvedMailgunConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResolvedSesConfig {
     pub key: String,
     pub secret: String,
     pub region: String,
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for ResolvedSesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSesConfig")
+            .field("key", &self.key)
+            .field("secret", &crate::support::redaction::REDACTED)
+            .field("region", &self.region)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl ResolvedSesConfig {

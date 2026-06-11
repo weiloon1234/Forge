@@ -637,6 +637,7 @@ impl CompilerState {
                     ));
                 }
             };
+            validate_extract_field(field)?;
 
             return Ok(format!(
                 "EXTRACT({} FROM {})",
@@ -694,7 +695,10 @@ impl CompilerState {
                 BinaryOperator::Multiply => "*",
                 BinaryOperator::Divide => "/",
                 BinaryOperator::Concat => "||",
-                BinaryOperator::Custom(operator) => operator.as_str(),
+                BinaryOperator::Custom(operator) => {
+                    validate_custom_operator(operator)?;
+                    operator.as_str()
+                }
             },
             self.compile_expr(&expr.right)?,
         ))
@@ -1120,6 +1124,67 @@ fn quote_identifier(identifier: &str) -> String {
         .join(".")
 }
 
+/// Fields accepted by Postgres `EXTRACT(<field> FROM ...)`. The field is a
+/// keyword token, not a bindable value or quotable identifier, so it must be
+/// validated against this list before being written into the SQL text.
+const EXTRACT_FIELDS: &[&str] = &[
+    "century",
+    "day",
+    "decade",
+    "dow",
+    "doy",
+    "epoch",
+    "hour",
+    "isodow",
+    "isoyear",
+    "julian",
+    "microseconds",
+    "millennium",
+    "milliseconds",
+    "minute",
+    "month",
+    "quarter",
+    "second",
+    "timezone",
+    "timezone_hour",
+    "timezone_minute",
+    "week",
+    "year",
+];
+
+fn validate_extract_field(field: &str) -> Result<()> {
+    if EXTRACT_FIELDS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(field))
+    {
+        Ok(())
+    } else {
+        Err(Error::message(format!(
+            "EXTRACT field `{}` is not a recognized date/time field",
+            field
+        )))
+    }
+}
+
+/// Custom operators are written into the SQL text verbatim, so restrict them
+/// to characters that can form Postgres operators or keyword operators
+/// (e.g. `->>`, `@>`, `ILIKE`, `IS DISTINCT FROM`) and reject anything that
+/// could open a comment or break out of the expression.
+fn validate_custom_operator(operator: &str) -> Result<()> {
+    const OPERATOR_SYMBOLS: &str = "+-*/<>=~!@#%^&|`?";
+    let valid_chars = !operator.is_empty()
+        && operator.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || ch == '_' || ch == ' ' || OPERATOR_SYMBOLS.contains(ch)
+        });
+    if !valid_chars || operator.contains("--") || operator.contains("/*") {
+        return Err(Error::message(format!(
+            "custom SQL operator `{}` contains unsupported characters",
+            operator
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CompiledSql, PostgresCompiler};
@@ -1135,6 +1200,28 @@ mod tests {
 
     fn compile(ast: QueryAst) -> CompiledSql {
         PostgresCompiler::compile(&ast).unwrap()
+    }
+
+    #[test]
+    fn extract_field_is_validated_against_known_fields() {
+        assert!(super::validate_extract_field("year").is_ok());
+        assert!(super::validate_extract_field("EPOCH").is_ok());
+        assert!(super::validate_extract_field("timezone_hour").is_ok());
+        assert!(super::validate_extract_field("year FROM now()); DROP TABLE users; --").is_err());
+        assert!(super::validate_extract_field("").is_err());
+    }
+
+    #[test]
+    fn custom_operator_rejects_injection_shaped_input() {
+        assert!(super::validate_custom_operator("->>").is_ok());
+        assert!(super::validate_custom_operator("@>").is_ok());
+        assert!(super::validate_custom_operator("ILIKE").is_ok());
+        assert!(super::validate_custom_operator("IS DISTINCT FROM").is_ok());
+        assert!(super::validate_custom_operator("").is_err());
+        assert!(super::validate_custom_operator("= 1; DROP TABLE users; --").is_err());
+        assert!(super::validate_custom_operator("--").is_err());
+        assert!(super::validate_custom_operator("/*").is_err());
+        assert!(super::validate_custom_operator("= (SELECT 1)").is_err());
     }
 
     #[test]

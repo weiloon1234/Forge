@@ -6,6 +6,24 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 
 ## [Unreleased]
 
+### Security
+
+- TOTP MFA now uses HMAC-SHA1 per RFC 6238 so codes verify against mainstream authenticator apps (Google Authenticator, Authy, 1Password, etc.), which ignore the otpauth `algorithm` parameter and always compute SHA1. **TOTP factors enrolled on previous builds generate different codes and must be re-enrolled.**
+- `min_numeric`, `max_numeric`, and `between` validation rules now reject values that fail to parse as a number, as well as `NaN` and infinities; previously non-numeric input (including `"NaN"`, which defeats all numeric comparisons) silently passed bound checks. The `numeric` rule is now parse-based: malformed shapes like `"1.2.3"` are rejected, and scientific notation such as `"1e10"` is accepted.
+- The Postgres compiler now validates `EXTRACT` field names against the known date/time fields and restricts `Sql::op` custom operators to legal operator characters, closing a raw-SQL interpolation path if either was ever fed untrusted input.
+- Password-reset and email-verification tokens now enforce their TTL inside the consuming `DELETE`, so presenting an expired token no longer destroys it; expired and unknown tokens return the same "invalid or expired" message.
+- `StaticBearerAuthenticator` stores and compares SHA-256 digests of its tokens instead of plaintext map keys, removing token-comparison timing as a side channel.
+- Secret-bearing config structs (`AppConfig.signing_key`, SMTP/Resend/Postmark/Mailgun/SES credentials, S3 secret) redact their secrets in `Debug` output, and `DatabaseConfig`/`RedisConfig` redact URL credentials, so `{:?}` logging can no longer leak credentials.
+
+### Fixed
+
+- A worker whose job-lease heartbeat fails (lease expired, claimed elsewhere, or backend unreachable past the lease TTL) now cancels the running job instead of letting it race the redelivered copy on another worker. Transient renewal errors are retried while the last successful renewal still covers the lease TTL.
+- Plugins that booted successfully are now shut down (in reverse order) when a later plugin's `boot()` fails, so resources acquired during partial bootstrap no longer leak.
+- The in-memory scheduler leadership backend no longer renews an already-expired lease; like the Redis backend, the previous holder must win a fresh election, preventing split-brain in single-process and test setups.
+- The WebSocket pub/sub task now resubscribes with exponential backoff when its backend subscription ends or fails, instead of going permanently silent while publishes keep succeeding; dropping the server also aborts the task instead of leaking it.
+- Scheduler leadership state uses acquire/release atomic ordering, and dropping the scheduler or a schedule overlap-lock guard outside a Tokio runtime now logs a warning instead of silently leaving the lock to lapse via TTL.
+- Image dimension validation streams the upload from disk on the blocking thread pool instead of reading the entire file into memory on the async runtime.
+
 ### Added
 
 - Datatable relation filters: model datatables can opt in to typed relation-backed filters with `Datatable::relation_filters()`, `DatatableRelationFilter`, and `DatatableRelationColumn`.
@@ -28,6 +46,10 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 
 ### Changed
 
+- Config env overrides now support an explicit `FORGE__` namespace (e.g. `FORGE__SERVER__PORT`), which is stripped before applying and wins over the unprefixed form. Unprefixed `__`-delimited variables keep working; the prefix avoids collisions with ambient process variables.
+- `TemplateRenderer` gained `render_async`, which renders on Tokio's blocking thread pool; `EmailMessage::template(...)` uses it internally.
+- `Job::max_retries` and `jobs.max_retries` are now documented as the maximum number of *total attempts* (like Laravel's `tries`): `1` dead-letters on the first failure with no retry.
+- `EventManager::dispatch` is now documented as sequential with stop-on-first-error semantics, mirroring Laravel's synchronous listeners.
 - Database scaffold command helpers moved out of the migration lifecycle module into a dedicated scaffold module.
 - Datatable blueprint/status documentation now reflects implemented JSON, filter, sort, download, export, registry, legacy query-param, and relation-filter acceptance coverage.
 - Consumer starter documentation now recommends the split bootstrap layout proven by the blueprint app fixture.
@@ -47,4 +69,7 @@ The format is inspired by Keep a Changelog, adapted for Forge's pre-`1.0` releas
 
 ### Breaking
 
+- `EmailMessage::template(...)` is now `async` (template files are read off the async runtime); add `.await` before the `?`.
+- TOTP MFA switched from HMAC-SHA256 to RFC 6238 HMAC-SHA1 (see Security); previously enrolled TOTP factors must be re-enrolled.
+- Validation: `min_numeric`, `max_numeric`, `between`, and `numeric` are stricter (see Security); requests that previously passed with non-numeric values in bounded fields now fail validation.
 - WebSocket `message` and `client_event` frames now require an active matching channel/room subscription before handlers or client-event relay run.
